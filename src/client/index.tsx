@@ -66,7 +66,7 @@ function App() {
       mapSamples: 16000,
       mapBrightness: 6,
       //      baseColor: [0.3, 0.3, 0.3], // dark gray
-  baseColor: [239/255, 191/255, 4/255], // #efbf04 gold
+      baseColor: [212/255, 175/255, 55/255], // #d4af37 gold
       markerColor: [0.8, 0.1, 0.1],
       glowColor: [0.2, 0.2, 0.2],
       markers: [],
