@@ -91,7 +91,7 @@ function App() {
 
   return (
     <div className="App">
-      <h1><a href="https://federalkey.org">Market</a></h1>
+      <h1><a href="https://federalkey.org">MARKETPLACE</a></h1>
       {counter !== 0 ? (
         <p>
           <b>{counter}</b> {counter === 1 ? "person" : "people"} connected.
