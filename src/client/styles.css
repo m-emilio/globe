@@ -419,6 +419,22 @@ b {
   color: #00ff88;
 }
 
+.activity-location {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(0, 217, 255, 0.1);
+}
+
+.location-text {
+  color: #999;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
 .activity-time {
   color: #666;
   font-size: 10px;

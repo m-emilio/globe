@@ -11,6 +11,10 @@ interface ActivityEvent {
   type: "connect" | "disconnect";
   timestamp: number;
   userName: string;
+  ip?: string;
+  country?: string;
+  city?: string;
+  org?: string;
 }
 
 function App() {
@@ -49,6 +53,10 @@ function App() {
             type: "connect",
             timestamp: Date.now(),
             userName: isYou ? "You" : `User ${message.position.id.slice(0, 8)}`,
+            ip: message.position.ip,
+            country: message.position.country,
+            city: message.position.city,
+            org: message.position.org,
           },
           ...prev.slice(0, 49), // Keep last 50 events
         ]);
@@ -124,6 +132,19 @@ function App() {
                   <span className="activity-action">
                     {event.type === "connect" ? "connected" : "disconnected"}
                   </span>
+                  {event.type === "connect" && (event.city || event.country || event.ip || event.org) && (
+                    <div className="activity-location">
+                      {event.city && event.country && (
+                        <span className="location-text">📍 {event.city}, {event.country}</span>
+                      )}
+                      {event.ip && (
+                        <span className="location-text">🌐 {event.ip}</span>
+                      )}
+                      {event.org && !event.ip && (
+                        <span className="location-text">🏢 {event.org}</span>
+                      )}
+                    </div>
+                  )}
                   <span className="activity-time">
                     {Math.floor((Date.now() - event.timestamp) / 1000)}s ago
                   </span>

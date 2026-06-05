@@ -20,10 +20,19 @@ export class Globe extends Server {
       console.warn(`Missing position information for connection ${conn.id}`);
       return;
     }
+    const ip = ctx.request.cf?.clientIp as string | undefined;
+    const country = ctx.request.cf?.country as string | undefined;
+    const city = ctx.request.cf?.city as string | undefined;
+    const org = ctx.request.cf?.org as string | undefined;
+    
     const position = {
       lat: parseFloat(latitude),
       lng: parseFloat(longitude),
       id: conn.id,
+      ip,
+      country,
+      city,
+      org,
     };
     // And save this on the connection's state
     conn.setState({
