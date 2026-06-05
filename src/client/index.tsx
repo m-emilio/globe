@@ -9,27 +9,36 @@ import type { OutgoingMessage } from "../shared";
 
 function App() {
   const [showAbout, setShowAbout] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
 
   return (
     <div className="App">
-      <Cobe />
-      
-      {/* Menu Buttons */}
-      <div className="menu-buttons">
-        <button 
-          className="menu-btn" 
-          onClick={() => setShowAbout(true)}
-          title="About & Credits"
-        >
-          ℹ️
-        </button>
-        <button 
-          className="menu-btn" 
-          onClick={() => window.location.href = "https://cvefeed.io/dashboard/"}
-          title="CVE Feed Dashboard"
-        >
-          📊
-        </button>
+      {/* Top Navigation Bar */}
+      <nav className="nav-bar">
+        <div className="nav-left">
+          <h1 className="nav-title">GLOBE <span className="nav-subtitle">// OPS</span></h1>
+        </div>
+        
+        <div className="nav-center">
+          <button className="nav-btn" onClick={() => setShowAbout(true)}>
+            ABOUT
+          </button>
+          <button className="nav-btn" onClick={() => window.location.href = "https://cvefeed.io/dashboard/"}>
+            CVE FEED
+          </button>
+        </div>
+        
+        <div className="nav-right">
+          <button className="nav-menu-btn" onClick={() => setShowMenu(!showMenu)}>
+            <span>MENU</span>
+            <span className="menu-icon">▼</span>
+          </button>
+        </div>
+      </nav>
+
+      {/* Main Content */}
+      <div className="main-content">
+        <Cobe />
       </div>
       
       {/* About Modal */}
@@ -46,6 +55,16 @@ function App() {
               <li><a href="https://federalkey.org" target="_blank" rel="noopener noreferrer">FederalKey</a></li>
             </ul>
           </div>
+        </div>
+      )}
+      
+      {/* Menu Dropdown */}
+      {showMenu && (
+        <div className="menu-dropdown">
+          <a href="#" className="menu-item">Dashboard</a>
+          <a href="#" className="menu-item">Settings</a>
+          <a href="#" className="menu-item">Help</a>
+          <a href="#" className="menu-item">Support</a>
         </div>
       )}
     </div>
