@@ -48,3 +48,141 @@ a {
   text-underline-offset: 3px;
   text-decoration-color: #555;
 }
+
+/* Menu Buttons - Low data mobile friendly */
+.menu-buttons {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  gap: 10px;
+  z-index: 1000;
+}
+
+.menu-btn {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  border: 1px solid #555;
+  background-color: #1a1a1a;
+  color: white;
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: none;
+}
+
+.menu-btn:active {
+  background-color: #333;
+  border-color: #d4af37;
+}
+
+@media (hover: hover) {
+  .menu-btn:hover {
+    background-color: #2a2a2a;
+    border-color: #d4af37;
+  }
+}
+
+/* Modal Overlay */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 20px;
+}
+
+.modal-content {
+  background-color: #1a1a1a;
+  border: 1px solid #555;
+  border-radius: 8px;
+  padding: 30px;
+  max-width: 500px;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+  position: relative;
+}
+
+.modal-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: none;
+  color: #999;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-close:active {
+  color: #d4af37;
+}
+
+.modal-content h2 {
+  margin-top: 0;
+  color: #d4af37;
+}
+
+.modal-content p {
+  color: #999;
+  margin: 15px 0;
+}
+
+.credits-list {
+  list-style: none;
+  padding: 0;
+  text-align: left;
+}
+
+.credits-list li {
+  padding: 8px 0;
+  border-bottom: 1px solid #333;
+}
+
+.credits-list li:last-child {
+  border-bottom: none;
+}
+
+.credits-list a {
+  color: #d4af37;
+  text-decoration: none;
+}
+
+.credits-list a:active {
+  color: #fff;
+}
+
+@media (max-width: 600px) {
+  .menu-buttons {
+    bottom: 10px;
+    right: 10px;
+    gap: 8px;
+  }
+  
+  .menu-btn {
+    width: 45px;
+    height: 45px;
+    font-size: 18px;
+  }
+  
+  .modal-content {
+    padding: 20px;
+    border-radius: 6px;
+  }
+}

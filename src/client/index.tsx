@@ -1,24 +1,53 @@
 import "./styles.css";
 
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Cobe } from "./CobeGlobe";
 
 // The type of messages we'll be receiving from the server
 import type { OutgoingMessage } from "../shared";
-import type { LegacyRef } from "react";
 
 function App() {
+  const [showAbout, setShowAbout] = useState(false);
+
   return (
     <div className="App">
-      <h1><a href="https://104041.webmail.dynadot.com/user/signin.html">WEBMAIL</a></h1>
       <Cobe />
-      <p>
-        Powered by <a href="https://cobe.vercel.app/">Cobe</a>,{" "}
-        <a href="https://www.npmjs.com/package/phenomenon">Phenomenon</a>,{" "}
-        <a href="https://npmjs.com/package/partyserver/">PartyServer</a> and{" "}
-        <a href="https://federalkey.org">FederalKey</a>
-      </p>
+      
+      {/* Menu Buttons */}
+      <div className="menu-buttons">
+        <button 
+          className="menu-btn" 
+          onClick={() => setShowAbout(true)}
+          title="About & Credits"
+        >
+          ℹ️
+        </button>
+        <button 
+          className="menu-btn" 
+          onClick={() => window.location.href = "https://cvefeed.io/dashboard/"}
+          title="CVE Feed Dashboard"
+        >
+          📊
+        </button>
+      </div>
+      
+      {/* About Modal */}
+      {showAbout && (
+        <div className="modal-overlay" onClick={() => setShowAbout(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowAbout(false)}>✕</button>
+            <h2>About & Credits</h2>
+            <p>Interactive globe powered by:</p>
+            <ul className="credits-list">
+              <li><a href="https://cobe.vercel.app/" target="_blank" rel="noopener noreferrer">Cobe</a></li>
+              <li><a href="https://www.npmjs.com/package/phenomenon" target="_blank" rel="noopener noreferrer">Phenomenon</a></li>
+              <li><a href="https://npmjs.com/package/partyserver/" target="_blank" rel="noopener noreferrer">PartyServer</a></li>
+              <li><a href="https://federalkey.org" target="_blank" rel="noopener noreferrer">FederalKey</a></li>
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
