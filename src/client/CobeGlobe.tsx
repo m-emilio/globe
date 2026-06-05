@@ -1,10 +1,19 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef } from "react";
 import createGlobe from "cobe";
 import { useSpring } from "react-spring";
-import usePartySocket from "partysocket/react";
-import type { OutgoingMessage } from "../shared";
 
-export function Cobe() {
+interface CobeProps {
+  counter: number;
+  positions: Map<
+    string,
+    {
+      location: [number, number];
+      size: number;
+    }
+  >;
+}
+
+export function Cobe({ counter, positions }: CobeProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointerInteracting = useRef<number | null>(null);
   const pointerInteractionMovement = useRef(0);
@@ -17,34 +26,6 @@ export function Cobe() {
       precision: 0.001,
     },
   }));
-  // Multiplayer state
-  const [counter, setCounter] = useState(0);
-  const positions = useRef<
-    Map<
-      string,
-      {
-        location: [number, number];
-        size: number;
-      }
-    >
-  >(new Map());
-  const socket = usePartySocket({
-    room: "default",
-    party: "globe",
-    onMessage(evt) {
-      const message = JSON.parse(evt.data as string) as OutgoingMessage;
-      if (message.type === "add-marker") {
-        positions.current.set(message.position.id, {
-          location: [message.position.lat, message.position.lng],
-          size: message.position.id === socket.id ? 0.1 : 0.05,
-        });
-        setCounter((c) => c + 1);
-      } else {
-        positions.current.delete(message.id);
-        setCounter((c) => c - 1);
-      }
-    },
-  });
 
   useEffect(() => {
     let phi = 0;
@@ -85,7 +66,7 @@ export function Cobe() {
         opacity: 0.7,
         onRender: (state) => {
           // Multiplayer markers
-          state.markers = [...positions.current.values()];
+          state.markers = [...positions.values()];
           if (!pointerInteracting.current) {
             phi += 0.005;
           }
