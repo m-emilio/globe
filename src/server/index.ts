@@ -60,7 +60,7 @@ export class Globe extends Server {
           );
         }
       } catch {
-        this.onCloseOrError(conn);
+        this.onCloseOrError(connection);
       }
     }
   }
