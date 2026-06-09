@@ -42,14 +42,18 @@ export class Globe extends Server {
     // Now, let's send the entire state to the new connection
     for (const connection of this.getConnections<ConnectionState>()) {
       try {
+        const state = connection.state as ConnectionState | undefined;
+
+        if (!state?.position) {
+          continue;
+        }
+
         conn.send(
           JSON.stringify({
-            type: "add-marker",
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            const state = connection.state as ConnectionState | undefined;
-              if (!state?.position) continue;
-          } satisfies OutgoingMessage),
-        );
+              type: "add-marker",
+              position: state.position,
+        } satisfies OutgoingMessage),
+      );
 
         // And let's send the new connection's position to all other connections
         if (connection.id !== conn.id) {
