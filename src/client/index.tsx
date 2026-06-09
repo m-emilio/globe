@@ -138,7 +138,7 @@ function App() {
                         <span className="location-text">📍 {event.city}, {event.country}</span>
                       )}
                       {event.ip && (
-                        <span className="location-text">🌐 {event.ip}</span>
+                        <span className="location-text">🇺🇳 {event.ip}</span>
                       )}
                       {event.org && !event.ip && (
                         <span className="location-text">🏢 {event.org}</span>
