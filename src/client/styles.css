@@ -49,8 +49,8 @@ b {
   left: 0;
   right: 0;
   height: 70px;
-  background-color: #d4af37;
-  border-bottom: 1px solid #00d9ff;
+  background-color: #000000;
+  border-bottom: 1px solid #8A6F48;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -65,7 +65,7 @@ b {
 
 .nav-title {
   margin: 0;
-  color: #00d9ff;
+  color: #8A6F48;
   font-size: 20px;
   font-weight: bold;
   letter-spacing: 2px;
