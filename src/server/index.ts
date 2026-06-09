@@ -46,7 +46,8 @@ export class Globe extends Server {
           JSON.stringify({
             type: "add-marker",
             // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            position: connection.state!.position,
+            const state = connection.state as ConnectionState | undefined;
+              if (!state?.position) continue;
           } satisfies OutgoingMessage),
         );
 
