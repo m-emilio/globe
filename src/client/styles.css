@@ -285,8 +285,8 @@ b {
   right: 30px;
   width: 320px;
   max-height: 500px;
-  background-color: #0a0e27;
-  border: 1.5px solid #00d9ff;
+  background-color: transparent;
+  border: 1.5px solid #8A6F48;
   border-radius: 2px;
   display: flex;
   flex-direction: column;
@@ -296,7 +296,7 @@ b {
 
 .activity-header {
   padding: 15px 20px;
-  border-bottom: 1.5px solid #00d9ff;
+  border-bottom: 1.5px solid #8A6F48;
   display: flex;
   justify-content: space-between;
   align-items: center;
