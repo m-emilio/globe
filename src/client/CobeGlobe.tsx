@@ -4,6 +4,8 @@ import { useSpring } from "react-spring";
 
 interface CobeProps {
   counter: number;
+  glowColor: [number, number, number];
+  glowCssColor: string;
   positions: Map<
     string,
     {
@@ -13,8 +15,9 @@ interface CobeProps {
   >;
 }
 
-export function Cobe({ counter, positions }: CobeProps) {
+export function Cobe({ counter, positions, glowColor, glowCssColor }: CobeProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const glowColorRef = useRef(glowColor);
   const pointerInteracting = useRef<number | null>(null);
   const pointerInteractionMovement = useRef(0);
   const [{ r }, api] = useSpring(() => ({
@@ -26,6 +29,10 @@ export function Cobe({ counter, positions }: CobeProps) {
       precision: 0.001,
     },
   }));
+
+  useEffect(() => {
+    glowColorRef.current = glowColor;
+  }, [glowColor]);
 
   useEffect(() => {
     let phi = 0;
@@ -61,12 +68,13 @@ export function Cobe({ counter, positions }: CobeProps) {
         mapBrightness: 6,
         baseColor: [212 / 255, 175 / 255, 55 / 255], // #d4af37 gold
         markerColor: [0.8, 0.1, 0.1],
-        glowColor: [0.2, 0.2, 0.2],
+        glowColor: glowColorRef.current,
         markers: [],
         opacity: 0.7,
         onRender: (state) => {
           // Multiplayer markers
           state.markers = [...positions.values()];
+          state.glowColor = glowColorRef.current;
           if (!pointerInteracting.current) {
             phi += 0.005;
           }
@@ -96,13 +104,28 @@ export function Cobe({ counter, positions }: CobeProps) {
         height: 400,
         margin: "40px auto",
         position: "relative",
-        background: "#222",
+        background: "transparent",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         borderRadius: "50%",
+        isolation: "isolate",
       }}
     >
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: -24,
+          borderRadius: "50%",
+          background: `radial-gradient(circle, ${glowCssColor} 0%, rgba(0, 0, 0, 0) 68%)`,
+          filter: "blur(26px)",
+          opacity: 0.78,
+          transform: "translateZ(0)",
+          transition: "background 450ms ease, opacity 450ms ease",
+          zIndex: 0,
+        }}
+      />
       <canvas
         ref={canvasRef}
         width={400}
@@ -137,10 +160,13 @@ export function Cobe({ counter, positions }: CobeProps) {
           width: 400,
           height: 400,
           cursor: "grab",
-          background: "#111",
+          background: "transparent",
           borderRadius: "50%",
           opacity: 1,
           transition: "opacity 1s ease",
+          display: "block",
+          position: "relative",
+          zIndex: 1,
         }}
       />
       {/* Multiplayer counter display */}
@@ -149,6 +175,7 @@ export function Cobe({ counter, positions }: CobeProps) {
         top: 10,
         left: 0,
         width: "100%",
+        zIndex: 2,
         textAlign: "center",
         color: "#fff",
         fontWeight: 600,

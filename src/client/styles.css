@@ -115,6 +115,52 @@ b {
 
 .nav-right {
   flex: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.weather-icon-btn {
+  width: 40px;
+  height: 36px;
+  border: 1.5px solid #00d9ff;
+  background-color: transparent;
+  color: #00d9ff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+  border-radius: 2px;
+}
+
+.weather-icon-btn:hover {
+  background-color: #00d9ff;
+  color: #0a0e27;
+  box-shadow: 0 0 10px #00d9ff;
+}
+
+.weather-icon-btn svg {
+  width: 23px;
+  height: 23px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.weather-icon-loading svg {
+  animation: weather-pulse 1s ease-in-out infinite;
+}
+
+@keyframes weather-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .nav-menu-btn {
@@ -184,6 +230,161 @@ b {
 .menu-item:hover {
   background-color: #00d9ff;
   color: #0a0e27;
+}
+
+/* Weather Panel */
+.weather-panel {
+  position: fixed;
+  top: 82px;
+  right: 30px;
+  width: min(330px, calc(100vw - 60px));
+  background: rgba(3, 6, 16, 0.96);
+  border: 1.5px solid #8A6F48;
+  border-radius: 4px;
+  z-index: 1002;
+  box-shadow: 0 0 30px rgba(0, 217, 255, 0.22);
+  font-family: 'Courier New', monospace;
+  overflow: hidden;
+  backdrop-filter: blur(12px);
+}
+
+.weather-panel-header {
+  padding: 13px 15px;
+  border-bottom: 1.5px solid #8A6F48;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  background: linear-gradient(90deg, rgba(0, 217, 255, 0.08) 0%, transparent 100%);
+}
+
+.weather-panel-header h3 {
+  margin: 0;
+  color: #00d9ff;
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.weather-panel-header span {
+  display: block;
+  margin-top: 2px;
+  color: #00ff88;
+  font-size: 10px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+}
+
+.weather-close {
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(0, 217, 255, 0.35);
+  background: transparent;
+  color: #00d9ff;
+  cursor: pointer;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+  font-weight: bold;
+}
+
+.weather-close:hover {
+  background: rgba(0, 217, 255, 0.12);
+}
+
+.weather-loading,
+.weather-error {
+  padding: 22px 16px;
+  color: #7e8a95;
+  font-size: 12px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+}
+
+.weather-error {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: #ff6b6b;
+}
+
+.weather-error button,
+.weather-footer button {
+  min-height: 30px;
+  border: 1px solid rgba(0, 217, 255, 0.35);
+  border-radius: 3px;
+  background: rgba(0, 217, 255, 0.03);
+  color: #00d9ff;
+  cursor: pointer;
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  font-weight: bold;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.weather-error button:hover,
+.weather-footer button:hover {
+  border-color: #00d9ff;
+  background: rgba(0, 217, 255, 0.12);
+}
+
+.weather-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.weather-metric {
+  min-width: 0;
+  padding: 13px 14px;
+  border-right: 1px solid rgba(0, 217, 255, 0.12);
+  border-bottom: 1px solid rgba(0, 217, 255, 0.12);
+  text-align: left;
+}
+
+.weather-metric:nth-child(2n) {
+  border-right: none;
+}
+
+.weather-metric span {
+  display: block;
+  color: #7e8a95;
+  font-size: 9px;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+}
+
+.weather-metric strong {
+  display: block;
+  color: #00ff88;
+  font-size: 14px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.weather-condition {
+  grid-column: span 2;
+  border-right: none;
+}
+
+.weather-condition-alert {
+  background: rgba(255, 107, 107, 0.08);
+}
+
+.weather-condition-alert strong {
+  color: #ff6b6b;
+}
+
+.weather-footer {
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #666;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
 }
 
 /* Modal Overlay */
@@ -644,6 +845,16 @@ b {
     padding: 6px 15px;
     font-size: 11px;
   }
+
+  .weather-icon-btn {
+    width: 34px;
+    height: 32px;
+  }
+
+  .weather-icon-btn svg {
+    width: 20px;
+    height: 20px;
+  }
   
   .main-content {
     margin-top: 60px;
@@ -658,6 +869,12 @@ b {
   .menu-item {
     padding: 10px 15px;
     font-size: 11px;
+  }
+
+  .weather-panel {
+    top: 72px;
+    right: 15px;
+    width: min(320px, calc(100vw - 30px));
   }
   
   .activity-floating {

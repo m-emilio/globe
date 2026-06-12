@@ -18,10 +18,164 @@ interface ActivityEvent {
 }
 
 type ActivityFilter = "all" | "connect" | "disconnect";
+type WeatherStatus = "idle" | "loading" | "ready" | "error";
+
+interface WeatherFeed {
+  tempF: number;
+  humidityPct: number;
+  windMph: number;
+  weatherCode: number;
+  condition: string;
+  hasLightning: boolean;
+  locationLabel: string;
+  updatedAt: string;
+}
+
+type OpenMeteoCurrentResponse = {
+  current?: {
+    time?: string;
+    temperature_2m?: number;
+    relative_humidity_2m?: number;
+    wind_speed_10m?: number;
+    weather_code?: number;
+  };
+};
+
+const DEFAULT_WEATHER_LOCATION = {
+  latitude: 40.7128,
+  longitude: -74.006,
+  label: "New York, NY",
+};
+
+const WEATHER_CODE_LABELS: Record<number, string> = {
+  0: "Clear",
+  1: "Mostly clear",
+  2: "Partly cloudy",
+  3: "Overcast",
+  45: "Fog",
+  48: "Freezing fog",
+  51: "Light drizzle",
+  53: "Drizzle",
+  55: "Heavy drizzle",
+  56: "Freezing drizzle",
+  57: "Heavy freezing drizzle",
+  61: "Light rain",
+  63: "Rain",
+  65: "Heavy rain",
+  66: "Freezing rain",
+  67: "Heavy freezing rain",
+  71: "Light snow",
+  73: "Snow",
+  75: "Heavy snow",
+  77: "Snow grains",
+  80: "Light showers",
+  81: "Showers",
+  82: "Heavy showers",
+  85: "Snow showers",
+  86: "Heavy snow showers",
+  95: "Thunderstorm",
+  96: "Thunderstorm with hail",
+  99: "Severe thunderstorm",
+};
+
+const LIGHTNING_WEATHER_CODES = new Set([95, 96, 99]);
+
+function describeWeatherCode(code: number) {
+  return WEATHER_CODE_LABELS[code] ?? `Weather code ${code}`;
+}
+
+function getBrowserPosition() {
+  return new Promise<GeolocationPosition>((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("Geolocation unavailable"));
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: false,
+      timeout: 5000,
+      maximumAge: 10 * 60 * 1000,
+    });
+  });
+}
+
+function buildWeatherUrl(latitude: number, longitude: number) {
+  const params = new URLSearchParams({
+    latitude: String(latitude),
+    longitude: String(longitude),
+    current: "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
+    temperature_unit: "fahrenheit",
+    wind_speed_unit: "mph",
+    timezone: "auto",
+  });
+
+  return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+}
+
+function formatWeatherTime(time: string) {
+  return time.replace("T", " ");
+}
+
+function getWeatherGlow(weather: WeatherFeed | null) {
+  if (!weather) {
+    return {
+      color: [0.18, 0.55, 0.8] as [number, number, number],
+      css: "rgba(0, 217, 255, 0.35)",
+    };
+  }
+
+  if (weather.hasLightning) {
+    return {
+      color: [0.78, 0.7, 1] as [number, number, number],
+      css: "rgba(170, 145, 255, 0.55)",
+    };
+  }
+
+  if (weather.weatherCode === 0 || weather.weatherCode === 1) {
+    return {
+      color: [1, 0.72, 0.18] as [number, number, number],
+      css: "rgba(255, 184, 46, 0.46)",
+    };
+  }
+
+  if ([2, 3, 45, 48].includes(weather.weatherCode)) {
+    return {
+      color: [0.52, 0.64, 0.76] as [number, number, number],
+      css: "rgba(150, 178, 210, 0.38)",
+    };
+  }
+
+  if (
+    [
+      51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82,
+    ].includes(weather.weatherCode)
+  ) {
+    return {
+      color: [0.1, 0.45, 0.95] as [number, number, number],
+      css: "rgba(35, 126, 255, 0.48)",
+    };
+  }
+
+  if ([71, 73, 75, 77, 85, 86].includes(weather.weatherCode)) {
+    return {
+      color: [0.72, 0.9, 1] as [number, number, number],
+      css: "rgba(190, 232, 255, 0.5)",
+    };
+  }
+
+  return {
+    color: [0.18, 0.55, 0.8] as [number, number, number],
+    css: "rgba(0, 217, 255, 0.35)",
+  };
+}
 
 function App() {
   const [showAbout, setShowAbout] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [showWeatherPanel, setShowWeatherPanel] = useState(false);
+  const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>("idle");
+  const [weatherFeed, setWeatherFeed] = useState<WeatherFeed | null>(null);
+  const [weatherError, setWeatherError] = useState("");
   const [showActivityMenu, setShowActivityMenu] = useState(true);
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
   const [isFeedPaused, setIsFeedPaused] = useState(false);
@@ -60,6 +214,66 @@ function App() {
 
     setActivityFilter("all");
     setActivityFeed(activeEvents);
+  };
+
+  const loadWeatherFeed = async () => {
+    setShowWeatherPanel(true);
+    setShowMenu(false);
+    setWeatherStatus("loading");
+    setWeatherError("");
+
+    let latitude = DEFAULT_WEATHER_LOCATION.latitude;
+    let longitude = DEFAULT_WEATHER_LOCATION.longitude;
+    let locationLabel = DEFAULT_WEATHER_LOCATION.label;
+
+    try {
+      const position = await getBrowserPosition();
+      latitude = position.coords.latitude;
+      longitude = position.coords.longitude;
+      locationLabel = "Your location";
+    } catch {
+      locationLabel = DEFAULT_WEATHER_LOCATION.label;
+    }
+
+    try {
+      const response = await fetch(buildWeatherUrl(latitude, longitude));
+
+      if (!response.ok) {
+        throw new Error("Weather request failed");
+      }
+
+      const data = (await response.json()) as OpenMeteoCurrentResponse;
+      const current = data.current;
+      const tempF = Number(current?.temperature_2m);
+      const humidityPct = Number(current?.relative_humidity_2m);
+      const windMph = Number(current?.wind_speed_10m);
+      const weatherCode = Number(current?.weather_code);
+
+      if (
+        !Number.isFinite(tempF) ||
+        !Number.isFinite(humidityPct) ||
+        !Number.isFinite(windMph) ||
+        !Number.isFinite(weatherCode) ||
+        !current?.time
+      ) {
+        throw new Error("Weather response incomplete");
+      }
+
+      setWeatherFeed({
+        tempF: Math.round(tempF),
+        humidityPct: Math.round(humidityPct),
+        windMph: Math.round(windMph),
+        weatherCode,
+        condition: describeWeatherCode(weatherCode),
+        hasLightning: LIGHTNING_WEATHER_CODES.has(weatherCode),
+        locationLabel,
+        updatedAt: formatWeatherTime(current.time),
+      });
+      setWeatherStatus("ready");
+    } catch {
+      setWeatherError("Weather feed unavailable");
+      setWeatherStatus("error");
+    }
   };
 
   const socket = usePartySocket({
@@ -118,6 +332,7 @@ function App() {
     connect: "Joins",
     disconnect: "Leaves",
   };
+  const weatherGlow = getWeatherGlow(weatherFeed);
 
   return (
     <div className="App">
@@ -143,6 +358,20 @@ function App() {
         </div>
 
         <div className="nav-right">
+          <button
+            type="button"
+            className={`weather-icon-btn ${weatherStatus === "loading" ? "weather-icon-loading" : ""}`}
+            onClick={() => {
+              void loadWeatherFeed();
+            }}
+            aria-label="Load current weather"
+            title="Current weather"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7.5 17.5H17a4 4 0 0 0 .6-7.95 6 6 0 0 0-11.15 1.9A3.2 3.2 0 0 0 7.5 17.5Z" />
+              <path d="m13 11-3 5h3l-2 5 5-7h-3l2-3Z" />
+            </svg>
+          </button>
           <button className="nav-menu-btn" onClick={() => setShowMenu(!showMenu)}>
             <span>MENU</span>
             <span className="menu-icon">v</span>
@@ -150,8 +379,88 @@ function App() {
         </div>
       </nav>
 
+      {showWeatherPanel && (
+        <div className="weather-panel" role="dialog" aria-label="Current weather">
+          <div className="weather-panel-header">
+            <div>
+              <h3>WEATHER</h3>
+              <span>{weatherFeed?.locationLabel ?? DEFAULT_WEATHER_LOCATION.label}</span>
+            </div>
+            <button
+              type="button"
+              className="weather-close"
+              onClick={() => setShowWeatherPanel(false)}
+              aria-label="Close weather"
+            >
+              x
+            </button>
+          </div>
+
+          {weatherStatus === "loading" && (
+            <div className="weather-loading">Loading weather...</div>
+          )}
+
+          {weatherStatus === "error" && (
+            <div className="weather-error">
+              <span>{weatherError}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  void loadWeatherFeed();
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {weatherStatus === "ready" && weatherFeed && (
+            <>
+              <div className="weather-grid">
+                <div className="weather-metric">
+                  <span>Temp</span>
+                  <strong>{weatherFeed.tempF} F</strong>
+                </div>
+                <div className="weather-metric">
+                  <span>Humidity</span>
+                  <strong>{weatherFeed.humidityPct}%</strong>
+                </div>
+                <div className="weather-metric">
+                  <span>Wind</span>
+                  <strong>{weatherFeed.windMph} mph</strong>
+                </div>
+                <div
+                  className={`weather-metric weather-condition ${
+                    weatherFeed.hasLightning ? "weather-condition-alert" : ""
+                  }`}
+                >
+                  <span>Condition</span>
+                  <strong>{weatherFeed.condition}</strong>
+                </div>
+              </div>
+              <div className="weather-footer">
+                <span>Updated {weatherFeed.updatedAt}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void loadWeatherFeed();
+                  }}
+                >
+                  Refresh
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="main-content">
-        <Cobe counter={counter} positions={positions.current} />
+        <Cobe
+          counter={counter}
+          positions={positions.current}
+          glowColor={weatherGlow.color}
+          glowCssColor={weatherGlow.css}
+        />
       </div>
 
       <div className="activity-floating">
