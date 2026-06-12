@@ -79,6 +79,7 @@ const WEATHER_CODE_LABELS: Record<number, string> = {
 };
 
 const LIGHTNING_WEATHER_CODES = new Set([95, 96, 99]);
+const BUTTON_RATE_LIMIT_MS = 500;
 
 function describeWeatherCode(code: number) {
   return WEATHER_CODE_LABELS[code] ?? `Weather code ${code}`;
@@ -178,6 +179,7 @@ function App() {
   const [weatherError, setWeatherError] = useState("");
   const [showActivityMenu, setShowActivityMenu] = useState(true);
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
+  const [isDisconnected, setIsDisconnected] = useState(false);
   const [isFeedPaused, setIsFeedPaused] = useState(false);
   const [isCompactFeed, setIsCompactFeed] = useState(false);
   const [counter, setCounter] = useState(0);
@@ -194,6 +196,8 @@ function App() {
   >(new Map());
   const activeVisitors = useRef<Map<string, ActivityEvent>>(new Map());
   const isFeedPausedRef = useRef(false);
+  const lastButtonClickAt = useRef(0);
+  const lastButtonClicks = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     isFeedPausedRef.current = isFeedPaused;
@@ -207,13 +211,50 @@ function App() {
     setActivityFeed((prev) => [event, ...prev.slice(0, 49)]);
   };
 
+  const runRateLimitedButtonAction = (actionKey: string, action: () => void) => {
+    const now = Date.now();
+    const lastClickAt = lastButtonClicks.current.get(actionKey) ?? 0;
+
+    if (
+      now - lastButtonClickAt.current < BUTTON_RATE_LIMIT_MS ||
+      now - lastClickAt < BUTTON_RATE_LIMIT_MS
+    ) {
+      return;
+    }
+
+    lastButtonClickAt.current = now;
+    lastButtonClicks.current.set(actionKey, now);
+    action();
+  };
+
   const clearActivityFeed = () => {
     const activeEvents = Array.from(activeVisitors.current.values()).sort(
       (a, b) => b.timestamp - a.timestamp,
     );
 
     setActivityFilter("all");
+    setIsDisconnected(false);
     setActivityFeed(activeEvents);
+  };
+
+  const handleActivityFilterChange = (filter: ActivityFilter) => {
+    setActivityFilter(filter);
+
+    if (filter !== "disconnect" || isDisconnected) {
+      return;
+    }
+
+    const timestamp = Date.now();
+    setIsDisconnected(true);
+    setActivityFeed((prev) => [
+      {
+        id: `local-disconnect-${timestamp}`,
+        type: "disconnect",
+        timestamp,
+        userName: "You",
+      },
+      ...prev.slice(0, 49),
+    ]);
   };
 
   const loadWeatherFeed = async () => {
@@ -289,6 +330,10 @@ function App() {
         });
 
         const isYou = message.position.id === socket.id;
+        if (isYou) {
+          setIsDisconnected(false);
+        }
+
         const activityEvent = {
           id: message.position.id,
           type: "connect",
@@ -322,6 +367,11 @@ function App() {
   const visibleActivityFeed = activityFeed.filter((event) =>
     activityFilter === "all" ? true : event.type === activityFilter,
   );
+  const isLeaveQueueSelected = activityFilter === "disconnect";
+  const disconnectedCount = activityFeed.reduce(
+    (total, event) => total + (event.type === "disconnect" ? 1 : 0),
+    0,
+  );
   const latestEvent = activityFeed[0];
   const latestSignal =
     latestEvent?.city && latestEvent.country
@@ -344,14 +394,21 @@ function App() {
         </div>
 
         <div className="nav-center">
-          <button className="nav-btn" onClick={() => setShowAbout(true)}>
+          <button
+            className="nav-btn"
+            onClick={() =>
+              runRateLimitedButtonAction("about-open", () => setShowAbout(true))
+            }
+          >
             ABOUT
           </button>
           <button
             className="nav-btn"
-            onClick={() => {
-              window.location.href = "https://cvefeed.io/dashboard/";
-            }}
+            onClick={() =>
+              runRateLimitedButtonAction("cve-feed", () => {
+                window.location.href = "https://cvefeed.io/dashboard/";
+              })
+            }
           >
             CVE FEED
           </button>
@@ -361,9 +418,11 @@ function App() {
           <button
             type="button"
             className={`weather-icon-btn ${weatherStatus === "loading" ? "weather-icon-loading" : ""}`}
-            onClick={() => {
-              void loadWeatherFeed();
-            }}
+            onClick={() =>
+              runRateLimitedButtonAction("weather-load", () => {
+                void loadWeatherFeed();
+              })
+            }
             aria-label="Load current weather"
             title="Current weather"
           >
@@ -372,7 +431,14 @@ function App() {
               <path d="m13 11-3 5h3l-2 5 5-7h-3l2-3Z" />
             </svg>
           </button>
-          <button className="nav-menu-btn" onClick={() => setShowMenu(!showMenu)}>
+          <button
+            className="nav-menu-btn"
+            onClick={() =>
+              runRateLimitedButtonAction("menu-toggle", () =>
+                setShowMenu((open) => !open),
+              )
+            }
+          >
             <span>MENU</span>
             <span className="menu-icon">v</span>
           </button>
@@ -389,7 +455,11 @@ function App() {
             <button
               type="button"
               className="weather-close"
-              onClick={() => setShowWeatherPanel(false)}
+              onClick={() =>
+                runRateLimitedButtonAction("weather-close", () =>
+                  setShowWeatherPanel(false),
+                )
+              }
               aria-label="Close weather"
             >
               x
@@ -405,9 +475,11 @@ function App() {
               <span>{weatherError}</span>
               <button
                 type="button"
-                onClick={() => {
-                  void loadWeatherFeed();
-                }}
+                onClick={() =>
+                  runRateLimitedButtonAction("weather-retry", () => {
+                    void loadWeatherFeed();
+                  })
+                }
               >
                 Retry
               </button>
@@ -442,9 +514,11 @@ function App() {
                 <span>Updated {weatherFeed.updatedAt}</span>
                 <button
                   type="button"
-                  onClick={() => {
-                    void loadWeatherFeed();
-                  }}
+                  onClick={() =>
+                    runRateLimitedButtonAction("weather-refresh", () => {
+                      void loadWeatherFeed();
+                    })
+                  }
                 >
                   Refresh
                 </button>
@@ -467,7 +541,11 @@ function App() {
         <button
           type="button"
           className="activity-launcher"
-          onClick={() => setShowActivityMenu((open) => !open)}
+          onClick={() =>
+            runRateLimitedButtonAction("activity-toggle", () =>
+              setShowActivityMenu((open) => !open),
+            )
+          }
           aria-controls="live-feed-menu"
           aria-expanded={showActivityMenu}
         >
@@ -505,6 +583,14 @@ function App() {
                 <span>Events</span>
                 <strong>{activityFeed.length}</strong>
               </div>
+              <div
+                className={`activity-stat activity-stat-disconnected ${
+                  isDisconnected ? "activity-stat-active" : ""
+                }`}
+              >
+                <span>Disconnected</span>
+                <strong>{disconnectedCount}</strong>
+              </div>
               <div className="activity-stat">
                 <span>Latest</span>
                 <strong title={latestSignal}>{latestSignal}</strong>
@@ -516,25 +602,50 @@ function App() {
                 <button
                   key={filter}
                   type="button"
-                  className={activityFilter === filter ? "active" : ""}
-                  onClick={() => setActivityFilter(filter)}
+                  className={`activity-filter-btn activity-filter-${filter} ${
+                    activityFilter === filter ? "active" : ""
+                  }`}
+                  onClick={() =>
+                    runRateLimitedButtonAction(`activity-filter-${filter}`, () =>
+                      handleActivityFilterChange(filter),
+                    )
+                  }
                   aria-pressed={activityFilter === filter}
                 >
-                  {filterLabels[filter]}
+                  <span>{filterLabels[filter]}</span>
+                  {filter === "disconnect" && (
+                    <span className="activity-filter-count">{disconnectedCount}</span>
+                  )}
                 </button>
               ))}
             </div>
 
             <div className="activity-actions">
-              <button type="button" onClick={() => setIsFeedPaused((paused) => !paused)}>
+              <button
+                type="button"
+                onClick={() =>
+                  runRateLimitedButtonAction("activity-pause", () =>
+                    setIsFeedPaused((paused) => !paused),
+                  )
+                }
+              >
                 {isFeedPaused ? "Resume" : "Pause"}
               </button>
-              <button type="button" onClick={() => setIsCompactFeed((compact) => !compact)}>
+              <button
+                type="button"
+                onClick={() =>
+                  runRateLimitedButtonAction("activity-compact", () =>
+                    setIsCompactFeed((compact) => !compact),
+                  )
+                }
+              >
                 {isCompactFeed ? "Details" : "Compact"}
               </button>
               <button
                 type="button"
-                onClick={clearActivityFeed}
+                onClick={() =>
+                  runRateLimitedButtonAction("activity-clear", clearActivityFeed)
+                }
                 disabled={activityFeed.length === 0 && activeVisitors.current.size === 0}
               >
                 Clear
@@ -542,10 +653,22 @@ function App() {
             </div>
 
             <div className="activity-list">
-              {visibleActivityFeed.length === 0 ? (
-                <div className="activity-empty">
-                  {activityFeed.length === 0 ? "No activity yet" : "No matching events"}
+              {isLeaveQueueSelected && (
+                <div
+                  className={`activity-disconnected-state ${
+                    isDisconnected ? "activity-disconnected-state-active" : ""
+                  }`}
+                >
+                  <span>{isDisconnected ? "Disconnected" : "Leave queue"}</span>
+                  <strong>{disconnectedCount}</strong>
                 </div>
+              )}
+              {visibleActivityFeed.length === 0 ? (
+                isLeaveQueueSelected ? null : (
+                  <div className="activity-empty">
+                    {activityFeed.length === 0 ? "No activity yet" : "No matching events"}
+                  </div>
+                )
               ) : (
                 visibleActivityFeed.map((event) => (
                   <div
@@ -590,7 +713,12 @@ function App() {
       {showAbout && (
         <div className="modal-overlay" onClick={() => setShowAbout(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <button className="modal-close" onClick={() => setShowAbout(false)}>
+            <button
+              className="modal-close"
+              onClick={() =>
+                runRateLimitedButtonAction("about-close", () => setShowAbout(false))
+              }
+            >
               x
             </button>
             <h2>About & Credits</h2>
