@@ -239,7 +239,7 @@ b {
   top: 82px;
   right: 30px;
   width: min(330px, calc(100vw - 60px));
-  background: rgba(3, 6, 16, 0.96);
+  background-color: transparent;
   border: 1.5px solid #8A6F48;
   border-radius: 4px;
   z-index: 1002;
