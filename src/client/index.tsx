@@ -19,6 +19,32 @@ interface ActivityEvent {
 
 type ActivityFilter = "all" | "connect" | "disconnect";
 type WeatherStatus = "idle" | "loading" | "ready" | "error";
+type ForecastView = "daily" | "hourly";
+
+interface WeatherForecastDay {
+  date: string;
+  condition: string;
+  highF: number;
+  lowF: number;
+  precipitationChancePct: number;
+  precipitationIn: number;
+  windMph: number;
+  gustMph: number;
+  uvIndex: number;
+}
+
+interface WeatherForecastHour {
+  time: string;
+  condition: string;
+  tempF: number;
+  feelsLikeF: number;
+  humidityPct: number;
+  precipitationChancePct: number;
+  precipitationIn: number;
+  windMph: number;
+  gustMph: number;
+  cloudCoverPct: number;
+}
 
 interface WeatherFeed {
   tempF: number;
@@ -29,15 +55,40 @@ interface WeatherFeed {
   hasLightning: boolean;
   locationLabel: string;
   updatedAt: string;
+  dailyForecast: WeatherForecastDay[];
+  hourlyForecast: WeatherForecastHour[];
 }
 
-type OpenMeteoCurrentResponse = {
+type OpenMeteoForecastResponse = {
   current?: {
     time?: string;
     temperature_2m?: number;
     relative_humidity_2m?: number;
     wind_speed_10m?: number;
     weather_code?: number;
+  };
+  daily?: {
+    time?: string[];
+    weather_code?: number[];
+    temperature_2m_max?: number[];
+    temperature_2m_min?: number[];
+    precipitation_probability_max?: number[];
+    precipitation_sum?: number[];
+    wind_speed_10m_max?: number[];
+    wind_gusts_10m_max?: number[];
+    uv_index_max?: number[];
+  };
+  hourly?: {
+    time?: string[];
+    weather_code?: number[];
+    temperature_2m?: number[];
+    apparent_temperature?: number[];
+    relative_humidity_2m?: number[];
+    precipitation_probability?: number[];
+    precipitation?: number[];
+    wind_speed_10m?: number[];
+    wind_gusts_10m?: number[];
+    cloud_cover?: number[];
   };
 };
 
@@ -105,8 +156,14 @@ function buildWeatherUrl(latitude: number, longitude: number) {
     latitude: String(latitude),
     longitude: String(longitude),
     current: "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
+    daily:
+      "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max",
+    hourly:
+      "weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,precipitation_probability,precipitation,wind_speed_10m,wind_gusts_10m,cloud_cover",
+    forecast_days: "7",
     temperature_unit: "fahrenheit",
     wind_speed_unit: "mph",
+    precipitation_unit: "inch",
     timezone: "auto",
   });
 
@@ -115,6 +172,78 @@ function buildWeatherUrl(latitude: number, longitude: number) {
 
 function formatWeatherTime(time: string) {
   return time.replace("T", " ");
+}
+
+function getForecastNumber(values: number[] | undefined, index: number) {
+  const value = Number(values?.[index]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function formatForecastDay(date: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(`${date}T12:00:00`));
+}
+
+function formatForecastHour(time: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    hour: "numeric",
+  }).format(new Date(time));
+}
+
+function buildDailyForecast(data: OpenMeteoForecastResponse): WeatherForecastDay[] {
+  const daily = data.daily;
+
+  return (daily?.time ?? []).slice(0, 7).map((date, index) => {
+    const weatherCode = Math.round(getForecastNumber(daily?.weather_code, index));
+
+    return {
+      date,
+      condition: describeWeatherCode(weatherCode),
+      highF: Math.round(getForecastNumber(daily?.temperature_2m_max, index)),
+      lowF: Math.round(getForecastNumber(daily?.temperature_2m_min, index)),
+      precipitationChancePct: Math.round(
+        getForecastNumber(daily?.precipitation_probability_max, index),
+      ),
+      precipitationIn: getForecastNumber(daily?.precipitation_sum, index),
+      windMph: Math.round(getForecastNumber(daily?.wind_speed_10m_max, index)),
+      gustMph: Math.round(getForecastNumber(daily?.wind_gusts_10m_max, index)),
+      uvIndex: Math.round(getForecastNumber(daily?.uv_index_max, index)),
+    };
+  });
+}
+
+function buildHourlyForecast(data: OpenMeteoForecastResponse): WeatherForecastHour[] {
+  const hourly = data.hourly;
+  const times = hourly?.time ?? [];
+  const currentTime = data.current?.time;
+  const currentHourIndex = currentTime
+    ? times.findIndex((time) => time >= currentTime)
+    : 0;
+  const startIndex = currentHourIndex >= 0 ? currentHourIndex : 0;
+
+  return times.slice(startIndex, startIndex + 7).map((time, offset) => {
+    const index = startIndex + offset;
+    const weatherCode = Math.round(getForecastNumber(hourly?.weather_code, index));
+
+    return {
+      time,
+      condition: describeWeatherCode(weatherCode),
+      tempF: Math.round(getForecastNumber(hourly?.temperature_2m, index)),
+      feelsLikeF: Math.round(getForecastNumber(hourly?.apparent_temperature, index)),
+      humidityPct: Math.round(getForecastNumber(hourly?.relative_humidity_2m, index)),
+      precipitationChancePct: Math.round(
+        getForecastNumber(hourly?.precipitation_probability, index),
+      ),
+      precipitationIn: getForecastNumber(hourly?.precipitation, index),
+      windMph: Math.round(getForecastNumber(hourly?.wind_speed_10m, index)),
+      gustMph: Math.round(getForecastNumber(hourly?.wind_gusts_10m, index)),
+      cloudCoverPct: Math.round(getForecastNumber(hourly?.cloud_cover, index)),
+    };
+  });
 }
 
 function getWeatherGlow(weather: WeatherFeed | null) {
@@ -177,6 +306,8 @@ function App() {
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>("idle");
   const [weatherFeed, setWeatherFeed] = useState<WeatherFeed | null>(null);
   const [weatherError, setWeatherError] = useState("");
+  const [showWeatherForecast, setShowWeatherForecast] = useState(false);
+  const [forecastView, setForecastView] = useState<ForecastView>("daily");
   const [showActivityMenu, setShowActivityMenu] = useState(true);
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
   const [isDisconnected, setIsDisconnected] = useState(false);
@@ -283,7 +414,7 @@ function App() {
         throw new Error("Weather request failed");
       }
 
-      const data = (await response.json()) as OpenMeteoCurrentResponse;
+      const data = (await response.json()) as OpenMeteoForecastResponse;
       const current = data.current;
       const tempF = Number(current?.temperature_2m);
       const humidityPct = Number(current?.relative_humidity_2m);
@@ -309,6 +440,8 @@ function App() {
         hasLightning: LIGHTNING_WEATHER_CODES.has(weatherCode),
         locationLabel,
         updatedAt: formatWeatherTime(current.time),
+        dailyForecast: buildDailyForecast(data),
+        hourlyForecast: buildHourlyForecast(data),
       });
       setWeatherStatus("ready");
     } catch {
@@ -446,7 +579,11 @@ function App() {
       </nav>
 
       {showWeatherPanel && (
-        <div className="weather-panel" role="dialog" aria-label="Current weather">
+        <div
+          className={`weather-panel ${showWeatherForecast ? "weather-panel-expanded" : ""}`}
+          role="dialog"
+          aria-label="Weather forecast"
+        >
           <div className="weather-panel-header">
             <div>
               <h3>WEATHER</h3>
@@ -512,17 +649,109 @@ function App() {
               </div>
               <div className="weather-footer">
                 <span>Updated {weatherFeed.updatedAt}</span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    runRateLimitedButtonAction("weather-refresh", () => {
-                      void loadWeatherFeed();
-                    })
-                  }
-                >
-                  Refresh
-                </button>
+                <div className="weather-footer-actions">
+                  <button
+                    type="button"
+                    className={`weather-forecast-toggle ${
+                      showWeatherForecast ? "active" : ""
+                    }`}
+                    onClick={() =>
+                      runRateLimitedButtonAction("weather-forecast-toggle", () =>
+                        setShowWeatherForecast((open) => !open),
+                      )
+                    }
+                    aria-expanded={showWeatherForecast}
+                    aria-controls="weather-forecast"
+                  >
+                    {showWeatherForecast ? "Hide forecast" : "Forecast"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      runRateLimitedButtonAction("weather-refresh", () => {
+                        void loadWeatherFeed();
+                      })
+                    }
+                  >
+                    Refresh
+                  </button>
+                </div>
               </div>
+              {showWeatherForecast && (
+                <section
+                  id="weather-forecast"
+                  className="weather-forecast"
+                  aria-label="Detailed weather forecast"
+                >
+                  <div className="weather-forecast-header">
+                    <span>Detailed outlook</span>
+                    <span>7 days / next 7 hours</span>
+                  </div>
+                  <div className="weather-forecast-tabs" role="tablist" aria-label="Forecast range">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={forecastView === "daily"}
+                      className={forecastView === "daily" ? "active" : ""}
+                      onClick={() =>
+                        runRateLimitedButtonAction("weather-daily-tab", () =>
+                          setForecastView("daily"),
+                        )
+                      }
+                    >
+                      7 days
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={forecastView === "hourly"}
+                      className={forecastView === "hourly" ? "active" : ""}
+                      onClick={() =>
+                        runRateLimitedButtonAction("weather-hourly-tab", () =>
+                          setForecastView("hourly"),
+                        )
+                      }
+                    >
+                      7 hours
+                    </button>
+                  </div>
+                  <div className="weather-forecast-list">
+                    {forecastView === "daily"
+                      ? weatherFeed.dailyForecast.map((day) => (
+                          <article className="weather-forecast-row" key={day.date}>
+                            <div className="weather-forecast-time">
+                              <strong>{formatForecastDay(day.date)}</strong>
+                              <span>{day.condition}</span>
+                            </div>
+                            <div className="weather-forecast-temp">
+                              <strong>{day.highF}°</strong>
+                              <span>{day.lowF}° low</span>
+                            </div>
+                            <div className="weather-forecast-details">
+                              <span>Rain {day.precipitationChancePct}% · {day.precipitationIn.toFixed(2)} in</span>
+                              <span>Wind {day.windMph} mph · Gusts {day.gustMph} · UV {day.uvIndex}</span>
+                            </div>
+                          </article>
+                        ))
+                      : weatherFeed.hourlyForecast.map((hour) => (
+                          <article className="weather-forecast-row" key={hour.time}>
+                            <div className="weather-forecast-time">
+                              <strong>{formatForecastHour(hour.time)}</strong>
+                              <span>{hour.condition}</span>
+                            </div>
+                            <div className="weather-forecast-temp">
+                              <strong>{hour.tempF}°</strong>
+                              <span>Feels {hour.feelsLikeF}°</span>
+                            </div>
+                            <div className="weather-forecast-details">
+                              <span>Hum {hour.humidityPct}% · Rain {hour.precipitationChancePct}% · {hour.precipitationIn.toFixed(2)} in</span>
+                              <span>Wind {hour.windMph} mph · Gusts {hour.gustMph} · Cloud {hour.cloudCoverPct}%</span>
+                            </div>
+                          </article>
+                        ))}
+                  </div>
+                </section>
+              )}
             </>
           )}
         </div>
