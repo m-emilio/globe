@@ -505,7 +505,7 @@ b {
 .weather-forecast-time span,
 .weather-forecast-temp span,
 .weather-forecast-details span {
-  color: #66FF00;
+  color: #7e8a95;
   font-size: 9px;
   line-height: 1.45;
   letter-spacing: 0.35px;
@@ -515,6 +515,113 @@ b {
 
 .weather-forecast-details {
   gap: 2px;
+}
+
+/* Red and gold weather-panel palette */
+.weather-panel {
+  border-color: #d4af37;
+  box-shadow: 0 0 30px rgba(212, 175, 55, 0.24);
+}
+
+.weather-panel-expanded::-webkit-scrollbar-track {
+  background: rgba(255, 59, 59, 0.08);
+}
+
+.weather-panel-expanded::-webkit-scrollbar-thumb {
+  background: #d4af37;
+}
+
+.weather-panel-header {
+  border-bottom-color: #d4af37;
+  background: linear-gradient(90deg, rgba(212, 175, 55, 0.1) 0%, transparent 100%);
+}
+
+.weather-panel-header h3,
+.weather-forecast-header span:first-child,
+.weather-close {
+  color: #d4af37;
+}
+
+.weather-panel-header span,
+.weather-loading,
+.weather-error,
+.weather-metric span,
+.weather-metric strong,
+.weather-condition-alert strong,
+.weather-footer,
+.weather-forecast-header,
+.weather-forecast-tabs button,
+.weather-forecast-time strong,
+.weather-forecast-temp strong,
+.weather-forecast-time span,
+.weather-forecast-temp span,
+.weather-forecast-details span {
+  color: #ff3b3b;
+}
+
+.weather-close,
+.weather-error button,
+.weather-footer button,
+.weather-forecast-tabs button {
+  border-color: rgba(212, 175, 55, 0.5);
+}
+
+.weather-close:hover,
+.weather-error button:hover,
+.weather-footer button:hover {
+  border-color: #d4af37;
+  background: rgba(212, 175, 55, 0.14);
+}
+
+.weather-error button,
+.weather-footer button {
+  background: rgba(212, 175, 55, 0.04);
+  color: #ff3b3b;
+}
+
+.weather-metric {
+  border-color: rgba(212, 175, 55, 0.17);
+}
+
+.weather-condition-alert {
+  background: rgba(255, 59, 59, 0.1);
+}
+
+.weather-forecast-toggle.active {
+  border-color: #d4af37;
+  color: #d4af37;
+  background: rgba(212, 175, 55, 0.12);
+}
+
+.weather-forecast {
+  border-top-color: rgba(212, 175, 55, 0.72);
+  background: linear-gradient(180deg, rgba(212, 175, 55, 0.05) 0%, transparent 100%);
+}
+
+.weather-forecast-tabs button:hover,
+.weather-forecast-tabs button.active {
+  border-color: #d4af37;
+  background: rgba(212, 175, 55, 0.12);
+  color: #ff3b3b;
+}
+
+.weather-forecast-list {
+  border-top-color: rgba(212, 175, 55, 0.18);
+}
+
+.weather-forecast-row {
+  border-bottom-color: rgba(212, 175, 55, 0.15);
+}
+
+.weather-icon-btn {
+  border-color: #d4af37;
+  color: #ff3b3b;
+}
+
+.weather-icon-btn:hover {
+  background-color: rgba(212, 175, 55, 0.14);
+  color: #ff3b3b;
+  box-shadow: 0 0 12px rgba(212, 175, 55, 0.45);
 }
 
 /* Modal Overlay */
