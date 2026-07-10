@@ -2,9 +2,16 @@ import "./styles.css";
 
 import React, { useState, useRef, useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { Cobe } from "./CobeGlobe";
+import { Cobe, type GlobeArc } from "./CobeGlobe";
 import usePartySocket from "partysocket/react";
-import type { OutgoingMessage } from "../shared";
+import type {
+  OutgoingMessage,
+  ComtradePreview,
+  TradePulseLayer,
+  TradePulsePreview,
+  TradePulseRoutePreview,
+  UnGlobalPreview,
+} from "../shared";
 
 interface ActivityEvent {
   id: string;
@@ -20,6 +27,130 @@ interface ActivityEvent {
 type ActivityFilter = "all" | "connect" | "disconnect";
 type WeatherStatus = "idle" | "loading" | "ready" | "error";
 type ForecastView = "daily" | "hourly";
+type ComtradeStatus = "idle" | "loading" | "ready" | "error";
+type ComtradeSection = "records" | "availability" | "references" | "reporters";
+type ComtradeValueMode = "compact" | "full";
+type UnGlobalStatus = "idle" | "loading" | "ready" | "error";
+type TradePulseStatus = "idle" | "loading" | "ready" | "error";
+type UnGlobalSection =
+  | "offices"
+  | "activeMissions"
+  | "pastMissions"
+  | "memberStates"
+  | "affiliates"
+  | "embassies";
+
+const DEFAULT_COMTRADE_SECTIONS: Record<ComtradeSection, boolean> = {
+  records: true,
+  availability: true,
+  references: true,
+  reporters: true,
+};
+
+const COMTRADE_SECTION_LABELS: Record<ComtradeSection, string> = {
+  records: "Trade rows",
+  availability: "Availability",
+  references: "References",
+  reporters: "Reporters",
+};
+
+const COMTRADE_SECTION_DESCRIPTIONS: Record<ComtradeSection, string> = {
+  records: "sample export/import rows with partner, commodity, and value",
+  availability: "dataset coverage, release windows, and total record counts",
+  references: "API reference tables that explain Comtrade variables",
+  reporters: "reporting economies available through Comtrade+ metadata",
+};
+
+const COMTRADE_SECTIONS: ComtradeSection[] = [
+  "records",
+  "availability",
+  "references",
+  "reporters",
+];
+
+const DEFAULT_UN_GLOBAL_SECTIONS: Record<UnGlobalSection, boolean> = {
+  offices: true,
+  activeMissions: true,
+  pastMissions: true,
+  memberStates: true,
+  affiliates: true,
+  embassies: true,
+};
+
+const UN_GLOBAL_SECTION_LABELS: Record<UnGlobalSection, string> = {
+  offices: "HQ offices",
+  activeMissions: "Active missions",
+  pastMissions: "Past missions",
+  memberStates: "Member states",
+  affiliates: "Affiliates",
+  embassies: "Embassies",
+};
+
+const TRADE_PULSE_LAYERS: TradePulseLayer[] = [
+  "dependency",
+  "lifelines",
+  "asymmetry",
+  "intermediary",
+  "transport",
+  "friction",
+  "hubs",
+  "confidence",
+];
+
+const DEFAULT_TRADE_PULSE_LAYERS: Record<TradePulseLayer, boolean> = {
+  dependency: true,
+  lifelines: true,
+  asymmetry: true,
+  intermediary: true,
+  transport: true,
+  friction: true,
+  hubs: true,
+  confidence: true,
+};
+
+const TRADE_PULSE_LAYER_LABELS: Record<TradePulseLayer, string> = {
+  dependency: "Single supplier dependency",
+  lifelines: "Commodity lifelines",
+  asymmetry: "Bilateral asymmetry alerts",
+  intermediary: "Hidden intermediary signal",
+  transport: "Transport mode skin",
+  friction: "CIF/FOB friction",
+  hubs: "Re-export hubs",
+  confidence: "Data confidence",
+};
+
+const TRADE_PULSE_LAYER_SHORT_LABELS: Record<TradePulseLayer, string> = {
+  dependency: "Dependency",
+  lifelines: "Lifelines",
+  asymmetry: "Asymmetry",
+  intermediary: "Intermediary",
+  transport: "Transport",
+  friction: "Friction",
+  hubs: "Hubs",
+  confidence: "Confidence",
+};
+
+const TRADE_PULSE_LAYER_COLORS: Record<TradePulseLayer, string> = {
+  dependency: "#ff3b3b",
+  lifelines: "#ffd166",
+  asymmetry: "#ff2fb3",
+  intermediary: "#7c5cff",
+  transport: "#00d9ff",
+  friction: "#ff8a00",
+  hubs: "#00ff88",
+  confidence: "#8f99a2",
+};
+
+const TRADE_PULSE_TRANSPORT_DASHES: Record<
+  TradePulseRoutePreview["transportMode"],
+  string
+> = {
+  sea: "0",
+  air: "4 7",
+  rail: "10 5 2 5",
+  road: "2 5",
+  mixed: "12 5 4 5",
+};
 
 interface WeatherForecastDay {
   date: string;
@@ -131,6 +262,67 @@ const WEATHER_CODE_LABELS: Record<number, string> = {
 
 const LIGHTNING_WEATHER_CODES = new Set([95, 96, 99]);
 const BUTTON_RATE_LIMIT_MS = 500;
+const SOCKET_MESSAGE_MAX_CHARS = 4096;
+
+function getBoundedNumber(value: unknown, min: number, max: number) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= min && number <= max ? number : null;
+}
+
+function getLimitedString(value: unknown, maxLength: number) {
+  return typeof value === "string" ? value.trim().slice(0, maxLength) : undefined;
+}
+
+function parseSocketMessage(data: unknown): OutgoingMessage | null {
+  if (typeof data !== "string" || data.length > SOCKET_MESSAGE_MAX_CHARS) {
+    return null;
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
+
+  const message = parsed as Record<string, unknown>;
+
+  if (message.type === "remove-marker") {
+    const id = getLimitedString(message.id, 128);
+    return id ? { type: "remove-marker", id } : null;
+  }
+
+  if (message.type !== "add-marker" || !message.position || typeof message.position !== "object") {
+    return null;
+  }
+
+  const position = message.position as Record<string, unknown>;
+  const lat = getBoundedNumber(position.lat, -90, 90);
+  const lng = getBoundedNumber(position.lng, -180, 180);
+  const id = getLimitedString(position.id, 128);
+
+  if (lat === null || lng === null || !id) {
+    return null;
+  }
+
+  return {
+    type: "add-marker",
+    position: {
+      lat,
+      lng,
+      id,
+      ip: getLimitedString(position.ip, 45),
+      country: getLimitedString(position.country, 4),
+      city: getLimitedString(position.city, 80),
+      org: getLimitedString(position.org, 120),
+    },
+  };
+}
 
 function describeWeatherCode(code: number) {
   return WEATHER_CODE_LABELS[code] ?? `Weather code ${code}`;
@@ -192,6 +384,173 @@ function formatForecastHour(time: string) {
     weekday: "short",
     hour: "numeric",
   }).format(new Date(time));
+}
+
+function formatPreviewNumber(value: number, stale?: boolean) {
+  if (stale && value === 0) {
+    return "n/a";
+  }
+
+  return value.toLocaleString();
+}
+
+function formatUsd(
+  value: number,
+  stale?: boolean,
+  valueMode: ComtradeValueMode = "compact",
+) {
+  if (stale && value === 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    notation: valueMode === "compact" ? "compact" : "standard",
+    maximumFractionDigits: valueMode === "compact" ? 2 : 0,
+  }).format(value);
+}
+
+function formatSignedUsd(
+  value: number,
+  stale?: boolean,
+  valueMode: ComtradeValueMode = "compact",
+) {
+  const formatted = formatUsd(Math.abs(value), stale, valueMode);
+
+  if (formatted === "n/a" || value === 0) {
+    return formatted;
+  }
+
+  return `${value > 0 ? "+" : "-"}${formatted}`;
+}
+
+function formatNullableUsd(
+  value: number | null,
+  stale?: boolean,
+  valueMode: ComtradeValueMode = "compact",
+) {
+  return value === null ? "n/a" : formatUsd(value, stale, valueMode);
+}
+
+function formatPreviewDate(time: string) {
+  const date = new Date(time);
+
+  if (Number.isNaN(date.getTime())) {
+    return "unknown";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatPercent(value: number) {
+  return `${Math.round(value)}%`;
+}
+
+function getIsTradePulsePreview() {
+  const url = new URL(window.location.href);
+  return (
+    url.pathname === "/preview/trade-pulse" ||
+    url.searchParams.get("preview") === "trade-pulse"
+  );
+}
+
+function getRoutePulseLayer(
+  route: TradePulseRoutePreview,
+  layers: Record<TradePulseLayer, boolean>,
+) {
+  return route.layers.find((layer) => layers[layer]) ?? route.layers[0] ?? "dependency";
+}
+
+function getVisibleTradePulseRoutes(
+  preview: TradePulsePreview | null,
+  layers: Record<TradePulseLayer, boolean>,
+) {
+  if (!preview) {
+    return [];
+  }
+
+  return preview.routes.filter((route) => route.layers.some((layer) => layers[layer]));
+}
+
+function buildTradePulsePoints(
+  routes: TradePulseRoutePreview[],
+  layers: Record<TradePulseLayer, boolean>,
+) {
+  const points = new Map<
+    string,
+    {
+      key: string;
+      name: string;
+      iso3: string;
+      lat: number;
+      lng: number;
+      size: number;
+      color: string;
+      label: string;
+      severity: string;
+    }
+  >();
+
+  const addPoint = (
+    route: TradePulseRoutePreview,
+    country: TradePulseRoutePreview["origin"],
+    role: string,
+  ) => {
+    const layer = getRoutePulseLayer(route, layers);
+    const existing = points.get(`${country.iso3}-${role}`);
+    const size =
+      role === "hub"
+        ? 18
+        : 10 + Math.min(12, Math.max(route.supplierSharePct, route.asymmetryPct) / 8);
+
+    if (existing && existing.size >= size) {
+      return;
+    }
+
+    points.set(`${country.iso3}-${role}`, {
+      key: `${country.iso3}-${role}`,
+      name: country.name,
+      iso3: country.iso3,
+      lat: country.lat,
+      lng: country.lng,
+      size,
+      color: TRADE_PULSE_LAYER_COLORS[layer],
+      label: role === "hub" ? "Hub" : TRADE_PULSE_LAYER_SHORT_LABELS[layer],
+      severity: route.severity,
+    });
+  };
+
+  for (const route of routes) {
+    addPoint(route, route.destination, "destination");
+
+    if (layers.lifelines || layers.transport) {
+      addPoint(route, route.origin, "origin");
+    }
+
+    if (route.intermediary && (layers.intermediary || layers.hubs)) {
+      addPoint(route, route.intermediary, "hub");
+    }
+  }
+
+  return Array.from(points.values());
+}
+
+function getTradePulseGlobeMarkers(
+  preview: TradePulsePreview | null,
+  layers: Record<TradePulseLayer, boolean>,
+) {
+  return buildTradePulsePoints(getVisibleTradePulseRoutes(preview, layers), layers)
+    .slice(0, 28)
+    .map((point) => ({
+      location: [point.lat, point.lng] as [number, number],
+      size: point.severity === "critical" ? 0.09 : point.severity === "high" ? 0.07 : 0.05,
+    }));
 }
 
 function buildDailyForecast(data: OpenMeteoForecastResponse): WeatherForecastDay[] {
@@ -300,6 +659,7 @@ function getWeatherGlow(weather: WeatherFeed | null) {
 }
 
 function App() {
+  const isTradePulsePreview = getIsTradePulsePreview();
   const [showAbout, setShowAbout] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showWeatherPanel, setShowWeatherPanel] = useState(false);
@@ -308,7 +668,29 @@ function App() {
   const [weatherError, setWeatherError] = useState("");
   const [showWeatherForecast, setShowWeatherForecast] = useState(false);
   const [forecastView, setForecastView] = useState<ForecastView>("daily");
-  const [showActivityMenu, setShowActivityMenu] = useState(true);
+  const [showComtradePanel, setShowComtradePanel] = useState(false);
+  const [comtradeStatus, setComtradeStatus] = useState<ComtradeStatus>("idle");
+  const [comtradePreview, setComtradePreview] = useState<ComtradePreview | null>(null);
+  const [comtradeError, setComtradeError] = useState("");
+  const [comtradeSections, setComtradeSections] = useState(DEFAULT_COMTRADE_SECTIONS);
+  const [comtradeValueMode, setComtradeValueMode] =
+    useState<ComtradeValueMode>("compact");
+  const [showTradePulsePanel, setShowTradePulsePanel] = useState(isTradePulsePreview);
+  const [isTradePulsePanelMinimized, setIsTradePulsePanelMinimized] =
+    useState(false);
+  const [tradePulseStatus, setTradePulseStatus] = useState<TradePulseStatus>("idle");
+  const [tradePulsePreview, setTradePulsePreview] = useState<TradePulsePreview | null>(
+    null,
+  );
+  const [tradePulseError, setTradePulseError] = useState("");
+  const [tradePulseLayers, setTradePulseLayers] = useState(DEFAULT_TRADE_PULSE_LAYERS);
+  const [showUnGlobalPanel, setShowUnGlobalPanel] = useState(false);
+  const [isUnGlobalPanelMinimized, setIsUnGlobalPanelMinimized] = useState(false);
+  const [unGlobalStatus, setUnGlobalStatus] = useState<UnGlobalStatus>("idle");
+  const [unGlobalPreview, setUnGlobalPreview] = useState<UnGlobalPreview | null>(null);
+  const [unGlobalError, setUnGlobalError] = useState("");
+  const [unGlobalSections, setUnGlobalSections] = useState(DEFAULT_UN_GLOBAL_SECTIONS);
+  const [showActivityMenu, setShowActivityMenu] = useState(false);
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
   const [isDisconnected, setIsDisconnected] = useState(false);
   const [isFeedPaused, setIsFeedPaused] = useState(false);
@@ -450,11 +832,205 @@ function App() {
     }
   };
 
+  const toggleComtradeSection = (section: ComtradeSection) => {
+    setComtradeSections((current) => ({
+      ...current,
+      [section]: !current[section],
+    }));
+  };
+
+  const toggleComtradePanelFromMenu = () => {
+    if (showComtradePanel) {
+      setShowComtradePanel(false);
+      return;
+    }
+
+    void loadComtradePreview(false);
+  };
+
+  const loadComtradePreview = async (closeMenu = true) => {
+    setShowComtradePanel(true);
+    setShowTradePulsePanel(false);
+    setShowUnGlobalPanel(false);
+    setIsUnGlobalPanelMinimized(false);
+    if (closeMenu) {
+      setShowMenu(false);
+    }
+    setComtradeStatus("loading");
+    setComtradeError("");
+
+    try {
+      const response = await fetch("/api/comtrade-preview", {
+        headers: {
+          accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error("UN COMTRADE preview request failed");
+      }
+
+      const data = (await response.json()) as ComtradePreview;
+
+      if (!data || !Array.isArray(data.tradeRecords)) {
+        throw new Error("UN COMTRADE preview response incomplete");
+      }
+
+      setComtradePreview(data);
+      setComtradeStatus("ready");
+    } catch {
+      setComtradeError("UN COMTRADE preview unavailable");
+      setComtradeStatus("error");
+    }
+  };
+
+  const toggleTradePulseLayer = (layer: TradePulseLayer) => {
+    setTradePulseLayers((current) => ({
+      ...current,
+      [layer]: !current[layer],
+    }));
+  };
+
+  const toggleAllTradePulseLayers = () => {
+    setTradePulseLayers((current) => {
+      const shouldEnableAll = Object.values(current).some((enabled) => !enabled);
+
+      return {
+        dependency: shouldEnableAll,
+        lifelines: shouldEnableAll,
+        asymmetry: shouldEnableAll,
+        intermediary: shouldEnableAll,
+        transport: shouldEnableAll,
+        friction: shouldEnableAll,
+        hubs: shouldEnableAll,
+        confidence: shouldEnableAll,
+      };
+    });
+  };
+
+  const loadTradePulsePreview = async (closeMenu = true) => {
+    setShowTradePulsePanel(true);
+    setShowComtradePanel(false);
+    setShowUnGlobalPanel(false);
+    setIsUnGlobalPanelMinimized(false);
+    if (closeMenu) {
+      setShowMenu(false);
+    }
+    setTradePulseStatus("loading");
+    setTradePulseError("");
+
+    try {
+      const response = await fetch("/api/comtrade-pulse-preview", {
+        headers: {
+          accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error("Trade Pulse preview request failed");
+      }
+
+      const data = (await response.json()) as TradePulsePreview;
+
+      if (!data || !Array.isArray(data.routes)) {
+        throw new Error("Trade Pulse preview response incomplete");
+      }
+
+      setTradePulsePreview(data);
+      setTradePulseStatus("ready");
+    } catch {
+      setTradePulseError("Trade Pulse preview unavailable");
+      setTradePulseStatus("error");
+    }
+  };
+
+  useEffect(() => {
+    if (isTradePulsePreview) {
+      void loadTradePulsePreview(false);
+    }
+  }, []);
+
+  const toggleUnGlobalSection = (section: UnGlobalSection) => {
+    setUnGlobalSections((current) => ({
+      ...current,
+      [section]: !current[section],
+    }));
+  };
+
+  const toggleAllUnGlobalSections = () => {
+    setUnGlobalSections((current) => {
+      const shouldEnableAll = Object.values(current).some((enabled) => !enabled);
+
+      return {
+        offices: shouldEnableAll,
+        activeMissions: shouldEnableAll,
+        pastMissions: shouldEnableAll,
+        memberStates: shouldEnableAll,
+        affiliates: shouldEnableAll,
+        embassies: shouldEnableAll,
+      };
+    });
+  };
+
+  const toggleUnGlobalPanelFromMenu = () => {
+    if (showUnGlobalPanel) {
+      setIsUnGlobalPanelMinimized((minimized) => !minimized);
+      return;
+    }
+
+    void loadUnGlobalPreview(false);
+  };
+
+  const loadUnGlobalPreview = async (closeMenu = true) => {
+    setShowUnGlobalPanel(true);
+    setIsUnGlobalPanelMinimized(false);
+    setShowComtradePanel(false);
+    setShowTradePulsePanel(false);
+    if (closeMenu) {
+      setShowMenu(false);
+    }
+    setUnGlobalStatus("loading");
+    setUnGlobalError("");
+
+    try {
+      const response = await fetch("/api/un-global-preview", {
+        headers: {
+          accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error("UN global preview request failed");
+      }
+
+      const data = (await response.json()) as UnGlobalPreview;
+
+      if (!data || !Array.isArray(data.missionLocations)) {
+        throw new Error("UN global preview response incomplete");
+      }
+
+      setUnGlobalPreview(data);
+      setUnGlobalStatus("ready");
+    } catch {
+      setUnGlobalError("UN global preview unavailable");
+      setUnGlobalStatus("error");
+    }
+  };
+
+  const disableUnGlobalLayer = () => {
+    setShowUnGlobalPanel(false);
+    setIsUnGlobalPanelMinimized(false);
+  };
+
   const socket = usePartySocket({
     room: "default",
     party: "globe",
     onMessage(evt) {
-      const message = JSON.parse(evt.data as string) as OutgoingMessage;
+      const message = parseSocketMessage(evt.data);
+
+      if (!message) {
+        return;
+      }
 
       if (message.type === "add-marker") {
         positions.current.set(message.position.id, {
@@ -516,6 +1092,158 @@ function App() {
     disconnect: "Leaves",
   };
   const weatherGlow = getWeatherGlow(weatherFeed);
+  const enabledComtradeSectionCount =
+    Object.values(comtradeSections).filter(Boolean).length;
+  const isFullUsdMode = comtradeValueMode === "full";
+  const comtradeMenuStatus =
+    comtradeStatus === "ready" && comtradePreview
+      ? "Ready"
+      : comtradeStatus === "loading"
+        ? "Loading"
+        : comtradeStatus === "error"
+          ? "Offline"
+          : "Not loaded";
+  const comtradeMenuSource =
+    comtradeStatus === "ready" && comtradePreview
+      ? comtradePreview.stale
+        ? "Fallback snapshot"
+        : "Comtrade+ API"
+      : comtradeStatus === "error"
+        ? "Preview unavailable"
+        : "Open preview to fetch";
+  const comtradeMenuQuery =
+    comtradeStatus === "ready" && comtradePreview
+      ? `${comtradePreview.queryLabel} / ${comtradePreview.period}`
+      : comtradeStatus === "loading"
+        ? "Fetching Comtrade+ preview data"
+        : "Summary, records, coverage, references, and reporters";
+  const comtradeMenuUpdated =
+    comtradeStatus === "ready" && comtradePreview
+      ? formatPreviewDate(comtradePreview.updatedAt)
+      : "Awaiting preview";
+  const getComtradeSectionDetail = (section: ComtradeSection) => {
+    if (comtradeStatus === "loading") {
+      return "Loading Comtrade+ preview data";
+    }
+
+    if (comtradeStatus === "error") {
+      return comtradeError || "Comtrade+ preview unavailable";
+    }
+
+    if (!comtradePreview) {
+      return COMTRADE_SECTION_DESCRIPTIONS[section];
+    }
+
+    if (section === "records") {
+      return `${comtradePreview.tradeRecords.length} rows; ${comtradePreview.reporter} ${comtradePreview.period}`;
+    }
+
+    if (section === "availability") {
+      return `${comtradePreview.availability.length} datasets; ${formatPreviewNumber(
+        comtradePreview.availabilityTotalRecords,
+        comtradePreview.stale,
+      )} records indexed`;
+    }
+
+    if (section === "references") {
+      return `${comtradePreview.references.length} shown; ${formatPreviewNumber(
+        comtradePreview.referenceTablesTotal,
+        comtradePreview.stale,
+      )} reference tables`;
+    }
+
+    return `${comtradePreview.reporters.length} sampled; ${formatPreviewNumber(
+      comtradePreview.reportersTotal,
+      comtradePreview.stale,
+    )} reporters total`;
+  };
+  const enabledUnGlobalSectionCount =
+    Object.values(unGlobalSections).filter(Boolean).length;
+  const allUnGlobalSectionsEnabled =
+    enabledUnGlobalSectionCount === Object.keys(DEFAULT_UN_GLOBAL_SECTIONS).length;
+  const visibleUnMissionLocations =
+    unGlobalPreview?.missionLocations.filter((mission) =>
+      mission.active ? unGlobalSections.activeMissions : unGlobalSections.pastMissions,
+    ) ?? [];
+  const unGlobalOverlayMarkers =
+    showUnGlobalPanel && unGlobalStatus === "ready" && unGlobalPreview
+      ? [
+          ...(unGlobalSections.offices
+            ? unGlobalPreview.offices.map((office) => ({
+                location: [office.lat, office.lng] as [number, number],
+                size: office.category === "headquarters" ? 0.09 : 0.07,
+              }))
+            : []),
+          ...visibleUnMissionLocations.map((mission) => ({
+            location: [mission.lat, mission.lng] as [number, number],
+            size: mission.active ? 0.08 : 0.045,
+          })),
+          ...(unGlobalSections.memberStates
+            ? unGlobalPreview.memberStates.map((state) => ({
+                location: [state.lat, state.lng] as [number, number],
+                size: 0.045,
+              }))
+            : []),
+          ...(unGlobalSections.affiliates
+            ? unGlobalPreview.affiliates.map((affiliate) => ({
+                location: [affiliate.lat, affiliate.lng] as [number, number],
+                size: affiliate.category === "observer" ? 0.065 : 0.055,
+              }))
+            : []),
+          ...(unGlobalSections.embassies
+            ? unGlobalPreview.embassies.map((embassy) => ({
+                location: [embassy.lat, embassy.lng] as [number, number],
+                size: 0.035,
+              }))
+            : []),
+        ]
+      : [];
+  const unGlobalMarkerColor =
+    unGlobalOverlayMarkers.length > 0
+      ? ([0, 0.65, 1] as [number, number, number])
+      : ([0.8, 0.1, 0.1] as [number, number, number]);
+  const enabledTradePulseLayerCount =
+    Object.values(tradePulseLayers).filter(Boolean).length;
+  const allTradePulseLayersEnabled =
+    enabledTradePulseLayerCount === TRADE_PULSE_LAYERS.length;
+  const visibleTradePulseRoutes =
+    showTradePulsePanel && tradePulseStatus === "ready"
+      ? getVisibleTradePulseRoutes(tradePulsePreview, tradePulseLayers)
+      : [];
+  const tradePulseGlobeMarkers =
+    showTradePulsePanel && tradePulseStatus === "ready"
+      ? getTradePulseGlobeMarkers(tradePulsePreview, tradePulseLayers)
+      : [];
+  const tradePulseGlobeArcs: GlobeArc[] =
+    showTradePulsePanel && tradePulseStatus === "ready"
+      ? visibleTradePulseRoutes.map((route) => {
+          const layer = getRoutePulseLayer(route, tradePulseLayers);
+
+          return {
+            id: route.id,
+            from: [route.origin.lat, route.origin.lng] as [number, number],
+            to: [route.destination.lat, route.destination.lng] as [number, number],
+            via: route.intermediary
+              ? ([route.intermediary.lat, route.intermediary.lng] as [number, number])
+              : null,
+            fromLabel: `${route.origin.name} origin`,
+            toLabel: `${route.destination.name} destination`,
+            viaLabel: route.intermediary
+              ? `${route.intermediary.name} relay`
+              : undefined,
+            color: TRADE_PULSE_LAYER_COLORS[layer],
+            width:
+              route.severity === "critical" ? 3.2 : route.severity === "high" ? 2.6 : 2,
+            dash: TRADE_PULSE_TRANSPORT_DASHES[route.transportMode],
+            severity: route.severity,
+          };
+        })
+      : [];
+  const globeOverlayMarkers = [...unGlobalOverlayMarkers, ...tradePulseGlobeMarkers];
+  const globeMarkerColor =
+    tradePulseGlobeMarkers.length > 0
+      ? ([1, 0.24, 0.18] as [number, number, number])
+      : unGlobalMarkerColor;
 
   return (
     <div className="App">
@@ -544,6 +1272,26 @@ function App() {
             }
           >
             CVE FEED
+          </button>
+          <button
+            className="nav-btn trade-pulse-nav-btn"
+            onClick={() =>
+              runRateLimitedButtonAction("trade-pulse-load", () => {
+                void loadTradePulsePreview();
+              })
+            }
+          >
+            TRADE PULSE
+          </button>
+          <button
+            className="nav-btn"
+            onClick={() =>
+              runRateLimitedButtonAction("un-global-load", () => {
+                void loadUnGlobalPreview();
+              })
+            }
+          >
+            UN LAYER
           </button>
         </div>
 
@@ -757,13 +1505,753 @@ function App() {
         </div>
       )}
 
-      <div className="main-content">
-        <Cobe
-          counter={counter}
-          positions={positions.current}
-          glowColor={weatherGlow.color}
-          glowCssColor={weatherGlow.css}
-        />
+      {showComtradePanel && (
+        <div className="un-panel" role="dialog" aria-label="UN COMTRADE API preview">
+          <div className="un-panel-header">
+            <div>
+              <h3>UN COMTRADE API</h3>
+              <span>Official data preview</span>
+            </div>
+            <button
+              type="button"
+              className="un-close"
+              onClick={() =>
+                runRateLimitedButtonAction("comtrade-close", () => {
+                  setShowComtradePanel(false);
+                  setShowMenu(false);
+                })
+              }
+              aria-label="Close UN COMTRADE preview"
+            >
+              x
+            </button>
+          </div>
+
+          {comtradeStatus === "loading" && (
+            <div className="un-loading">Loading UN data...</div>
+          )}
+
+          {comtradeStatus === "error" && (
+            <div className="un-error">
+              <span>{comtradeError}</span>
+              <button
+                type="button"
+                onClick={() =>
+                  runRateLimitedButtonAction("comtrade-retry", () => {
+                    void loadComtradePreview();
+                  })
+                }
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {comtradeStatus === "ready" && comtradePreview && (
+            <>
+              <div className="un-status-row">
+                <span>{comtradePreview.source}</span>
+                {comtradePreview.stale && <strong>Fallback snapshot</strong>}
+              </div>
+              <div className="un-summary-grid">
+                <div className="un-metric">
+                  <span>Exports</span>
+                  <strong>
+                    {formatUsd(
+                      comtradePreview.exportsUsd,
+                      comtradePreview.stale,
+                      comtradeValueMode,
+                    )}
+                  </strong>
+                </div>
+                <div className="un-metric">
+                  <span>Imports</span>
+                  <strong>
+                    {formatUsd(
+                      comtradePreview.importsUsd,
+                      comtradePreview.stale,
+                      comtradeValueMode,
+                    )}
+                  </strong>
+                </div>
+                <div className="un-metric">
+                  <span>Balance</span>
+                  <strong>
+                    {formatSignedUsd(
+                      comtradePreview.tradeBalanceUsd,
+                      comtradePreview.stale,
+                      comtradeValueMode,
+                    )}
+                  </strong>
+                </div>
+                <div className="un-metric">
+                  <span>Records</span>
+                  <strong>
+                    {formatPreviewNumber(
+                      comtradePreview.availabilityTotalRecords,
+                      comtradePreview.stale,
+                    )}
+                  </strong>
+                </div>
+                <div className="un-metric">
+                  <span>Refs</span>
+                  <strong>
+                    {formatPreviewNumber(
+                      comtradePreview.referenceTablesTotal,
+                      comtradePreview.stale,
+                    )}
+                  </strong>
+                </div>
+              </div>
+
+              <div className="un-update-row">
+                <span>{comtradePreview.queryLabel}</span>
+                <strong>
+                  Latest{" "}
+                  {comtradePreview.latestRelease
+                    ? formatPreviewDate(comtradePreview.latestRelease)
+                    : "n/a"}
+                </strong>
+              </div>
+
+              <div className="un-goal-list" aria-label="UN COMTRADE data preview">
+                {enabledComtradeSectionCount === 0 && (
+                  <div className="un-empty-state">
+                    Enable a Comtrade section from the menu.
+                  </div>
+                )}
+
+                {comtradeSections.records && (
+                  <section className="un-data-section">
+                    <div className="un-section-heading">
+                      <span>Trade records</span>
+                      <strong>{comtradePreview.tradeRecords.length} shown</strong>
+                    </div>
+                    {comtradePreview.tradeRecords.map((record) => (
+                      <article className="un-goal-row" key={`${record.flow}-${record.period}`}>
+                        <div className="un-goal-heading">
+                          <span>{record.flow}</span>
+                          <strong>
+                            {formatUsd(
+                              record.primaryValueUsd,
+                              comtradePreview.stale,
+                              comtradeValueMode,
+                            )}
+                          </strong>
+                        </div>
+                        <p>
+                          {record.reporter} to {record.partner} · {record.commodity} (
+                          {record.commodityCode})
+                        </p>
+                        <div className="un-goal-meta">
+                          <span>Period {record.period}</span>
+                          <span>
+                            CIF{" "}
+                            {formatNullableUsd(
+                              record.cifValueUsd,
+                              comtradePreview.stale,
+                              comtradeValueMode,
+                            )}
+                          </span>
+                          <span>
+                            FOB{" "}
+                            {formatNullableUsd(
+                              record.fobValueUsd,
+                              comtradePreview.stale,
+                              comtradeValueMode,
+                            )}
+                          </span>
+                        </div>
+                      </article>
+                    ))}
+                  </section>
+                )}
+
+                {comtradeSections.availability && (
+                  <section className="un-data-section">
+                    <div className="un-section-heading">
+                      <span>Data availability</span>
+                      <strong>{comtradePreview.availability.length} shown</strong>
+                    </div>
+                    {comtradePreview.availability.map((dataset) => (
+                      <article className="un-compact-row" key={dataset.datasetCode}>
+                        <div className="un-compact-heading">
+                          <span>{dataset.classification || "Dataset"}</span>
+                          <strong>{formatPreviewNumber(dataset.totalRecords)} records</strong>
+                        </div>
+                        <p>
+                          {dataset.reporter} · {dataset.period} · dataset {dataset.datasetCode}
+                        </p>
+                        <div className="un-goal-meta">
+                          <span>
+                            First{" "}
+                            {dataset.firstReleased
+                              ? formatPreviewDate(dataset.firstReleased)
+                              : "n/a"}
+                          </span>
+                          <span>
+                            Last{" "}
+                            {dataset.lastReleased
+                              ? formatPreviewDate(dataset.lastReleased)
+                              : "n/a"}
+                          </span>
+                        </div>
+                      </article>
+                    ))}
+                  </section>
+                )}
+
+                {comtradeSections.references && (
+                  <section className="un-data-section">
+                    <div className="un-section-heading">
+                      <span>Reference tables</span>
+                      <strong>{comtradePreview.references.length} shown</strong>
+                    </div>
+                    {comtradePreview.references.map((reference) => (
+                      <article className="un-compact-row" key={reference.category}>
+                        <div className="un-compact-heading">
+                          <span>{reference.category}</span>
+                          <strong>{reference.variable}</strong>
+                        </div>
+                        <p>{reference.description}</p>
+                      </article>
+                    ))}
+                  </section>
+                )}
+
+                {comtradeSections.reporters && (
+                  <section className="un-data-section">
+                    <div className="un-section-heading">
+                      <span>Reporters</span>
+                      <strong>{formatPreviewNumber(comtradePreview.reportersTotal)} total</strong>
+                    </div>
+                    <div className="un-chip-list">
+                      {comtradePreview.reporters.map((reporter) => (
+                        <span className="un-chip" key={reporter.code}>
+                          {reporter.name} <small>{reporter.iso3 || reporter.code}</small>
+                        </span>
+                      ))}
+                    </div>
+                  </section>
+                )}
+              </div>
+
+              <div className="un-footer">
+                <span>Updated {formatPreviewDate(comtradePreview.updatedAt)}</span>
+                <div className="un-footer-actions">
+                  <a
+                    href={comtradePreview.sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Source
+                  </a>
+                  <a
+                    href={comtradePreview.apiUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    API
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      runRateLimitedButtonAction("comtrade-refresh", () => {
+                        void loadComtradePreview();
+                      })
+                    }
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {showTradePulsePanel && (
+        <div
+          className={`un-panel trade-pulse-panel ${
+            isTradePulsePanelMinimized ? "un-panel-minimized" : ""
+          }`}
+          role="dialog"
+          aria-label="Trade Pulse dependency radar preview"
+        >
+          <div className="un-panel-header">
+            <div>
+              <h3>Trade Pulse</h3>
+              <span>Dependency radar preview</span>
+            </div>
+            <div className="un-panel-actions">
+              <button
+                type="button"
+                className="un-minimize"
+                onClick={() =>
+                  runRateLimitedButtonAction("trade-pulse-minimize", () =>
+                    setIsTradePulsePanelMinimized((minimized) => !minimized),
+                  )
+                }
+                aria-label={
+                  isTradePulsePanelMinimized
+                    ? "Restore Trade Pulse preview"
+                    : "Minimize Trade Pulse preview"
+                }
+              >
+                {isTradePulsePanelMinimized ? "+" : "_"}
+              </button>
+              <button
+                type="button"
+                className="un-close"
+                onClick={() =>
+                  runRateLimitedButtonAction("trade-pulse-close", () =>
+                    setShowTradePulsePanel(false),
+                  )
+                }
+                aria-label="Close Trade Pulse preview"
+              >
+                x
+              </button>
+            </div>
+          </div>
+
+          {!isTradePulsePanelMinimized && tradePulseStatus === "loading" && (
+            <div className="un-loading">Loading Trade Pulse layers...</div>
+          )}
+
+          {!isTradePulsePanelMinimized && tradePulseStatus === "error" && (
+            <div className="un-error">
+              <span>{tradePulseError}</span>
+              <button
+                type="button"
+                onClick={() =>
+                  runRateLimitedButtonAction("trade-pulse-retry", () => {
+                    void loadTradePulsePreview();
+                  })
+                }
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {!isTradePulsePanelMinimized &&
+            tradePulseStatus === "ready" &&
+            tradePulsePreview && (
+              <>
+                <div className="un-status-row trade-pulse-status-row">
+                  <span>{tradePulsePreview.source}</span>
+                  <strong>Derived preview</strong>
+                </div>
+
+                <div className="un-summary-grid trade-pulse-summary-grid">
+                  {tradePulsePreview.metrics.slice(0, 8).map((metric) => (
+                    <div className="un-metric" key={metric.label}>
+                      <span>{metric.label}</span>
+                      <strong>{metric.value}</strong>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="un-update-row">
+                  <span>{tradePulsePreview.period} Comtrade-shaped scenario</span>
+                  <strong>{visibleTradePulseRoutes.length} active routes</strong>
+                </div>
+
+                <div className="trade-pulse-layer-grid" role="group" aria-label="Trade Pulse layers">
+                  {TRADE_PULSE_LAYERS.map((layer) => (
+                    <button
+                      type="button"
+                      key={layer}
+                      className={`trade-pulse-layer-toggle ${
+                        tradePulseLayers[layer] ? "active" : ""
+                      }`}
+                      style={
+                        { "--layer-color": TRADE_PULSE_LAYER_COLORS[layer] } as React.CSSProperties
+                      }
+                      aria-pressed={tradePulseLayers[layer]}
+                      onClick={() =>
+                        runRateLimitedButtonAction(`trade-pulse-layer-${layer}`, () =>
+                          toggleTradePulseLayer(layer),
+                        )
+                      }
+                    >
+                      <span>{TRADE_PULSE_LAYER_LABELS[layer]}</span>
+                      <strong>{tradePulseLayers[layer] ? "On" : "Off"}</strong>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="un-goal-list trade-pulse-route-list" aria-label="Trade Pulse routes">
+                  {enabledTradePulseLayerCount === 0 && (
+                    <div className="un-empty-state">
+                      Enable a Trade Pulse layer from the panel or menu.
+                    </div>
+                  )}
+
+                  {visibleTradePulseRoutes.map((route) => {
+                    const activeLayer = getRoutePulseLayer(route, tradePulseLayers);
+
+                    return (
+                      <article
+                        className={`un-goal-row trade-pulse-route-card trade-pulse-card-${route.severity}`}
+                        key={route.id}
+                        style={
+                          {
+                            "--route-card-color": TRADE_PULSE_LAYER_COLORS[activeLayer],
+                          } as React.CSSProperties
+                        }
+                      >
+                        <div className="un-goal-heading trade-pulse-card-heading">
+                          <span>
+                            {route.origin.iso3} to {route.destination.iso3}
+                          </span>
+                          <strong>{route.commodity}</strong>
+                        </div>
+                        <p>
+                          {route.origin.name} to {route.destination.name}
+                          {route.intermediary
+                            ? ` via ${route.intermediary.name}`
+                            : ""}{" "}
+                          · {route.transportMode} · {route.customsProcedure}
+                        </p>
+                        <div className="trade-pulse-badge-row">
+                          {route.layers
+                            .filter((layer) => tradePulseLayers[layer])
+                            .map((layer) => (
+                              <span
+                                className="trade-pulse-layer-badge"
+                                key={layer}
+                                style={
+                                  {
+                                    "--layer-color": TRADE_PULSE_LAYER_COLORS[layer],
+                                  } as React.CSSProperties
+                                }
+                              >
+                                {TRADE_PULSE_LAYER_SHORT_LABELS[layer]}
+                              </span>
+                            ))}
+                        </div>
+                        <div className="un-goal-meta trade-pulse-metrics">
+                          <span>Value {formatUsd(route.valueUsd, false, comtradeValueMode)}</span>
+                          <span>Supplier {formatPercent(route.supplierSharePct)}</span>
+                          <span>Mirror gap {formatPercent(route.asymmetryPct)}</span>
+                          <span>CIF/FOB {formatPercent(route.frictionPct)}</span>
+                          <span>Re-export {formatPercent(route.reExportSharePct)}</span>
+                          <span>Confidence {formatPercent(route.confidencePct)}</span>
+                        </div>
+                        <p className="trade-pulse-insight">{route.insight}</p>
+                      </article>
+                    );
+                  })}
+                </div>
+
+                <div className="trade-pulse-notes">
+                  <strong>Preview notes</strong>
+                  {tradePulsePreview.notes.map((note) => (
+                    <span key={note}>{note}</span>
+                  ))}
+                </div>
+
+                <div className="un-footer">
+                  <span>Updated {formatPreviewDate(tradePulsePreview.updatedAt)}</span>
+                  <div className="un-footer-actions">
+                    <a
+                      href={tradePulsePreview.sourceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Source
+                    </a>
+                    <a
+                      href={tradePulsePreview.apiUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      API
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        runRateLimitedButtonAction("trade-pulse-refresh", () => {
+                          void loadTradePulsePreview();
+                        })
+                      }
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+        </div>
+      )}
+
+      {showUnGlobalPanel && (
+        <div
+          className={`un-panel un-layer-panel ${
+            isUnGlobalPanelMinimized ? "un-panel-minimized" : ""
+          }`}
+          role="dialog"
+          aria-label="UN global location preview"
+        >
+          <div className="un-panel-header">
+            <div>
+              <h3>UN Global Layer</h3>
+              <span>HQ, missions, states, affiliates</span>
+            </div>
+            <div className="un-panel-actions">
+              <button
+                type="button"
+                className="un-minimize"
+                onClick={() =>
+                  runRateLimitedButtonAction("un-global-minimize", () =>
+                    setIsUnGlobalPanelMinimized((minimized) => !minimized),
+                  )
+                }
+                aria-label={
+                  isUnGlobalPanelMinimized
+                    ? "Restore UN global preview"
+                    : "Minimize UN global preview"
+                }
+              >
+                {isUnGlobalPanelMinimized ? "+" : "_"}
+              </button>
+              <button
+                type="button"
+                className="un-close"
+                onClick={() =>
+                  runRateLimitedButtonAction("un-global-close", disableUnGlobalLayer)
+                }
+                aria-label="Disable UN global layer"
+              >
+                x
+              </button>
+            </div>
+          </div>
+
+          {!isUnGlobalPanelMinimized && unGlobalStatus === "loading" && (
+            <div className="un-loading">Loading UN global data...</div>
+          )}
+
+          {!isUnGlobalPanelMinimized && unGlobalStatus === "error" && (
+            <div className="un-error">
+              <span>{unGlobalError}</span>
+              <button
+                type="button"
+                onClick={() =>
+                  runRateLimitedButtonAction("un-global-retry", () => {
+                    void loadUnGlobalPreview();
+                  })
+                }
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {!isUnGlobalPanelMinimized && unGlobalStatus === "ready" && unGlobalPreview && (
+            <>
+              <div className="un-status-row">
+                <span>{unGlobalPreview.source}</span>
+                {unGlobalPreview.stale && <strong>Fallback snapshot</strong>}
+              </div>
+              <div className="un-summary-grid">
+                <div className="un-metric">
+                  <span>HQ</span>
+                  <strong>{formatPreviewNumber(unGlobalPreview.officesTotal)}</strong>
+                </div>
+                <div className="un-metric">
+                  <span>Missions</span>
+                  <strong>{formatPreviewNumber(unGlobalPreview.missionCoordinateTotal)}</strong>
+                </div>
+                <div className="un-metric">
+                  <span>Members</span>
+                  <strong>{formatPreviewNumber(unGlobalPreview.memberStatesTotal)}</strong>
+                </div>
+                <div className="un-metric">
+                  <span>Affiliates</span>
+                  <strong>{formatPreviewNumber(unGlobalPreview.affiliatesTotal)}</strong>
+                </div>
+                <div className="un-metric">
+                  <span>Embassies</span>
+                  <strong>{formatPreviewNumber(unGlobalPreview.embassiesTotal)}</strong>
+                </div>
+              </div>
+
+              <div className="un-update-row">
+                <span>{unGlobalPreview.queryLabel}</span>
+                <strong>
+                  Latest{" "}
+                  {unGlobalPreview.latestMissionUpdate
+                    ? formatPreviewDate(unGlobalPreview.latestMissionUpdate)
+                    : "n/a"}
+                </strong>
+              </div>
+
+              <div className="un-goal-list" aria-label="UN global location data preview">
+                {enabledUnGlobalSectionCount === 0 && (
+                  <div className="un-empty-state">
+                    Enable a UN global layer section from the menu.
+                  </div>
+                )}
+
+                {unGlobalSections.offices && (
+                  <section className="un-data-section">
+                    <div className="un-section-heading">
+                      <span>UN HQ and main offices</span>
+                      <strong>{unGlobalPreview.offices.length} markers</strong>
+                    </div>
+                    {unGlobalPreview.offices.map((office) => (
+                      <article className="un-compact-row" key={office.id}>
+                        <div className="un-compact-heading">
+                          <span>{office.name}</span>
+                          <strong>{office.category}</strong>
+                        </div>
+                        <p>
+                          {office.city}, {office.country} · {office.lat.toFixed(2)},{" "}
+                          {office.lng.toFixed(2)}
+                        </p>
+                      </article>
+                    ))}
+                  </section>
+                )}
+
+                {visibleUnMissionLocations.length > 0 && (
+                  <section className="un-data-section">
+                    <div className="un-section-heading">
+                      <span>Mission HQ locations</span>
+                      <strong>{visibleUnMissionLocations.length} shown</strong>
+                    </div>
+                    {visibleUnMissionLocations.map((mission) => (
+                      <article className="un-goal-row" key={mission.id}>
+                        <div className="un-goal-heading">
+                          <span>{mission.acronym}</span>
+                          <strong>{mission.active ? "Active" : "Historic"}</strong>
+                        </div>
+                        <p>
+                          {mission.name} · {mission.location}
+                        </p>
+                        <div className="un-goal-meta">
+                          <span>Lat {mission.lat.toFixed(2)}</span>
+                          <span>Lng {mission.lng.toFixed(2)}</span>
+                          <span>
+                            Start{" "}
+                            {mission.startDate
+                              ? formatPreviewDate(mission.startDate)
+                              : "n/a"}
+                          </span>
+                        </div>
+                      </article>
+                    ))}
+                  </section>
+                )}
+
+                {unGlobalSections.memberStates && (
+                  <section className="un-data-section">
+                    <div className="un-section-heading">
+                      <span>Member states</span>
+                      <strong>{unGlobalPreview.memberStates.length} markers</strong>
+                    </div>
+                    <div className="un-chip-list">
+                      {unGlobalPreview.memberStates.map((state) => (
+                        <span className="un-chip" key={state.code}>
+                          {state.name} <small>{state.code}</small>
+                        </span>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {unGlobalSections.affiliates && (
+                  <section className="un-data-section">
+                    <div className="un-section-heading">
+                      <span>Non-member affiliates</span>
+                      <strong>{unGlobalPreview.affiliates.length} markers</strong>
+                    </div>
+                    {unGlobalPreview.affiliates.map((affiliate) => (
+                      <article className="un-compact-row" key={affiliate.code}>
+                        <div className="un-compact-heading">
+                          <span>{affiliate.name}</span>
+                          <strong>{affiliate.category}</strong>
+                        </div>
+                        <p>
+                          SDG/M49 area {affiliate.code} · {affiliate.lat.toFixed(2)},{" "}
+                          {affiliate.lng.toFixed(2)}
+                        </p>
+                      </article>
+                    ))}
+                  </section>
+                )}
+
+                {unGlobalSections.embassies && (
+                  <section className="un-data-section">
+                    <div className="un-section-heading">
+                      <span>Permanent missions / embassies</span>
+                      <strong>{unGlobalPreview.embassies.length} markers</strong>
+                    </div>
+                    {unGlobalPreview.embassies.map((embassy) => (
+                      <article className="un-compact-row" key={embassy.code}>
+                        <div className="un-compact-heading">
+                          <span>{embassy.name}</span>
+                          <strong>Blue Book</strong>
+                        </div>
+                        <p>
+                          UN diplomatic directory marker · {embassy.lat.toFixed(2)},{" "}
+                          {embassy.lng.toFixed(2)}
+                        </p>
+                      </article>
+                    ))}
+                  </section>
+                )}
+              </div>
+
+              <div className="un-footer">
+                <span>Updated {formatPreviewDate(unGlobalPreview.updatedAt)}</span>
+                <div className="un-footer-actions">
+                  <a
+                    href={unGlobalPreview.sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Source
+                  </a>
+                  <a
+                    href={unGlobalPreview.apiUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    API
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      runRateLimitedButtonAction("un-global-refresh", () => {
+                        void loadUnGlobalPreview();
+                      })
+                    }
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      <div className={`main-content ${showTradePulsePanel ? "trade-pulse-main" : ""}`}>
+        <div className="globe-stage">
+          <Cobe
+            counter={counter}
+            positions={positions.current}
+            overlayMarkers={globeOverlayMarkers}
+            overlayRoutes={tradePulseGlobeArcs}
+            markerColor={globeMarkerColor}
+            glowColor={weatherGlow.color}
+            glowCssColor={weatherGlow.css}
+          />
+        </div>
       </div>
 
       <div className="activity-floating">
@@ -943,10 +2431,12 @@ function App() {
         <div className="modal-overlay" onClick={() => setShowAbout(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <button
+              type="button"
               className="modal-close"
               onClick={() =>
                 runRateLimitedButtonAction("about-close", () => setShowAbout(false))
               }
+              aria-label="Close about dialog"
             >
               x
             </button>
@@ -983,17 +2473,277 @@ function App() {
       )}
 
       {showMenu && (
-        <div className="menu-dropdown">
-          <a href="https://federalkey.org" className="menu-item">
+        <div className="menu-dropdown" aria-label="Global controls menu">
+          <div className="menu-section">
+            <div className="menu-section-title">Comtrade Controls</div>
+            <div className="menu-comtrade-summary" aria-label="Comtrade snapshot summary">
+              <div className="menu-comtrade-summary-head">
+                <span>{comtradeMenuStatus}</span>
+                <strong>{comtradeMenuSource}</strong>
+              </div>
+              <small>{comtradeMenuQuery}</small>
+              <div className="menu-comtrade-metrics">
+                <div>
+                  <span>Exports</span>
+                  <strong>
+                    {comtradePreview
+                      ? formatUsd(
+                          comtradePreview.exportsUsd,
+                          comtradePreview.stale,
+                          comtradeValueMode,
+                        )
+                      : "n/a"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Imports</span>
+                  <strong>
+                    {comtradePreview
+                      ? formatUsd(
+                          comtradePreview.importsUsd,
+                          comtradePreview.stale,
+                          comtradeValueMode,
+                        )
+                      : "n/a"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Balance</span>
+                  <strong>
+                    {comtradePreview
+                      ? formatSignedUsd(
+                          comtradePreview.tradeBalanceUsd,
+                          comtradePreview.stale,
+                          comtradeValueMode,
+                        )
+                      : "n/a"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Updated</span>
+                  <strong>{comtradeMenuUpdated}</strong>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              className={`menu-toggle-item ${showComtradePanel ? "active" : ""}`}
+              aria-pressed={showComtradePanel}
+              onClick={() =>
+                runRateLimitedButtonAction(
+                  "menu-comtrade-panel",
+                  toggleComtradePanelFromMenu,
+                )
+              }
+            >
+              <div className="menu-toggle-copy">
+                <span>Preview panel</span>
+                <small>open or close the detailed Comtrade+ drawer</small>
+              </div>
+              <strong>{showComtradePanel ? "Open" : "Closed"}</strong>
+            </button>
+            {COMTRADE_SECTIONS.map((section) => (
+                <button
+                  type="button"
+                  className={`menu-toggle-item ${
+                    comtradeSections[section] ? "active" : ""
+                  }`}
+                  aria-pressed={comtradeSections[section]}
+                  key={section}
+                  onClick={() =>
+                    runRateLimitedButtonAction(`menu-comtrade-${section}`, () =>
+                      toggleComtradeSection(section),
+                    )
+                  }
+                >
+                  <div className="menu-toggle-copy">
+                    <span>{COMTRADE_SECTION_LABELS[section]}</span>
+                    <small>{getComtradeSectionDetail(section)}</small>
+                  </div>
+                  <strong>{comtradeSections[section] ? "On" : "Off"}</strong>
+                </button>
+              ))}
+            <button
+              type="button"
+              className={`menu-toggle-item ${isFullUsdMode ? "active" : ""}`}
+              aria-pressed={isFullUsdMode}
+              onClick={() =>
+                runRateLimitedButtonAction("menu-comtrade-usd-mode", () =>
+                  setComtradeValueMode((mode) => (mode === "compact" ? "full" : "compact")),
+                )
+              }
+            >
+              <div className="menu-toggle-copy">
+                <span>USD values</span>
+                <small>
+                  {isFullUsdMode
+                    ? "full dollar figures for precise comparisons"
+                    : "compact notation for faster scanning"}
+                </small>
+              </div>
+              <strong>{isFullUsdMode ? "Full" : "Compact"}</strong>
+            </button>
+            <div className="menu-section-meta">
+              {enabledComtradeSectionCount}/4 data sections visible
+            </div>
+          </div>
+          <div className="menu-section">
+            <div className="menu-section-title">Trade Pulse</div>
+            <button
+              type="button"
+              className={`menu-toggle-item ${showTradePulsePanel ? "active" : ""}`}
+              aria-pressed={showTradePulsePanel}
+              onClick={() =>
+                runRateLimitedButtonAction("menu-trade-pulse-panel", () => {
+                  if (showTradePulsePanel) {
+                    setIsTradePulsePanelMinimized((minimized) => !minimized);
+                  } else {
+                    void loadTradePulsePreview(false);
+                  }
+                })
+              }
+            >
+              <span>Panel view</span>
+              <strong>
+                {showTradePulsePanel
+                  ? isTradePulsePanelMinimized
+                    ? "Minimized"
+                    : "Open"
+                  : "Closed"}
+              </strong>
+            </button>
+            <button
+              type="button"
+              className={`menu-toggle-item ${allTradePulseLayersEnabled ? "active" : ""}`}
+              aria-pressed={allTradePulseLayersEnabled}
+              onClick={() =>
+                runRateLimitedButtonAction(
+                  "menu-trade-pulse-all",
+                  toggleAllTradePulseLayers,
+                )
+              }
+            >
+              <span>All pulse layers</span>
+              <strong>{allTradePulseLayersEnabled ? "On" : "Mixed"}</strong>
+            </button>
+            {TRADE_PULSE_LAYERS.map((layer) => (
+              <button
+                type="button"
+                className={`menu-toggle-item ${tradePulseLayers[layer] ? "active" : ""}`}
+                aria-pressed={tradePulseLayers[layer]}
+                key={layer}
+                onClick={() =>
+                  runRateLimitedButtonAction(`menu-trade-pulse-${layer}`, () =>
+                    toggleTradePulseLayer(layer),
+                  )
+                }
+              >
+                <span>{TRADE_PULSE_LAYER_SHORT_LABELS[layer]}</span>
+                <strong>{tradePulseLayers[layer] ? "On" : "Off"}</strong>
+              </button>
+            ))}
+            <div className="menu-section-meta">
+              {enabledTradePulseLayerCount}/8 pulse layers visible
+            </div>
+          </div>
+          <div className="menu-section">
+            <div className="menu-section-title">UN Global Layer</div>
+            <button
+              type="button"
+              className={`menu-toggle-item ${showUnGlobalPanel ? "active" : ""}`}
+              aria-pressed={showUnGlobalPanel}
+              onClick={() =>
+                runRateLimitedButtonAction(
+                  "menu-un-global-panel",
+                  toggleUnGlobalPanelFromMenu,
+                )
+              }
+            >
+              <span>Panel view</span>
+              <strong>
+                {showUnGlobalPanel
+                  ? isUnGlobalPanelMinimized
+                    ? "Minimized"
+                    : "Open"
+                  : "Closed"}
+              </strong>
+            </button>
+            <button
+              type="button"
+              className={`menu-toggle-item ${allUnGlobalSectionsEnabled ? "active" : ""}`}
+              aria-pressed={allUnGlobalSectionsEnabled}
+              onClick={() =>
+                runRateLimitedButtonAction(
+                  "menu-un-global-all",
+                  toggleAllUnGlobalSections,
+                )
+              }
+            >
+              <span>All locations</span>
+              <strong>{allUnGlobalSectionsEnabled ? "On" : "Mixed"}</strong>
+            </button>
+            {(
+              [
+                "offices",
+                "activeMissions",
+                "pastMissions",
+                "memberStates",
+                "affiliates",
+                "embassies",
+              ] as UnGlobalSection[]
+            ).map((section) => (
+              <button
+                type="button"
+                className={`menu-toggle-item ${unGlobalSections[section] ? "active" : ""}`}
+                aria-pressed={unGlobalSections[section]}
+                key={section}
+                onClick={() =>
+                  runRateLimitedButtonAction(`menu-un-global-${section}`, () =>
+                    toggleUnGlobalSection(section),
+                  )
+                }
+              >
+                <span>{UN_GLOBAL_SECTION_LABELS[section]}</span>
+                <strong>{unGlobalSections[section] ? "On" : "Off"}</strong>
+              </button>
+            ))}
+            <div className="menu-section-meta">
+              {enabledUnGlobalSectionCount}/6 global sections visible
+            </div>
+          </div>
+          <a
+            href="https://federalkey.org"
+            className="menu-item"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             Federalkey
           </a>
-          <a href="#" className="menu-item">
+          <button
+            type="button"
+            className="menu-item menu-item-button"
+            onClick={() =>
+              runRateLimitedButtonAction("settings-placeholder", () =>
+                setShowMenu(false),
+              )
+            }
+          >
             Settings
-          </a>
-          <a href="https://104041.webmail.dynadot.com/user/signin.html" className="menu-item">
+          </button>
+          <a
+            href="https://104041.webmail.dynadot.com/user/signin.html"
+            className="menu-item"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             Webmail
           </a>
-          <a href="https://federalkeymarketplace.page.gd" className="menu-item">
+          <a
+            href="https://federalkeymarketplace.page.gd"
+            className="menu-item"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             Market
           </a>
         </div>
