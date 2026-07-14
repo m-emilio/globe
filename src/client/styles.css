@@ -398,93 +398,130 @@ b {
   position: fixed;
   top: 70px;
   right: 30px;
-  background-color: transparent;
+  display: flex;
+  flex-direction: column;
+  background-color: rgba(0, 0, 0, 0.94);
   border: 1.5px solid #00d9ff;
   border-radius: 2px;
   z-index: 1004;
-  min-width: 280px;
+  width: min(460px, calc(100vw - 24px));
+  max-width: min(460px, calc(100vw - 24px));
   max-height: calc(100vh - 90px);
   box-shadow: 0 0 20px rgba(0, 217, 255, 0.3);
-  overflow-y: auto;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
-.menu-dropdown::-webkit-scrollbar {
-  width: 6px;
+.menu-dropdown-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #00d9ff rgba(0, 217, 255, 0.1);
 }
 
-.menu-dropdown::-webkit-scrollbar-track {
-  background: rgba(0, 217, 255, 0.08);
+.menu-dropdown-scroll::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
 }
 
-.menu-dropdown::-webkit-scrollbar-thumb {
+.menu-dropdown-scroll::-webkit-scrollbar-track {
+  background: rgba(0, 217, 255, 0.1);
+}
+
+.menu-dropdown-scroll::-webkit-scrollbar-thumb {
   background: #00d9ff;
-  border-radius: 3px;
+  border-radius: 4px;
+  border: 2px solid rgba(0, 0, 0, 0.55);
+}
+
+.menu-dropdown-scroll::-webkit-scrollbar-corner {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.menu-dropdown-inner {
+  min-width: 400px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .menu-section {
-  padding: 12px;
+  padding: 16px;
   border-bottom: 1px solid rgba(0, 217, 255, 0.25);
   font-family: 'Courier New', monospace;
 }
 
 .menu-section-title {
-  margin-bottom: 8px;
+  margin-bottom: 12px;
   color: #d4af37;
-  font-size: 10px;
+  font-size: 13px;
   font-weight: bold;
-  letter-spacing: 1.1px;
+  letter-spacing: 1px;
+  line-height: 1.35;
   text-transform: uppercase;
 }
 
 .menu-comtrade-summary {
-  margin-bottom: 8px;
-  padding: 9px;
+  margin-bottom: 12px;
+  padding: 12px;
   border: 1px solid rgba(0, 217, 255, 0.22);
   background: rgba(0, 217, 255, 0.035);
 }
 
 .menu-comtrade-summary-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 4px;
+  gap: 12px;
+  margin-bottom: 6px;
 }
 
 .menu-comtrade-summary-head span,
 .menu-comtrade-summary-head strong {
-  font-size: 9px;
+  font-size: 12px;
   font-weight: bold;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.6px;
+  line-height: 1.4;
   text-transform: uppercase;
 }
 
 .menu-comtrade-summary-head span {
   color: #00d9ff;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .menu-comtrade-summary-head strong {
   color: #d4af37;
   text-align: right;
+  flex: 0 0 auto;
+  max-width: 48%;
+  overflow-wrap: anywhere;
 }
 
 .menu-comtrade-summary small {
   display: block;
   color: #8aa1ad;
-  font-size: 9px;
-  line-height: 1.35;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .menu-comtrade-metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  margin-top: 8px;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .menu-comtrade-metrics div {
   min-width: 0;
-  padding: 6px;
+  padding: 10px;
   border: 1px solid rgba(0, 217, 255, 0.16);
   background: rgba(0, 0, 0, 0.14);
 }
@@ -492,29 +529,29 @@ b {
 .menu-comtrade-metrics span,
 .menu-comtrade-metrics strong {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  letter-spacing: 0.65px;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
+  overflow-wrap: anywhere;
 }
 
 .menu-comtrade-metrics span {
   color: #7e8a95;
-  font-size: 8px;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .menu-comtrade-metrics strong {
-  margin-top: 2px;
+  margin-top: 4px;
   color: #00d9ff;
-  font-size: 9px;
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .menu-toggle-item {
   width: 100%;
-  min-height: 40px;
-  margin-bottom: 6px;
-  padding: 7px 9px;
+  min-height: 48px;
+  margin-bottom: 8px;
+  padding: 12px 14px;
   border: 1px solid rgba(0, 217, 255, 0.28);
   border-radius: 2px;
   background: rgba(0, 217, 255, 0.03);
@@ -523,7 +560,7 @@ b {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 14px;
   font-family: 'Courier New', monospace;
   text-align: left;
   transition: all 0.2s ease;
@@ -534,11 +571,11 @@ b {
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 
 .menu-toggle-item:last-of-type {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .menu-toggle-item:hover {
@@ -553,28 +590,33 @@ b {
 
 .menu-toggle-item span {
   color: #00d9ff;
-  font-size: 10px;
+  font-size: 13px;
   font-weight: bold;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.6px;
+  line-height: 1.35;
   text-transform: uppercase;
+  overflow-wrap: anywhere;
 }
 
 .menu-toggle-copy small {
   color: #7e8a95;
-  font-size: 8px;
+  font-size: 11px;
   font-weight: bold;
-  line-height: 1.3;
-  letter-spacing: 0.45px;
+  line-height: 1.4;
+  letter-spacing: 0.35px;
   text-transform: uppercase;
+  overflow-wrap: anywhere;
 }
 
 .menu-toggle-item strong {
   flex: 0 0 auto;
   color: #ff3b3b;
-  font-size: 10px;
-  letter-spacing: 0.8px;
+  font-size: 12px;
+  letter-spacing: 0.6px;
+  line-height: 1.3;
   text-align: right;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .menu-toggle-item.active strong {
@@ -583,28 +625,31 @@ b {
 
 .menu-section-meta {
   color: #7e8a95;
-  font-size: 9px;
+  font-size: 12px;
   font-weight: bold;
-  letter-spacing: 0.7px;
+  letter-spacing: 0.5px;
+  line-height: 1.4;
   text-transform: uppercase;
 }
 
 .menu-item {
   display: block;
   width: 100%;
-  padding: 12px 20px;
+  padding: 14px 18px;
   border: 0;
   color: #00d9ff;
   text-decoration: none;
   font-family: 'Courier New', monospace;
-  font-size: 12px;
-  letter-spacing: 1px;
+  font-size: 14px;
+  letter-spacing: 0.8px;
+  line-height: 1.4;
   text-transform: uppercase;
   border-bottom: 1px solid rgba(0, 217, 255, 0.2);
   background: transparent;
   transition: all 0.3s ease;
   cursor: pointer;
   text-align: left;
+  min-height: 48px;
 }
 
 .menu-item:last-child {
@@ -615,6 +660,73 @@ b {
   background-color: transparent;
   color: #00ff88;
   text-shadow: 0 0 10px #00ff88;
+}
+
+.menu-item-button {
+  display: flex;
+  align-items: center;
+}
+
+.menu-section-trade-pulse {
+  min-width: 0;
+}
+
+.menu-trade-pulse-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-height: min(360px, 42vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  margin-bottom: 10px;
+  border: 1px solid rgba(255, 59, 59, 0.28);
+  border-radius: 2px;
+  background: rgba(255, 59, 59, 0.03);
+  scrollbar-width: thin;
+  scrollbar-color: #ff3b3b rgba(255, 59, 59, 0.12);
+}
+
+.menu-trade-pulse-layers::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.menu-trade-pulse-layers::-webkit-scrollbar-track {
+  background: rgba(255, 59, 59, 0.1);
+}
+
+.menu-trade-pulse-layers::-webkit-scrollbar-thumb {
+  background: #ff3b3b;
+  border-radius: 4px;
+  border: 2px solid rgba(0, 0, 0, 0.45);
+}
+
+.menu-trade-pulse-layer {
+  margin-bottom: 0;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  border-bottom: 1px solid rgba(255, 59, 59, 0.18);
+  background: transparent;
+}
+
+.menu-trade-pulse-layer:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.menu-trade-pulse-layer .menu-trade-pulse-detail {
+  display: block;
+  white-space: normal;
+}
+
+.menu-trade-pulse-layer.active {
+  background: rgba(255, 59, 59, 0.08);
+  box-shadow: none;
+  border-color: rgba(255, 59, 59, 0.18);
+  border-bottom-color: rgba(255, 59, 59, 0.28);
 }
 
 /* Weather Panel */
@@ -1449,9 +1561,55 @@ b {
 }
 
 .trade-pulse-panel {
-  width: min(520px, calc(100vw - 60px));
+  width: min(560px, calc(100vw - 40px));
   border-color: #ff3b3b;
   box-shadow: 0 0 34px rgba(255, 59, 59, 0.24);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.92);
+}
+
+.trade-pulse-panel-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #ff3b3b rgba(255, 59, 59, 0.12);
+}
+
+.trade-pulse-panel-scroll::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.trade-pulse-panel-scroll::-webkit-scrollbar-track {
+  background: rgba(255, 59, 59, 0.1);
+}
+
+.trade-pulse-panel-scroll::-webkit-scrollbar-thumb {
+  background: #ff3b3b;
+  border-radius: 4px;
+  border: 2px solid rgba(0, 0, 0, 0.5);
+}
+
+.trade-pulse-panel-scroll::-webkit-scrollbar-corner {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.trade-pulse-panel-inner {
+  min-width: 480px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.trade-pulse-panel .trade-pulse-route-list {
+  max-height: none;
+  overflow: visible;
 }
 
 .trade-pulse-panel .un-panel-header {
@@ -1499,7 +1657,8 @@ b {
 }
 
 .trade-pulse-layer-toggle {
-  min-height: 34px;
+  min-height: 40px;
+  padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--layer-color) 60%, transparent);
   border-radius: 3px;
   background: rgba(0, 0, 0, 0.18);
@@ -1508,12 +1667,13 @@ b {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   font-family: 'Courier New', monospace;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: bold;
-  letter-spacing: 0.7px;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
+  text-align: left;
 }
 
 .trade-pulse-layer-toggle.active {
@@ -1523,11 +1683,13 @@ b {
 
 .trade-pulse-layer-toggle strong {
   color: #d4af37;
-  font-size: 9px;
+  font-size: 11px;
+  flex: 0 0 auto;
 }
 
 .trade-pulse-layer-toggle span {
-  line-height: 1.25;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .trade-pulse-route-list {
@@ -2196,49 +2358,105 @@ b {
 
 /* Responsive */
 @media (max-width: 768px) {
+  body {
+    padding-top: 0;
+  }
+
   .nav-bar {
-    padding: 0 15px;
-    height: 60px;
+    padding: 8px 12px;
+    height: auto;
+    min-height: 60px;
+    flex-wrap: wrap;
+    gap: 8px;
+    row-gap: 8px;
   }
-  
+
+  .nav-left {
+    flex: 1 1 auto;
+    min-width: 0;
+    order: 1;
+  }
+
   .nav-title {
-    font-size: 16px;
+    font-size: 14px;
+    letter-spacing: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  
+
   .nav-subtitle {
-    font-size: 12px;
+    font-size: 11px;
+    margin-left: 6px;
   }
-  
+
+  .nav-right {
+    flex: 0 0 auto;
+    order: 2;
+    gap: 6px;
+  }
+
   .nav-center {
-    gap: 10px;
+    flex: 1 1 100%;
+    order: 3;
+    justify-content: stretch;
+    gap: 6px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
   }
-  
+
   .nav-btn {
-    padding: 6px 12px;
-    font-size: 11px;
+    width: 100%;
+    min-height: 40px;
+    padding: 8px 6px;
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  
+
   .nav-menu-btn {
-    padding: 6px 15px;
+    min-height: 40px;
+    padding: 8px 12px;
     font-size: 11px;
+    letter-spacing: 1px;
+    gap: 6px;
   }
 
   .weather-icon-btn {
-    width: 34px;
-    height: 32px;
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
   }
 
   .weather-icon-btn svg {
     width: 20px;
     height: 20px;
   }
-  
+
   .main-content {
-    margin-top: 60px;
+    margin-top: 110px;
   }
 
   .globe-stage {
     width: 100%;
+  }
+
+  .globe-controls {
+    left: 8px;
+    bottom: 8px;
+    width: 74px;
+    padding: 5px;
+    gap: 3px;
+  }
+
+  .globe-control-btn {
+    min-height: 36px;
+    font-size: 8px;
+    letter-spacing: 0.5px;
+    padding: 6px 4px;
   }
 
   .globe-arc-label {
@@ -2249,56 +2467,254 @@ b {
   }
 
   .menu-dropdown {
-    top: 60px;
-    right: 15px;
-    min-width: min(280px, calc(100vw - 30px));
+    top: auto;
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-width: none;
+    max-height: calc(100vh - 130px);
+    font-size: 15px;
+  }
+
+  .menu-dropdown-inner {
+    min-width: 320px;
+  }
+
+  .trade-pulse-panel-inner {
+    min-width: 300px;
+  }
+
+  .menu-trade-pulse-layers {
+    max-height: min(300px, 36vh);
   }
 
   .menu-section {
-    padding: 10px;
+    padding: 14px;
+  }
+
+  .menu-section-title {
+    font-size: 14px;
+    margin-bottom: 12px;
+  }
+
+  .menu-comtrade-summary {
+    padding: 12px;
+  }
+
+  .menu-comtrade-summary-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  .menu-comtrade-summary-head span,
+  .menu-comtrade-summary-head strong {
+    font-size: 13px;
+    max-width: none;
+    text-align: left;
+  }
+
+  .menu-comtrade-summary small {
+    font-size: 12px;
+  }
+
+  .menu-comtrade-metrics {
+    gap: 8px;
+  }
+
+  .menu-comtrade-metrics div {
+    padding: 12px;
+  }
+
+  .menu-comtrade-metrics span {
+    font-size: 12px;
+  }
+
+  .menu-comtrade-metrics strong {
+    font-size: 14px;
+  }
+
+  .menu-toggle-item {
+    min-height: 52px;
+    padding: 14px;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .menu-toggle-item span {
+    font-size: 14px;
+  }
+
+  .menu-toggle-copy small {
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .menu-toggle-item strong {
+    font-size: 13px;
+    padding-top: 2px;
+  }
+
+  .menu-section-meta {
+    font-size: 13px;
   }
 
   .menu-item {
-    padding: 10px 15px;
-    font-size: 11px;
+    padding: 16px;
+    font-size: 15px;
+    min-height: 52px;
   }
 
   .weather-panel {
-    top: 72px;
-    right: 15px;
-    width: min(320px, calc(100vw - 30px));
+    top: 120px;
+    right: 12px;
+    left: 12px;
+    width: auto;
   }
 
   .weather-panel-expanded {
-    width: min(520px, calc(100vw - 30px));
-    max-height: calc(100vh - 84px);
+    width: auto;
+    max-height: calc(100vh - 132px);
+  }
+
+  .weather-footer {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .weather-footer-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .weather-footer-actions button,
+  .weather-error button,
+  .weather-forecast-tabs button {
+    min-height: 40px;
+    width: 100%;
   }
 
   .un-panel {
-    top: 72px;
-    left: 15px;
-    right: 15px;
+    top: 120px;
+    left: 12px;
+    right: 12px;
     width: auto;
-    max-height: calc(100vh - 84px);
+    max-height: calc(100vh - 132px);
   }
 
   .un-panel-header {
     padding: 12px 13px;
   }
 
+  .un-panel-actions {
+    gap: 6px;
+  }
+
+  .un-close,
+  .un-minimize,
+  .weather-close {
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+  }
+
   .un-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .trade-pulse-summary-grid,
-  .trade-pulse-layer-grid {
+  .trade-pulse-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .trade-pulse-layer-grid {
+    grid-template-columns: 1fr;
+    padding: 12px;
+    gap: 8px;
+  }
+
+  .trade-pulse-layer-toggle {
+    min-height: 48px;
+    padding: 12px 14px;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+  }
+
+  .trade-pulse-layer-toggle strong {
+    font-size: 12px;
+  }
+
+  .trade-pulse-route-list {
+    max-height: min(420px, 48vh);
+  }
+
+  .trade-pulse-route-card p {
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .trade-pulse-metrics {
+    gap: 6px;
+  }
+
+  .trade-pulse-metrics span {
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .trade-pulse-layer-badge {
+    min-height: 24px;
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  .trade-pulse-insight {
+    font-size: 12px !important;
+    line-height: 1.45 !important;
+  }
+
+  .trade-pulse-notes {
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 12px 14px;
+  }
+
+  .trade-pulse-panel .un-panel-header h3 {
+    font-size: 13px;
+  }
+
+  .trade-pulse-panel .un-panel-header span {
+    font-size: 11px;
   }
 
   .trade-pulse-overlay {
     top: 40px;
     width: min(400px, calc(100vw - 24px));
     height: min(400px, calc(100vw - 24px));
+  }
+
+  /* Trade Pulse menu: show fuller layer details in a readable mobile stack */
+  .menu-section-trade-pulse .menu-trade-pulse-layer {
+    min-height: 58px;
+    align-items: flex-start;
+    padding: 14px;
+  }
+
+  .menu-section-trade-pulse .menu-trade-pulse-layer span {
+    font-size: 14px;
+  }
+
+  .menu-section-trade-pulse .menu-trade-pulse-detail {
+    display: block;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: normal;
+  }
+
+  .menu-section-trade-pulse .menu-toggle-item strong {
+    font-size: 13px;
+    white-space: nowrap;
   }
 
   .un-metric {
@@ -2319,6 +2735,25 @@ b {
     text-align: left;
   }
 
+  .un-footer {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .un-footer-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .un-footer-actions button,
+  .un-footer-actions a,
+  .un-error button {
+    min-height: 40px;
+    width: 100%;
+  }
+
   .weather-forecast-row {
     grid-template-columns: minmax(105px, 1fr) minmax(70px, auto);
     gap: 5px 10px;
@@ -2327,19 +2762,23 @@ b {
   .weather-forecast-details {
     grid-column: span 2;
   }
-  
+
   .activity-floating {
-    width: min(330px, calc(100vw - 30px));
-    bottom: 15px;
-    right: 15px;
+    bottom: 12px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-width: none;
   }
 
   .activity-launcher {
     width: 100%;
+    min-height: 48px;
+    align-self: stretch;
   }
 
   .activity-menu {
-    max-height: calc(100vh - 120px);
+    max-height: calc(100vh - 140px);
   }
 
   .activity-summary {
@@ -2351,16 +2790,135 @@ b {
     border-top: 1px solid rgba(0, 217, 255, 0.12);
   }
 
-  .activity-list {
-    max-height: 260px;
+  .activity-filter,
+  .activity-actions {
+    grid-template-columns: 1fr;
+    gap: 6px;
   }
-  
+
+  .activity-filter button,
+  .activity-actions button {
+    min-height: 40px;
+    width: 100%;
+    font-size: 10px;
+  }
+
+  .activity-list {
+    max-height: 220px;
+  }
+
   .activity-item {
     padding: 10px 12px;
     font-size: 10px;
   }
-  
+
+  .activity-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
   .activity-header h3 {
     font-size: 11px;
+  }
+
+  .modal-content {
+    width: min(420px, calc(100vw - 24px));
+    padding: 24px 18px;
+  }
+
+  .modal-close {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+@media (max-width: 480px) {
+  .nav-center {
+    grid-template-columns: 1fr;
+  }
+
+  .nav-btn {
+    min-height: 42px;
+    font-size: 11px;
+    letter-spacing: 0.8px;
+  }
+
+  .nav-title {
+    font-size: 13px;
+  }
+
+  .nav-subtitle {
+    display: none;
+  }
+
+  .main-content {
+    margin-top: 200px;
+  }
+
+  .weather-panel,
+  .un-panel {
+    top: 210px;
+    max-height: calc(100vh - 222px);
+  }
+
+  .menu-dropdown {
+    max-height: calc(100vh - 220px);
+    font-size: 15px;
+  }
+
+  .menu-section {
+    padding: 16px 14px;
+  }
+
+  .menu-section-title {
+    font-size: 14px;
+  }
+
+  .menu-comtrade-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .menu-comtrade-metrics span {
+    font-size: 12px;
+  }
+
+  .menu-comtrade-metrics strong {
+    font-size: 15px;
+  }
+
+  .menu-toggle-item {
+    min-height: 54px;
+    padding: 14px 12px;
+  }
+
+  .menu-toggle-item span {
+    font-size: 14px;
+  }
+
+  .menu-toggle-copy small {
+    font-size: 12px;
+  }
+
+  .menu-toggle-item strong {
+    font-size: 13px;
+  }
+
+  .menu-item {
+    font-size: 15px;
+    min-height: 54px;
+    padding: 16px 14px;
+  }
+
+  .globe-controls {
+    bottom: 72px;
+  }
+
+  .weather-footer-actions,
+  .un-footer-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .trade-pulse-layer-grid {
+    grid-template-columns: 1fr;
   }
 }

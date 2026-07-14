@@ -1255,6 +1255,7 @@ function App() {
         </div>
 
         <div className="nav-center">
+          {/* ABOUT button commented out / sent to background
           <button
             className="nav-btn"
             onClick={() =>
@@ -1263,6 +1264,7 @@ function App() {
           >
             ABOUT
           </button>
+          */}
           <button
             className="nav-btn"
             onClick={() =>
@@ -1815,175 +1817,190 @@ function App() {
             </div>
           </div>
 
-          {!isTradePulsePanelMinimized && tradePulseStatus === "loading" && (
-            <div className="un-loading">Loading Trade Pulse layers...</div>
-          )}
+          {!isTradePulsePanelMinimized && (
+            <div className="trade-pulse-panel-scroll">
+              <div className="trade-pulse-panel-inner">
+                {tradePulseStatus === "loading" && (
+                  <div className="un-loading">Loading Trade Pulse layers...</div>
+                )}
 
-          {!isTradePulsePanelMinimized && tradePulseStatus === "error" && (
-            <div className="un-error">
-              <span>{tradePulseError}</span>
-              <button
-                type="button"
-                onClick={() =>
-                  runRateLimitedButtonAction("trade-pulse-retry", () => {
-                    void loadTradePulsePreview();
-                  })
-                }
-              >
-                Retry
-              </button>
-            </div>
-          )}
-
-          {!isTradePulsePanelMinimized &&
-            tradePulseStatus === "ready" &&
-            tradePulsePreview && (
-              <>
-                <div className="un-status-row trade-pulse-status-row">
-                  <span>{tradePulsePreview.source}</span>
-                  <strong>Derived preview</strong>
-                </div>
-
-                <div className="un-summary-grid trade-pulse-summary-grid">
-                  {tradePulsePreview.metrics.slice(0, 8).map((metric) => (
-                    <div className="un-metric" key={metric.label}>
-                      <span>{metric.label}</span>
-                      <strong>{metric.value}</strong>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="un-update-row">
-                  <span>{tradePulsePreview.period} Comtrade-shaped scenario</span>
-                  <strong>{visibleTradePulseRoutes.length} active routes</strong>
-                </div>
-
-                <div className="trade-pulse-layer-grid" role="group" aria-label="Trade Pulse layers">
-                  {TRADE_PULSE_LAYERS.map((layer) => (
-                    <button
-                      type="button"
-                      key={layer}
-                      className={`trade-pulse-layer-toggle ${
-                        tradePulseLayers[layer] ? "active" : ""
-                      }`}
-                      style={
-                        { "--layer-color": TRADE_PULSE_LAYER_COLORS[layer] } as React.CSSProperties
-                      }
-                      aria-pressed={tradePulseLayers[layer]}
-                      onClick={() =>
-                        runRateLimitedButtonAction(`trade-pulse-layer-${layer}`, () =>
-                          toggleTradePulseLayer(layer),
-                        )
-                      }
-                    >
-                      <span>{TRADE_PULSE_LAYER_LABELS[layer]}</span>
-                      <strong>{tradePulseLayers[layer] ? "On" : "Off"}</strong>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="un-goal-list trade-pulse-route-list" aria-label="Trade Pulse routes">
-                  {enabledTradePulseLayerCount === 0 && (
-                    <div className="un-empty-state">
-                      Enable a Trade Pulse layer from the panel or menu.
-                    </div>
-                  )}
-
-                  {visibleTradePulseRoutes.map((route) => {
-                    const activeLayer = getRoutePulseLayer(route, tradePulseLayers);
-
-                    return (
-                      <article
-                        className={`un-goal-row trade-pulse-route-card trade-pulse-card-${route.severity}`}
-                        key={route.id}
-                        style={
-                          {
-                            "--route-card-color": TRADE_PULSE_LAYER_COLORS[activeLayer],
-                          } as React.CSSProperties
-                        }
-                      >
-                        <div className="un-goal-heading trade-pulse-card-heading">
-                          <span>
-                            {route.origin.iso3} to {route.destination.iso3}
-                          </span>
-                          <strong>{route.commodity}</strong>
-                        </div>
-                        <p>
-                          {route.origin.name} to {route.destination.name}
-                          {route.intermediary
-                            ? ` via ${route.intermediary.name}`
-                            : ""}{" "}
-                          · {route.transportMode} · {route.customsProcedure}
-                        </p>
-                        <div className="trade-pulse-badge-row">
-                          {route.layers
-                            .filter((layer) => tradePulseLayers[layer])
-                            .map((layer) => (
-                              <span
-                                className="trade-pulse-layer-badge"
-                                key={layer}
-                                style={
-                                  {
-                                    "--layer-color": TRADE_PULSE_LAYER_COLORS[layer],
-                                  } as React.CSSProperties
-                                }
-                              >
-                                {TRADE_PULSE_LAYER_SHORT_LABELS[layer]}
-                              </span>
-                            ))}
-                        </div>
-                        <div className="un-goal-meta trade-pulse-metrics">
-                          <span>Value {formatUsd(route.valueUsd, false, comtradeValueMode)}</span>
-                          <span>Supplier {formatPercent(route.supplierSharePct)}</span>
-                          <span>Mirror gap {formatPercent(route.asymmetryPct)}</span>
-                          <span>CIF/FOB {formatPercent(route.frictionPct)}</span>
-                          <span>Re-export {formatPercent(route.reExportSharePct)}</span>
-                          <span>Confidence {formatPercent(route.confidencePct)}</span>
-                        </div>
-                        <p className="trade-pulse-insight">{route.insight}</p>
-                      </article>
-                    );
-                  })}
-                </div>
-
-                <div className="trade-pulse-notes">
-                  <strong>Preview notes</strong>
-                  {tradePulsePreview.notes.map((note) => (
-                    <span key={note}>{note}</span>
-                  ))}
-                </div>
-
-                <div className="un-footer">
-                  <span>Updated {formatPreviewDate(tradePulsePreview.updatedAt)}</span>
-                  <div className="un-footer-actions">
-                    <a
-                      href={tradePulsePreview.sourceUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      Source
-                    </a>
-                    <a
-                      href={tradePulsePreview.apiUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      API
-                    </a>
+                {tradePulseStatus === "error" && (
+                  <div className="un-error">
+                    <span>{tradePulseError}</span>
                     <button
                       type="button"
                       onClick={() =>
-                        runRateLimitedButtonAction("trade-pulse-refresh", () => {
+                        runRateLimitedButtonAction("trade-pulse-retry", () => {
                           void loadTradePulsePreview();
                         })
                       }
                     >
-                      Refresh
+                      Retry
                     </button>
                   </div>
-                </div>
-              </>
-            )}
+                )}
+
+                {tradePulseStatus === "ready" && tradePulsePreview && (
+                  <>
+                    <div className="un-status-row trade-pulse-status-row">
+                      <span>{tradePulsePreview.source}</span>
+                      <strong>Derived preview</strong>
+                    </div>
+
+                    <div className="un-summary-grid trade-pulse-summary-grid">
+                      {tradePulsePreview.metrics.slice(0, 8).map((metric) => (
+                        <div className="un-metric" key={metric.label}>
+                          <span>{metric.label}</span>
+                          <strong>{metric.value}</strong>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="un-update-row">
+                      <span>{tradePulsePreview.period} Comtrade-shaped scenario</span>
+                      <strong>{visibleTradePulseRoutes.length} active routes</strong>
+                    </div>
+
+                    <div
+                      className="trade-pulse-layer-grid"
+                      role="group"
+                      aria-label="Trade Pulse layers"
+                    >
+                      {TRADE_PULSE_LAYERS.map((layer) => (
+                        <button
+                          type="button"
+                          key={layer}
+                          className={`trade-pulse-layer-toggle ${
+                            tradePulseLayers[layer] ? "active" : ""
+                          }`}
+                          style={
+                            {
+                              "--layer-color": TRADE_PULSE_LAYER_COLORS[layer],
+                            } as React.CSSProperties
+                          }
+                          aria-pressed={tradePulseLayers[layer]}
+                          onClick={() =>
+                            runRateLimitedButtonAction(`trade-pulse-layer-${layer}`, () =>
+                              toggleTradePulseLayer(layer),
+                            )
+                          }
+                        >
+                          <span>{TRADE_PULSE_LAYER_LABELS[layer]}</span>
+                          <strong>{tradePulseLayers[layer] ? "On" : "Off"}</strong>
+                        </button>
+                      ))}
+                    </div>
+
+                    <div
+                      className="un-goal-list trade-pulse-route-list"
+                      aria-label="Trade Pulse routes"
+                    >
+                      {enabledTradePulseLayerCount === 0 && (
+                        <div className="un-empty-state">
+                          Enable a Trade Pulse layer from the panel or menu.
+                        </div>
+                      )}
+
+                      {visibleTradePulseRoutes.map((route) => {
+                        const activeLayer = getRoutePulseLayer(route, tradePulseLayers);
+
+                        return (
+                          <article
+                            className={`un-goal-row trade-pulse-route-card trade-pulse-card-${route.severity}`}
+                            key={route.id}
+                            style={
+                              {
+                                "--route-card-color": TRADE_PULSE_LAYER_COLORS[activeLayer],
+                              } as React.CSSProperties
+                            }
+                          >
+                            <div className="un-goal-heading trade-pulse-card-heading">
+                              <span>
+                                {route.origin.iso3} to {route.destination.iso3}
+                              </span>
+                              <strong>{route.commodity}</strong>
+                            </div>
+                            <p>
+                              {route.origin.name} to {route.destination.name}
+                              {route.intermediary
+                                ? ` via ${route.intermediary.name}`
+                                : ""}{" "}
+                              · {route.transportMode} · {route.customsProcedure}
+                            </p>
+                            <div className="trade-pulse-badge-row">
+                              {route.layers
+                                .filter((layer) => tradePulseLayers[layer])
+                                .map((layer) => (
+                                  <span
+                                    className="trade-pulse-layer-badge"
+                                    key={layer}
+                                    style={
+                                      {
+                                        "--layer-color": TRADE_PULSE_LAYER_COLORS[layer],
+                                      } as React.CSSProperties
+                                    }
+                                  >
+                                    {TRADE_PULSE_LAYER_SHORT_LABELS[layer]}
+                                  </span>
+                                ))}
+                            </div>
+                            <div className="un-goal-meta trade-pulse-metrics">
+                              <span>
+                                Value {formatUsd(route.valueUsd, false, comtradeValueMode)}
+                              </span>
+                              <span>Supplier {formatPercent(route.supplierSharePct)}</span>
+                              <span>Mirror gap {formatPercent(route.asymmetryPct)}</span>
+                              <span>CIF/FOB {formatPercent(route.frictionPct)}</span>
+                              <span>Re-export {formatPercent(route.reExportSharePct)}</span>
+                              <span>Confidence {formatPercent(route.confidencePct)}</span>
+                            </div>
+                            <p className="trade-pulse-insight">{route.insight}</p>
+                          </article>
+                        );
+                      })}
+                    </div>
+
+                    <div className="trade-pulse-notes">
+                      <strong>Preview notes</strong>
+                      {tradePulsePreview.notes.map((note) => (
+                        <span key={note}>{note}</span>
+                      ))}
+                    </div>
+
+                    <div className="un-footer">
+                      <span>Updated {formatPreviewDate(tradePulsePreview.updatedAt)}</span>
+                      <div className="un-footer-actions">
+                        <a
+                          href={tradePulsePreview.sourceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Source
+                        </a>
+                        <a
+                          href={tradePulsePreview.apiUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          API
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            runRateLimitedButtonAction("trade-pulse-refresh", () => {
+                              void loadTradePulsePreview();
+                            })
+                          }
+                        >
+                          Refresh
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -2474,6 +2491,8 @@ function App() {
 
       {showMenu && (
         <div className="menu-dropdown" aria-label="Global controls menu">
+          <div className="menu-dropdown-scroll">
+          <div className="menu-dropdown-inner">
           <div className="menu-section">
             <div className="menu-section-title">Comtrade Controls</div>
             <div className="menu-comtrade-summary" aria-label="Comtrade snapshot summary">
@@ -2587,7 +2606,7 @@ function App() {
               {enabledComtradeSectionCount}/4 data sections visible
             </div>
           </div>
-          <div className="menu-section">
+          <div className="menu-section menu-section-trade-pulse">
             <div className="menu-section-title">Trade Pulse</div>
             <button
               type="button"
@@ -2603,7 +2622,10 @@ function App() {
                 })
               }
             >
-              <span>Panel view</span>
+              <div className="menu-toggle-copy">
+                <span>Panel view</span>
+                <small>open, minimize, or close the dependency radar drawer</small>
+              </div>
               <strong>
                 {showTradePulsePanel
                   ? isTradePulsePanelMinimized
@@ -2623,25 +2645,37 @@ function App() {
                 )
               }
             >
-              <span>All pulse layers</span>
+              <div className="menu-toggle-copy">
+                <span>All pulse layers</span>
+                <small>toggle every dependency radar layer at once</small>
+              </div>
               <strong>{allTradePulseLayersEnabled ? "On" : "Mixed"}</strong>
             </button>
-            {TRADE_PULSE_LAYERS.map((layer) => (
-              <button
-                type="button"
-                className={`menu-toggle-item ${tradePulseLayers[layer] ? "active" : ""}`}
-                aria-pressed={tradePulseLayers[layer]}
-                key={layer}
-                onClick={() =>
-                  runRateLimitedButtonAction(`menu-trade-pulse-${layer}`, () =>
-                    toggleTradePulseLayer(layer),
-                  )
-                }
-              >
-                <span>{TRADE_PULSE_LAYER_SHORT_LABELS[layer]}</span>
-                <strong>{tradePulseLayers[layer] ? "On" : "Off"}</strong>
-              </button>
-            ))}
+            <div className="menu-trade-pulse-layers" role="group" aria-label="Trade Pulse layers">
+              {TRADE_PULSE_LAYERS.map((layer) => (
+                <button
+                  type="button"
+                  className={`menu-toggle-item menu-trade-pulse-layer ${
+                    tradePulseLayers[layer] ? "active" : ""
+                  }`}
+                  aria-pressed={tradePulseLayers[layer]}
+                  key={layer}
+                  onClick={() =>
+                    runRateLimitedButtonAction(`menu-trade-pulse-${layer}`, () =>
+                      toggleTradePulseLayer(layer),
+                    )
+                  }
+                >
+                  <div className="menu-toggle-copy">
+                    <span>{TRADE_PULSE_LAYER_SHORT_LABELS[layer]}</span>
+                    <small className="menu-trade-pulse-detail">
+                      {TRADE_PULSE_LAYER_LABELS[layer]}
+                    </small>
+                  </div>
+                  <strong>{tradePulseLayers[layer] ? "On" : "Off"}</strong>
+                </button>
+              ))}
+            </div>
             <div className="menu-section-meta">
               {enabledTradePulseLayerCount}/8 pulse layers visible
             </div>
@@ -2746,6 +2780,8 @@ function App() {
           >
             Market
           </a>
+          </div>
+          </div>
         </div>
       )}
     </div>
