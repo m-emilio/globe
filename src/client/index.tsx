@@ -1,8 +1,16 @@
 import "./styles.css";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { Cobe, type GlobeArc } from "./CobeGlobe";
+import { FloatingChrome } from "./FloatingChrome";
+import {
+  ActivityFeed,
+  createActivityEvent,
+  prependActivityEvent,
+  type ActivityEvent,
+  type ActivityFilter,
+} from "./ActivityFeed";
 import usePartySocket from "partysocket/react";
 import type {
   OutgoingMessage,
@@ -12,19 +20,6 @@ import type {
   TradePulseRoutePreview,
   UnGlobalPreview,
 } from "../shared";
-
-interface ActivityEvent {
-  id: string;
-  type: "connect" | "disconnect";
-  timestamp: number;
-  userName: string;
-  ip?: string;
-  country?: string;
-  city?: string;
-  org?: string;
-}
-
-type ActivityFilter = "all" | "connect" | "disconnect";
 type WeatherStatus = "idle" | "loading" | "ready" | "error";
 type ForecastView = "daily" | "hourly";
 type ComtradeStatus = "idle" | "loading" | "ready" | "error";
@@ -695,8 +690,10 @@ function App() {
   const [isDisconnected, setIsDisconnected] = useState(false);
   const [isFeedPaused, setIsFeedPaused] = useState(false);
   const [isCompactFeed, setIsCompactFeed] = useState(false);
+  const [isSocketConnected, setIsSocketConnected] = useState(false);
   const [counter, setCounter] = useState(0);
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
+  const navBarRef = useRef<HTMLElement | null>(null);
 
   const positions = useRef<
     Map<
@@ -716,13 +713,51 @@ function App() {
     isFeedPausedRef.current = isFeedPaused;
   }, [isFeedPaused]);
 
-  const addActivityEvent = (event: ActivityEvent) => {
-    if (isFeedPausedRef.current) {
+  // Keep menu/panel offsets in sync with the real nav height (prevents overlap/clipping on mobile)
+  useEffect(() => {
+    const nav = navBarRef.current;
+    if (!nav || typeof ResizeObserver === "undefined") {
       return;
     }
 
-    setActivityFeed((prev) => [event, ...prev.slice(0, 49)]);
-  };
+    const publishNavHeight = () => {
+      const height = Math.ceil(nav.getBoundingClientRect().height);
+      if (height > 0) {
+        document.documentElement.style.setProperty(
+          "--mobile-nav-height",
+          `${height}px`,
+        );
+        document.documentElement.style.setProperty("--nav-offset", `${height}px`);
+      }
+    };
+
+    publishNavHeight();
+    const observer = new ResizeObserver(publishNavHeight);
+    observer.observe(nav);
+    window.addEventListener("resize", publishNavHeight);
+    window.addEventListener("orientationchange", publishNavHeight);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", publishNavHeight);
+      window.removeEventListener("orientationchange", publishNavHeight);
+    };
+  }, []);
+
+  const addActivityEvent = useCallback(
+    (event: ActivityEvent, options?: { force?: boolean }) => {
+      // Pause hides new joins from the feed, but leaves always log (ops visibility)
+      if (
+        isFeedPausedRef.current &&
+        !options?.force &&
+        event.type !== "disconnect"
+      ) {
+        return;
+      }
+      setActivityFeed((prev) => prependActivityEvent(prev, event));
+    },
+    [],
+  );
 
   const runRateLimitedButtonAction = (actionKey: string, action: () => void) => {
     const now = Date.now();
@@ -740,35 +775,18 @@ function App() {
     action();
   };
 
-  const clearActivityFeed = () => {
+  const clearActivityFeed = useCallback(() => {
+    // Keep currently online visitors as connect events; drop history noise
     const activeEvents = Array.from(activeVisitors.current.values()).sort(
       (a, b) => b.timestamp - a.timestamp,
     );
-
     setActivityFilter("all");
-    setIsDisconnected(false);
     setActivityFeed(activeEvents);
-  };
+  }, []);
 
-  const handleActivityFilterChange = (filter: ActivityFilter) => {
+  const handleActivityFilterChange = useCallback((filter: ActivityFilter) => {
     setActivityFilter(filter);
-
-    if (filter !== "disconnect" || isDisconnected) {
-      return;
-    }
-
-    const timestamp = Date.now();
-    setIsDisconnected(true);
-    setActivityFeed((prev) => [
-      {
-        id: `local-disconnect-${timestamp}`,
-        type: "disconnect",
-        timestamp,
-        userName: "You",
-      },
-      ...prev.slice(0, 49),
-    ]);
-  };
+  }, []);
 
   const loadWeatherFeed = async () => {
     setShowWeatherPanel(true);
@@ -849,10 +867,8 @@ function App() {
   };
 
   const loadComtradePreview = async (closeMenu = true) => {
+    // Keep other popups open so multiple panels can be used side by side
     setShowComtradePanel(true);
-    setShowTradePulsePanel(false);
-    setShowUnGlobalPanel(false);
-    setIsUnGlobalPanelMinimized(false);
     if (closeMenu) {
       setShowMenu(false);
     }
@@ -909,10 +925,8 @@ function App() {
   };
 
   const loadTradePulsePreview = async (closeMenu = true) => {
+    // Keep other popups open so multiple panels can be used side by side
     setShowTradePulsePanel(true);
-    setShowComtradePanel(false);
-    setShowUnGlobalPanel(false);
-    setIsUnGlobalPanelMinimized(false);
     if (closeMenu) {
       setShowMenu(false);
     }
@@ -982,10 +996,9 @@ function App() {
   };
 
   const loadUnGlobalPreview = async (closeMenu = true) => {
+    // Keep other popups open so multiple panels can be used side by side
     setShowUnGlobalPanel(true);
     setIsUnGlobalPanelMinimized(false);
-    setShowComtradePanel(false);
-    setShowTradePulsePanel(false);
     if (closeMenu) {
       setShowMenu(false);
     }
@@ -1025,6 +1038,17 @@ function App() {
   const socket = usePartySocket({
     room: "default",
     party: "globe",
+    onOpen() {
+      setIsSocketConnected(true);
+      setIsDisconnected(false);
+    },
+    onClose() {
+      setIsSocketConnected(false);
+      setIsDisconnected(true);
+    },
+    onError() {
+      setIsSocketConnected(false);
+    },
     onMessage(evt) {
       const message = parseSocketMessage(evt.data);
 
@@ -1033,64 +1057,76 @@ function App() {
       }
 
       if (message.type === "add-marker") {
-        positions.current.set(message.position.id, {
+        const visitorId = message.position.id;
+        positions.current.set(visitorId, {
           location: [message.position.lat, message.position.lng],
-          size: message.position.id === socket.id ? 0.1 : 0.05,
+          size: visitorId === socket.id ? 0.1 : 0.05,
         });
 
-        const isYou = message.position.id === socket.id;
+        const isYou = visitorId === socket.id;
         if (isYou) {
           setIsDisconnected(false);
+          setIsSocketConnected(true);
         }
 
-        const activityEvent = {
-          id: message.position.id,
+        const shortId = visitorId.slice(0, 8);
+        const joinedAt = Date.now();
+        const activityEvent = createActivityEvent({
+          id: visitorId,
           type: "connect",
-          timestamp: Date.now(),
-          userName: isYou ? "You" : `User ${message.position.id.slice(0, 8)}`,
+          timestamp: joinedAt,
+          userName: isYou ? "You" : `User ${shortId}`,
           ip: message.position.ip,
           country: message.position.country,
           city: message.position.city,
           org: message.position.org,
-        } satisfies ActivityEvent;
+          isSelf: isYou,
+        });
 
-        activeVisitors.current.set(message.position.id, activityEvent);
+        activeVisitors.current.set(visitorId, activityEvent);
         setCounter(positions.current.size);
         addActivityEvent(activityEvent);
-      } else {
+        return;
+      }
+
+      if (message.type === "remove-marker") {
         const removedId = message.id;
+        const wasSelf = removedId === socket.id;
+        const prior = activeVisitors.current.get(removedId);
+        const leftAt = Date.now();
+        const sessionMs = prior
+          ? Math.max(0, leftAt - prior.timestamp)
+          : undefined;
+
         positions.current.delete(removedId);
         activeVisitors.current.delete(removedId);
         setCounter(positions.current.size);
 
-        addActivityEvent({
-          id: removedId,
-          type: "disconnect",
-          timestamp: Date.now(),
-          userName: `User ${removedId.slice(0, 8)}`,
-        });
+        if (wasSelf) {
+          setIsDisconnected(true);
+        }
+
+        // Always record leaves (even when feed is paused) with session + geo context
+        addActivityEvent(
+          createActivityEvent({
+            id: removedId,
+            type: "disconnect",
+            timestamp: leftAt,
+            userName:
+              prior?.userName ??
+              (wasSelf ? "You" : `User ${removedId.slice(0, 8)}`),
+            city: prior?.city,
+            country: prior?.country,
+            org: prior?.org,
+            ip: prior?.ip,
+            isSelf: wasSelf,
+            sessionMs,
+          }),
+          { force: true },
+        );
       }
     },
   });
-
-  const visibleActivityFeed = activityFeed.filter((event) =>
-    activityFilter === "all" ? true : event.type === activityFilter,
-  );
-  const isLeaveQueueSelected = activityFilter === "disconnect";
-  const disconnectedCount = activityFeed.reduce(
-    (total, event) => total + (event.type === "disconnect" ? 1 : 0),
-    0,
-  );
-  const latestEvent = activityFeed[0];
-  const latestSignal =
-    latestEvent?.city && latestEvent.country
-      ? `${latestEvent.city}, ${latestEvent.country}`
-      : latestEvent?.country || latestEvent?.ip || latestEvent?.org || "No signals";
-  const filterLabels: Record<ActivityFilter, string> = {
-    all: "All",
-    connect: "Joins",
-    disconnect: "Leaves",
-  };
   const weatherGlow = getWeatherGlow(weatherFeed);
   const enabledComtradeSectionCount =
     Object.values(comtradeSections).filter(Boolean).length;
@@ -1247,7 +1283,7 @@ function App() {
 
   return (
     <div className="App">
-      <nav className="nav-bar">
+      <nav className="nav-bar" ref={navBarRef}>
         <div className="nav-left">
           <h1 className="nav-title">
             GLOBE <span className="nav-subtitle">// OPS</span>
@@ -1329,7 +1365,7 @@ function App() {
       </nav>
 
       {showWeatherPanel && (
-        <div
+        <FloatingChrome
           className={`weather-panel ${showWeatherForecast ? "weather-panel-expanded" : ""}`}
           role="dialog"
           aria-label="Weather forecast"
@@ -1504,11 +1540,11 @@ function App() {
               )}
             </>
           )}
-        </div>
+        </FloatingChrome>
       )}
 
       {showComtradePanel && (
-        <div className="un-panel" role="dialog" aria-label="UN COMTRADE API preview">
+        <FloatingChrome className="un-panel" role="dialog" aria-label="UN COMTRADE API preview">
           <div className="un-panel-header">
             <div>
               <h3>UN COMTRADE API</h3>
@@ -1769,11 +1805,11 @@ function App() {
               </div>
             </>
           )}
-        </div>
+        </FloatingChrome>
       )}
 
       {showTradePulsePanel && (
-        <div
+        <FloatingChrome
           className={`un-panel trade-pulse-panel ${
             isTradePulsePanelMinimized ? "un-panel-minimized" : ""
           }`}
@@ -2001,11 +2037,11 @@ function App() {
               </div>
             </div>
           )}
-        </div>
+        </FloatingChrome>
       )}
 
       {showUnGlobalPanel && (
-        <div
+        <FloatingChrome
           className={`un-panel un-layer-panel ${
             isUnGlobalPanelMinimized ? "un-panel-minimized" : ""
           }`}
@@ -2254,7 +2290,7 @@ function App() {
               </div>
             </>
           )}
-        </div>
+        </FloatingChrome>
       )}
 
       <div className={`main-content ${showTradePulsePanel ? "trade-pulse-main" : ""}`}>
@@ -2271,182 +2307,50 @@ function App() {
         </div>
       </div>
 
-      <div className="activity-floating">
-        <button
-          type="button"
-          className="activity-launcher"
-          onClick={() =>
+      <div className="bottom-dock">
+        <div id="globe-controls-slot" className="globe-controls-slot" />
+        <ActivityFeed
+          open={showActivityMenu}
+          onToggle={() =>
             runRateLimitedButtonAction("activity-toggle", () =>
               setShowActivityMenu((open) => !open),
             )
           }
-          aria-controls="live-feed-menu"
-          aria-expanded={showActivityMenu}
-        >
-          <span className="pulse-dot"></span>
-          <span className="launcher-copy">
-            <span className="launcher-label">Live Feed</span>
-            <span className="launcher-meta">{counter} online</span>
-          </span>
-          <span className="launcher-action">{showActivityMenu ? "Hide" : "Open"}</span>
-        </button>
-
-        {showActivityMenu && (
-          <section
-            id="live-feed-menu"
-            className={`activity-menu ${isCompactFeed ? "activity-menu-compact" : ""}`}
-            aria-label="Live activity feed"
-          >
-            <div className="activity-header">
-              <div className="activity-title-group">
-                <h3>LIVE FEED</h3>
-                <p>{isFeedPaused ? "Capture paused" : "Capturing visitor signals"}</p>
-              </div>
-              <div className="activity-count">
-                <span className="pulse-dot"></span>
-                <span>{counter}</span>
-              </div>
-            </div>
-
-            <div className="activity-summary">
-              <div className="activity-stat">
-                <span>Online</span>
-                <strong>{counter}</strong>
-              </div>
-              <div className="activity-stat">
-                <span>Events</span>
-                <strong>{activityFeed.length}</strong>
-              </div>
-              <div
-                className={`activity-stat activity-stat-disconnected ${
-                  isDisconnected ? "activity-stat-active" : ""
-                }`}
-              >
-                <span>Disconnected</span>
-                <strong>{disconnectedCount}</strong>
-              </div>
-              <div className="activity-stat">
-                <span>Latest</span>
-                <strong title={latestSignal}>{latestSignal}</strong>
-              </div>
-            </div>
-
-            <div className="activity-filter" role="group" aria-label="Filter activity feed">
-              {(["all", "connect", "disconnect"] as ActivityFilter[]).map((filter) => (
-                <button
-                  key={filter}
-                  type="button"
-                  className={`activity-filter-btn activity-filter-${filter} ${
-                    activityFilter === filter ? "active" : ""
-                  }`}
-                  onClick={() =>
-                    runRateLimitedButtonAction(`activity-filter-${filter}`, () =>
-                      handleActivityFilterChange(filter),
-                    )
-                  }
-                  aria-pressed={activityFilter === filter}
-                >
-                  <span>{filterLabels[filter]}</span>
-                  {filter === "disconnect" && (
-                    <span className="activity-filter-count">{disconnectedCount}</span>
-                  )}
-                </button>
-              ))}
-            </div>
-
-            <div className="activity-actions">
-              <button
-                type="button"
-                onClick={() =>
-                  runRateLimitedButtonAction("activity-pause", () =>
-                    setIsFeedPaused((paused) => !paused),
-                  )
-                }
-              >
-                {isFeedPaused ? "Resume" : "Pause"}
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  runRateLimitedButtonAction("activity-compact", () =>
-                    setIsCompactFeed((compact) => !compact),
-                  )
-                }
-              >
-                {isCompactFeed ? "Details" : "Compact"}
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  runRateLimitedButtonAction("activity-clear", clearActivityFeed)
-                }
-                disabled={activityFeed.length === 0 && activeVisitors.current.size === 0}
-              >
-                Clear
-              </button>
-            </div>
-
-            <div className="activity-list">
-              {isLeaveQueueSelected && (
-                <div
-                  className={`activity-disconnected-state ${
-                    isDisconnected ? "activity-disconnected-state-active" : ""
-                  }`}
-                >
-                  <span>{isDisconnected ? "Disconnected" : "Leave queue"}</span>
-                  <strong>{disconnectedCount}</strong>
-                </div>
-              )}
-              {visibleActivityFeed.length === 0 ? (
-                isLeaveQueueSelected ? null : (
-                  <div className="activity-empty">
-                    {activityFeed.length === 0 ? "No activity yet" : "No matching events"}
-                  </div>
-                )
-              ) : (
-                visibleActivityFeed.map((event) => (
-                  <div
-                    key={`${event.id}-${event.timestamp}`}
-                    className={`activity-item activity-${event.type}`}
-                  >
-                    <span className="activity-icon" aria-hidden="true">
-                      {event.type === "connect" ? "+" : "-"}
-                    </span>
-                    <div className="activity-details">
-                      <span className="activity-user">{event.userName}</span>
-                      <span className="activity-action">
-                        {event.type === "connect" ? "connected" : "disconnected"}
-                      </span>
-                      {!isCompactFeed &&
-                        event.type === "connect" &&
-                        (event.city || event.country || event.ip || event.org) && (
-                          <div className="activity-location">
-                            {event.city && event.country && (
-                              <span className="location-text">
-                                LOC {event.city}, {event.country}
-                              </span>
-                            )}
-                            {event.ip && <span className="location-text">IP {event.ip}</span>}
-                            {event.org && !event.ip && (
-                              <span className="location-text">ORG {event.org}</span>
-                            )}
-                          </div>
-                        )}
-                      <span className="activity-time">
-                        {Math.floor((Date.now() - event.timestamp) / 1000)}s ago
-                      </span>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
-        )}
+          onClose={() =>
+            runRateLimitedButtonAction("activity-close", () =>
+              setShowActivityMenu(false),
+            )
+          }
+          counter={counter}
+          events={activityFeed}
+          onClear={() =>
+            runRateLimitedButtonAction("activity-clear", clearActivityFeed)
+          }
+          isPaused={isFeedPaused}
+          onTogglePause={() =>
+            runRateLimitedButtonAction("activity-pause", () =>
+              setIsFeedPaused((paused) => !paused),
+            )
+          }
+          isCompact={isCompactFeed}
+          onToggleCompact={() =>
+            runRateLimitedButtonAction("activity-compact", () =>
+              setIsCompactFeed((compact) => !compact),
+            )
+          }
+          filter={activityFilter}
+          onFilterChange={handleActivityFilterChange}
+          isSocketConnected={isSocketConnected && !isDisconnected}
+        />
       </div>
 
       {showAbout && (
         <div className="modal-overlay" onClick={() => setShowAbout(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+          <FloatingChrome
+            className="modal-content"
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
             <button
               type="button"
               className="modal-close"
@@ -2485,12 +2389,12 @@ function App() {
                 </a>
               </li>
             </ul>
-          </div>
+          </FloatingChrome>
         </div>
       )}
 
       {showMenu && (
-        <div className="menu-dropdown" aria-label="Global controls menu">
+        <FloatingChrome className="menu-dropdown" aria-label="Global controls menu">
           <div className="menu-dropdown-scroll">
           <div className="menu-dropdown-inner">
           <div className="menu-section">
@@ -2782,7 +2686,7 @@ function App() {
           </a>
           </div>
           </div>
-        </div>
+        </FloatingChrome>
       )}
     </div>
   );

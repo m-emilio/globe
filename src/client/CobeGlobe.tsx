@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import createGlobe from "cobe";
 
 type GlobeMarker = {
@@ -355,6 +356,7 @@ export function Cobe({
   const globeScaleRef = useRef(DEFAULT_GLOBE_SCALE);
   const [isAutoRotatePaused, setIsAutoRotatePaused] = useState(false);
   const [globeScale, setGlobeScale] = useState(DEFAULT_GLOBE_SCALE);
+  const [isGlobeControlsOpen, setIsGlobeControlsOpen] = useState(false);
   const routeOverlayData = useMemo(
     () => prepareRouteOverlay(overlayRoutes),
     [overlayRoutes],
@@ -422,29 +424,30 @@ export function Cobe({
     onResize();
 
     let globe: ReturnType<typeof createGlobe> | null = null;
-    try {
-      if (!canvasRef.current) {
-        return;
+    // Never early-return after adding the resize listener — that would leak it.
+    if (canvasRef.current) {
+      try {
+        globe = createGlobe(canvasRef.current, {
+          devicePixelRatio: 2,
+          width: width || 400,
+          height: width || 400,
+          phi: 0,
+          theta: 0,
+          dark: 1,
+          diffuse: 0.8,
+          mapSamples: 16000,
+          mapBrightness: 6,
+          baseColor: [212 / 255, 175 / 255, 55 / 255], // #d4af37 gold
+          markerColor: markerColorRef.current,
+          glowColor: glowColorRef.current,
+          markers: [],
+          opacity: 0.7,
+          scale: DEFAULT_GLOBE_SCALE,
+        });
+      } catch {
+        // WebGL/init failure — keep UI shell; render loop no-ops without globe
+        globe = null;
       }
-      globe = createGlobe(canvasRef.current, {
-        devicePixelRatio: 2,
-        width: width || 400,
-        height: width || 400,
-        phi: 0,
-        theta: 0,
-        dark: 1,
-        diffuse: 0.8,
-        mapSamples: 16000,
-        mapBrightness: 6,
-        baseColor: [212 / 255, 175 / 255, 55 / 255], // #d4af37 gold
-        markerColor: markerColorRef.current,
-        glowColor: glowColorRef.current,
-        markers: [],
-        opacity: 0.7,
-        scale: DEFAULT_GLOBE_SCALE,
-      });
-    } catch (err) {
-      // silent
     }
 
     const renderFrame = () => {
@@ -508,25 +511,103 @@ export function Cobe({
   }, []);
 
   const routePoints = routeOverlayData.points;
+  const [controlsSlot, setControlsSlot] = useState<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const bindSlot = () => {
+      setControlsSlot(document.getElementById("globe-controls-slot"));
+    };
+    bindSlot();
+    // Slot is rendered as a sibling later in the tree; re-check next frame if needed
+    const frame = window.requestAnimationFrame(bindSlot);
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  const globeControls = (
+    <div
+      className={`globe-controls ${isGlobeControlsOpen ? "globe-controls-open" : "globe-controls-compact"}`}
+      role="group"
+      aria-label="Globe controls"
+    >
+      <button
+        type="button"
+        className={`globe-control-btn globe-controls-toggle ${isGlobeControlsOpen ? "active" : ""}`}
+        onClick={() => setIsGlobeControlsOpen((open) => !open)}
+        aria-expanded={isGlobeControlsOpen}
+        aria-controls="globe-controls-panel"
+        aria-label={
+          isGlobeControlsOpen
+            ? "Hide globe zoom controls"
+            : "Show globe zoom controls"
+        }
+        title="GLOBE CTRL"
+      >
+        GLOBE CTRL
+      </button>
+      {isGlobeControlsOpen && (
+        <div id="globe-controls-panel" className="globe-controls-panel">
+          <button
+            type="button"
+            className={`globe-control-btn ${isAutoRotatePaused ? "active" : ""}`}
+            onClick={() => setAutoRotatePausedValue(!isAutoRotatePausedRef.current)}
+            aria-pressed={isAutoRotatePaused}
+            aria-label={
+              isAutoRotatePaused ? "Start globe rotation" : "Stop globe rotation"
+            }
+          >
+            {isAutoRotatePaused ? "START" : "STOP"}
+          </button>
+          <button
+            type="button"
+            className="globe-control-btn"
+            onClick={() =>
+              setGlobeScaleValue(globeScaleRef.current + GLOBE_SCALE_STEP)
+            }
+            aria-label="Zoom globe in"
+          >
+            ZOOM
+          </button>
+          <button
+            type="button"
+            className="globe-control-btn"
+            onClick={() =>
+              setGlobeScaleValue(globeScaleRef.current - GLOBE_SCALE_STEP)
+            }
+            aria-label="Zoom globe out"
+          >
+            UNZOOM
+          </button>
+          <button
+            type="button"
+            className="globe-control-btn"
+            onClick={resetGlobeView}
+            aria-label="Reset globe view"
+          >
+            RESET
+          </button>
+          <span className="globe-zoom-readout">
+            {Math.round(globeScale * 100)}%
+          </span>
+        </div>
+      )}
+    </div>
+  );
 
   return (
-    <div
-      style={{
-        width: "min(400px, calc(100vw - 24px))",
-        aspectRatio: "1 / 1",
-        margin: "40px auto",
-        position: "relative",
-        background: "transparent",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: "50%",
-        isolation: "isolate",
-        touchAction: "none",
-        overscrollBehavior: "contain",
-        userSelect: "none",
-      }}
-    >
+    <div className="globe-cobe-root">
+      <div
+        className="globe-cobe-sphere"
+        style={{
+          background: "transparent",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          isolation: "isolate",
+          touchAction: "none",
+          overscrollBehavior: "contain",
+          userSelect: "none",
+        }}
+      >
       <div
         aria-hidden="true"
         style={{
@@ -633,61 +714,33 @@ export function Cobe({
           userSelect: "none",
         }}
       />
-      <div className="globe-controls" role="group" aria-label="Globe controls">
-        <span className="globe-controls-label">GLOBE CTRL</span>
-        <button
-          type="button"
-          className={`globe-control-btn ${isAutoRotatePaused ? "active" : ""}`}
-          onClick={() => setAutoRotatePausedValue(!isAutoRotatePausedRef.current)}
-          aria-pressed={isAutoRotatePaused}
-          aria-label={isAutoRotatePaused ? "Start globe rotation" : "Stop globe rotation"}
-        >
-          {isAutoRotatePaused ? "START" : "STOP"}
-        </button>
-        <button
-          type="button"
-          className="globe-control-btn"
-          onClick={() => setGlobeScaleValue(globeScaleRef.current + GLOBE_SCALE_STEP)}
-          aria-label="Zoom globe in"
-        >
-          ZOOM
-        </button>
-        <button
-          type="button"
-          className="globe-control-btn"
-          onClick={() => setGlobeScaleValue(globeScaleRef.current - GLOBE_SCALE_STEP)}
-          aria-label="Zoom globe out"
-        >
-          UNZOOM
-        </button>
-        <button
-          type="button"
-          className="globe-control-btn"
-          onClick={resetGlobeView}
-          aria-label="Reset globe view"
-        >
-          RESET
-        </button>
-        <span className="globe-zoom-readout">{Math.round(globeScale * 100)}%</span>
-      </div>
       {/* Multiplayer counter display */}
-      <div style={{
-        position: "absolute",
-        top: 10,
-        left: 0,
-        width: "100%",
-        zIndex: 2,
-        textAlign: "center",
-        color: "#fff",
-        fontWeight: 600,
-        textShadow: "0 1px 4px #000"
-      }}>
+      <div
+        className="globe-counter"
+        style={{
+          position: "absolute",
+          top: 10,
+          left: 0,
+          width: "100%",
+          zIndex: 2,
+          textAlign: "center",
+          color: "#fff",
+          fontWeight: 600,
+          textShadow: "0 1px 4px #000",
+          pointerEvents: "none",
+        }}
+      >
         {counter !== 0 ? (
-          <span><b>{counter}</b> {counter === 1 ? "person" : "people"} connected.</span>
+          <span>
+            <b>{counter}</b> {counter === 1 ? "person" : "people"} connected.
+          </span>
         ) : (
           <span>&nbsp;</span>
         )}
       </div>
+      </div>
+
+      {controlsSlot ? createPortal(globeControls, controlsSlot) : null}
     </div>
   );
 }
