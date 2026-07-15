@@ -4,6 +4,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { Cobe, type GlobeArc } from "./CobeGlobe";
 import { FloatingChrome } from "./FloatingChrome";
+import { NearbyMap } from "./NearbyMap";
 import {
   ActivityFeed,
   createActivityEvent,
@@ -15,12 +16,14 @@ import usePartySocket from "partysocket/react";
 import type {
   OutgoingMessage,
   ComtradePreview,
+  NearbyPathsPreview,
   TradePulseLayer,
   TradePulsePreview,
   TradePulseRoutePreview,
   UnGlobalPreview,
 } from "../shared";
 type WeatherStatus = "idle" | "loading" | "ready" | "error";
+type NearbyStatus = "idle" | "loading" | "ready" | "error";
 type ForecastView = "daily" | "hourly";
 type ComtradeStatus = "idle" | "loading" | "ready" | "error";
 type ComtradeSection = "records" | "availability" | "references" | "reporters";
@@ -323,7 +326,7 @@ function describeWeatherCode(code: number) {
   return WEATHER_CODE_LABELS[code] ?? `Weather code ${code}`;
 }
 
-function getBrowserPosition() {
+function getBrowserPosition(timeoutMs = 5000) {
   return new Promise<GeolocationPosition>((resolve, reject) => {
     if (!navigator.geolocation) {
       reject(new Error("Geolocation unavailable"));
@@ -332,7 +335,7 @@ function getBrowserPosition() {
 
     navigator.geolocation.getCurrentPosition(resolve, reject, {
       enableHighAccuracy: false,
-      timeout: 5000,
+      timeout: timeoutMs,
       maximumAge: 10 * 60 * 1000,
     });
   });
@@ -693,6 +696,13 @@ function App() {
   const [isSocketConnected, setIsSocketConnected] = useState(false);
   const [counter, setCounter] = useState(0);
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
+  const [showNearbyPanel, setShowNearbyPanel] = useState(false);
+  const [nearbyStatus, setNearbyStatus] = useState<NearbyStatus>("idle");
+  const [nearbyPreview, setNearbyPreview] = useState<NearbyPathsPreview | null>(
+    null,
+  );
+  const [nearbyError, setNearbyError] = useState("");
+  const [nearbyRadiusM, setNearbyRadiusM] = useState(750);
   const navBarRef = useRef<HTMLElement | null>(null);
 
   const positions = useRef<
@@ -788,6 +798,161 @@ function App() {
     setActivityFilter(filter);
   }, []);
 
+  const resolveUserCoordinates = async (timeoutMs = 5000) => {
+    try {
+      const position = await getBrowserPosition(timeoutMs);
+      return {
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        label: "Your location",
+      };
+    } catch {
+      return {
+        latitude: DEFAULT_WEATHER_LOCATION.latitude,
+        longitude: DEFAULT_WEATHER_LOCATION.longitude,
+        label: DEFAULT_WEATHER_LOCATION.label,
+      };
+    }
+  };
+
+  const nearbySessionKey = (latitude: number, longitude: number, radiusM: number) =>
+    `globe-nearby-v2:${latitude.toFixed(3)}:${longitude.toFixed(3)}:${radiusM}`;
+
+  const readNearbySessionCache = (
+    latitude: number,
+    longitude: number,
+    radiusM: number,
+  ): NearbyPathsPreview | null => {
+    try {
+      const raw = sessionStorage.getItem(
+        nearbySessionKey(latitude, longitude, radiusM),
+      );
+      if (!raw) return null;
+      const data = JSON.parse(raw) as NearbyPathsPreview;
+      if (!data?.paths?.length) return null;
+      return data;
+    } catch {
+      return null;
+    }
+  };
+
+  const writeNearbySessionCache = (
+    latitude: number,
+    longitude: number,
+    radiusM: number,
+    data: NearbyPathsPreview,
+  ) => {
+    try {
+      sessionStorage.setItem(
+        nearbySessionKey(latitude, longitude, radiusM),
+        JSON.stringify(data),
+      );
+    } catch {
+      // quota / private mode — ignore
+    }
+  };
+
+  const fetchNearbyPathsAt = async (
+    latitude: number,
+    longitude: number,
+    radiusM: number,
+    options?: { allowCache?: boolean },
+  ) => {
+    if (options?.allowCache !== false) {
+      const cached = readNearbySessionCache(latitude, longitude, radiusM);
+      if (cached) {
+        return cached;
+      }
+    }
+
+    const params = new URLSearchParams({
+      lat: String(latitude),
+      lng: String(longitude),
+      radius: String(radiusM),
+    });
+    const response = await fetch(`/api/nearby-paths?${params.toString()}`, {
+      headers: { accept: "application/json" },
+      // Reuse browser HTTP cache for identical nearby queries
+      cache: "default",
+    });
+
+    if (!response.ok) {
+      throw new Error("Nearby paths request failed");
+    }
+
+    const data = (await response.json()) as NearbyPathsPreview;
+    if (!data || !Array.isArray(data.paths) || data.paths.length === 0) {
+      throw new Error("Nearby paths response incomplete");
+    }
+    writeNearbySessionCache(latitude, longitude, radiusM, data);
+    return data;
+  };
+
+  const loadNearbyPaths = async (closeMenu = true, radiusM = nearbyRadiusM) => {
+    // Open immediately — do not depend on the global button rate limiter succeeding twice
+    setShowNearbyPanel(true);
+    if (closeMenu) {
+      setShowMenu(false);
+    }
+    setNearbyStatus("loading");
+    setNearbyError("");
+
+    const clampedRadius = Math.min(1000, Math.max(250, Math.round(radiusM)));
+    setNearbyRadiusM(clampedRadius);
+
+    try {
+      // One geolocation wait (short) — avoid a second full download unless the user is far away
+      const location = await Promise.race([
+        resolveUserCoordinates(2800),
+        new Promise<{
+          latitude: number;
+          longitude: number;
+          label: string;
+        }>((resolve) =>
+          window.setTimeout(
+            () =>
+              resolve({
+                latitude: DEFAULT_WEATHER_LOCATION.latitude,
+                longitude: DEFAULT_WEATHER_LOCATION.longitude,
+                label: DEFAULT_WEATHER_LOCATION.label,
+              }),
+            900,
+          ),
+        ),
+      ]);
+
+      const data = await fetchNearbyPathsAt(
+        location.latitude,
+        location.longitude,
+        clampedRadius,
+      );
+      setNearbyPreview(data);
+      setNearbyStatus("ready");
+
+      // Optional refinement: only re-fetch if precise geo moves ~150m+
+      void resolveUserCoordinates(5000).then(async (precise) => {
+        const dLat = Math.abs(precise.latitude - location.latitude);
+        const dLng = Math.abs(precise.longitude - location.longitude);
+        if (dLat < 0.0015 && dLng < 0.0015) {
+          return;
+        }
+        try {
+          const upgraded = await fetchNearbyPathsAt(
+            precise.latitude,
+            precise.longitude,
+            clampedRadius,
+          );
+          setNearbyPreview(upgraded);
+        } catch {
+          // keep first successful result
+        }
+      });
+    } catch {
+      setNearbyError("Nearby street traces unavailable");
+      setNearbyStatus("error");
+    }
+  };
+
   const loadWeatherFeed = async () => {
     setShowWeatherPanel(true);
     setShowMenu(false);
@@ -799,10 +964,10 @@ function App() {
     let locationLabel = DEFAULT_WEATHER_LOCATION.label;
 
     try {
-      const position = await getBrowserPosition();
-      latitude = position.coords.latitude;
-      longitude = position.coords.longitude;
-      locationLabel = "Your location";
+      const location = await resolveUserCoordinates();
+      latitude = location.latitude;
+      longitude = location.longitude;
+      locationLabel = location.label;
     } catch {
       locationLabel = DEFAULT_WEATHER_LOCATION.label;
     }
@@ -1336,6 +1501,29 @@ function App() {
         <div className="nav-right">
           <button
             type="button"
+            className={`weather-icon-btn nearby-icon-btn ${
+              nearbyStatus === "loading" ? "weather-icon-loading" : ""
+            } ${showNearbyPanel ? "nearby-icon-btn-open" : ""}`}
+            onClick={() => {
+              void loadNearbyPaths();
+            }}
+            aria-label="Nearby street traces"
+            title="Nearby streets & paths"
+            aria-pressed={showNearbyPanel}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 18V6" />
+              <path d="M10 18V9" />
+              <path d="M16 18V4" />
+              <path d="M20 14H4" />
+              <path d="M20 10H10" />
+              <circle cx="4" cy="14" r="1.2" />
+              <circle cx="10" cy="10" r="1.2" />
+              <circle cx="16" cy="14" r="1.2" />
+            </svg>
+          </button>
+          <button
+            type="button"
             className={`weather-icon-btn ${weatherStatus === "loading" ? "weather-icon-loading" : ""}`}
             onClick={() =>
               runRateLimitedButtonAction("weather-load", () => {
@@ -1363,6 +1551,120 @@ function App() {
           </button>
         </div>
       </nav>
+
+      {showNearbyPanel && (
+        <FloatingChrome
+          className="nearby-panel"
+          role="dialog"
+          aria-label="Nearby street and path traces"
+        >
+          <div className="nearby-panel-header">
+            <div>
+              <h3>NEARBY MAP</h3>
+              <span>
+                {nearbyPreview
+                  ? `${nearbyPreview.lat.toFixed(4)}, ${nearbyPreview.lng.toFixed(4)} · ${nearbyPreview.radiusM}m · drag header to move`
+                  : "Local streets & paths"}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="nearby-close"
+              onClick={() =>
+                runRateLimitedButtonAction("nearby-close", () =>
+                  setShowNearbyPanel(false),
+                )
+              }
+              aria-label="Close nearby map"
+            >
+              x
+            </button>
+          </div>
+
+          {nearbyStatus === "loading" && (
+            <div className="nearby-loading">Tracing nearby streets...</div>
+          )}
+
+          {nearbyStatus === "error" && (
+            <div className="nearby-error">
+              <span>{nearbyError}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  void loadNearbyPaths(false);
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {nearbyStatus === "ready" && nearbyPreview && (
+            <>
+              <div className="nearby-metrics">
+                <div className="nearby-metric">
+                  <span>Segments</span>
+                  <strong>{nearbyPreview.pathCount}</strong>
+                </div>
+                <div className="nearby-metric">
+                  <span>Roads</span>
+                  <strong>{nearbyPreview.roadCount}</strong>
+                </div>
+                <div className="nearby-metric">
+                  <span>Paths</span>
+                  <strong>{nearbyPreview.footCount}</strong>
+                </div>
+                <div className="nearby-metric">
+                  <span>Radius</span>
+                  <strong>{nearbyPreview.radiusM}m</strong>
+                </div>
+              </div>
+
+              <NearbyMap data={nearbyPreview} />
+
+              <div className="nearby-radius-controls" role="group" aria-label="Trace radius">
+                {[350, 500, 750].map((radius) => (
+                  <button
+                    key={radius}
+                    type="button"
+                    className={nearbyRadiusM === radius ? "active" : ""}
+                    onClick={() => {
+                      void loadNearbyPaths(false, radius);
+                    }}
+                  >
+                    {radius}m
+                  </button>
+                ))}
+              </div>
+
+              <div className="nearby-footer">
+                <span>
+                  {nearbyPreview.stale
+                    ? nearbyPreview.note ?? "Fallback sketch"
+                    : nearbyPreview.note ?? "OSM centerlines"}
+                </span>
+                <div className="nearby-footer-actions">
+                  <a
+                    href={nearbyPreview.sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Source
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void loadNearbyPaths(false, nearbyRadiusM);
+                    }}
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </FloatingChrome>
+      )}
 
       {showWeatherPanel && (
         <FloatingChrome
@@ -2657,6 +2959,15 @@ function App() {
           >
             Federalkey
           </a>
+          <button
+            type="button"
+            className={`menu-item menu-item-button ${showNearbyPanel ? "active" : ""}`}
+            onClick={() => {
+              void loadNearbyPaths(false);
+            }}
+          >
+            Nearby traces
+          </button>
           <button
             type="button"
             className="menu-item menu-item-button"

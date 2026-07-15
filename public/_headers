@@ -7,3 +7,14 @@
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Permissions-Policy: camera=(), microphone=(), geolocation=(self)
+
+# Long-cache fingerprinted/static client assets to cut repeat Wi‑Fi usage
+/dist/*
+  Cache-Control: public, max-age=604800, stale-while-revalidate=86400
+
+/normalize.css
+  Cache-Control: public, max-age=604800, stale-while-revalidate=86400
+
+# Source maps are for debugging only — discourage default download
+/dist/*.map
+  Cache-Control: private, max-age=0, must-revalidate

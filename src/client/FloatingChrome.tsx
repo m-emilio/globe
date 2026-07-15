@@ -35,6 +35,7 @@ type ResizeState = {
 const DRAG_HANDLE_SELECTOR = [
   ".un-panel-header",
   ".weather-panel-header",
+  ".nearby-panel-header",
   ".activity-header",
   ".menu-section-title",
   ".modal-content > h2",

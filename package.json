@@ -30,7 +30,7 @@
     "wrangler": "4.107.0"
   },
   "scripts": {
-    "build:client": "esbuild ./src/client/index.tsx --bundle --outdir=public/dist --splitting --sourcemap --format=esm",
+    "build:client": "esbuild ./src/client/index.tsx --bundle --outdir=public/dist --splitting --sourcemap --format=esm --minify --legal-comments=none --tree-shaking=true",
     "cf-typegen": "wrangler types ./src/server/worker-configuration.d.ts",
     "check": "tsc --project src/client && tsc --project src/server && wrangler deploy --dry-run",
     "deploy": "wrangler deploy",

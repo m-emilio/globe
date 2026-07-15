@@ -6,6 +6,9 @@ import type {
   ComtradeReferencePreview,
   ComtradeReporterPreview,
   ComtradeTradeRecordPreview,
+  NearbyPathKind,
+  NearbyPathSegment,
+  NearbyPathsPreview,
   OutgoingMessage,
   Position,
   TradePulseCountryPreview,
@@ -74,6 +77,29 @@ const COUNTRY_CENTROIDS_URL =
   "f5cac3d42d16b78348610fc4ec301e9234f82821/countries_codes_and_coordinates.csv";
 const UN_BLUE_BOOK_SOURCE_URL = "https://www.un.org/dgacm/en/content/protocol/blue-book";
 const UN_GLOBAL_CACHE_SECONDS = 6 * 60 * 60;
+const NEARBY_PATHS_SOURCE = "OpenStreetMap";
+const NEARBY_PATHS_SOURCE_URL = "https://www.openstreetmap.org/copyright";
+const OSM_MAP_API = "https://api.openstreetmap.org/api/0.6/map";
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+] as const;
+const OSM_MAP_ATTEMPT_MS = 9_000;
+const OVERPASS_ATTEMPT_MS = 4_000;
+const NEARBY_DEFAULT_RADIUS_M = 500;
+const NEARBY_MIN_RADIUS_M = 250;
+const NEARBY_MAX_RADIUS_M = 1000;
+const NEARBY_MAX_WAYS = 90;
+const NEARBY_MAX_POINTS_PER_WAY = 28;
+const OSM_FETCH_RADIUS_CAP_M = 400;
+const NEARBY_CACHE_SECONDS = 15 * 60;
+const NEARBY_COORD_DECIMALS = 5;
+const HIGHWAY_ALLOW =
+  /^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|track|footway|path|cycleway|pedestrian|steps|bridleway)$/;
+const NEARBY_CACHE = new Map<
+  string,
+  { expiresAt: number; payload: NearbyPathsPreview }
+>();
 const UN_MEMBER_STATES_TOTAL = 193;
 const UN_GEO_AREAS_FALLBACK_TOTAL = 460;
 const UN_GLOBAL_PREVIEW_LIMIT = 100;
@@ -1314,9 +1340,678 @@ function getTradePulsePreview() {
   });
 }
 
+function classifyHighway(highway: string): NearbyPathKind {
+  if (
+    highway === "footway" ||
+    highway === "path" ||
+    highway === "steps" ||
+    highway === "pedestrian" ||
+    highway === "bridleway"
+  ) {
+    return "path";
+  }
+  if (highway === "cycleway") {
+    return "cycle";
+  }
+  if (highway === "service" || highway === "track" || highway === "living_street") {
+    return "service";
+  }
+  return "road";
+}
+
+function roundCoord(value: number, decimals = NEARBY_COORD_DECIMALS): number {
+  const f = 10 ** decimals;
+  return Math.round(value * f) / f;
+}
+
+function perpendicularDistance(
+  point: { lat: number; lng: number },
+  start: { lat: number; lng: number },
+  end: { lat: number; lng: number },
+): number {
+  const x = point.lng;
+  const y = point.lat;
+  const x1 = start.lng;
+  const y1 = start.lat;
+  const x2 = end.lng;
+  const y2 = end.lat;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  if (dx === 0 && dy === 0) {
+    return Math.hypot(x - x1, y - y1);
+  }
+  const t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy);
+  const clamped = Math.max(0, Math.min(1, t));
+  return Math.hypot(x - (x1 + clamped * dx), y - (y1 + clamped * dy));
+}
+
+function douglasPeucker(
+  points: Array<{ lat: number; lng: number }>,
+  epsilon: number,
+): Array<{ lat: number; lng: number }> {
+  if (points.length <= 2) {
+    return points;
+  }
+
+  let maxDist = 0;
+  let index = 0;
+  const end = points.length - 1;
+  for (let i = 1; i < end; i++) {
+    const dist = perpendicularDistance(points[i], points[0], points[end]);
+    if (dist > maxDist) {
+      index = i;
+      maxDist = dist;
+    }
+  }
+
+  if (maxDist > epsilon) {
+    const left = douglasPeucker(points.slice(0, index + 1), epsilon);
+    const right = douglasPeucker(points.slice(index), epsilon);
+    return left.slice(0, -1).concat(right);
+  }
+
+  return [points[0], points[end]];
+}
+
+function simplifyGeometry(
+  geometry: Array<{ lat?: number; lon?: number }>,
+  maxPoints: number,
+): Array<{ lat: number; lng: number }> {
+  const cleaned = geometry
+    .map((point) => {
+      const lat = Number(point.lat);
+      const lng = Number(point.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return null;
+      }
+      if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        return null;
+      }
+      return {
+        lat: roundCoord(lat),
+        lng: roundCoord(lng),
+      };
+    })
+    .filter((point): point is { lat: number; lng: number } => point !== null);
+
+  if (cleaned.length <= 2) {
+    return cleaned;
+  }
+
+  // ~3–4 m tolerance at mid-latitudes for thinner payloads
+  let simplified = douglasPeucker(cleaned, 0.00003);
+  if (simplified.length > maxPoints) {
+    const step = Math.ceil(simplified.length / maxPoints);
+    const reduced: Array<{ lat: number; lng: number }> = [];
+    for (let i = 0; i < simplified.length; i += step) {
+      reduced.push(simplified[i]);
+    }
+    const last = simplified[simplified.length - 1];
+    const prev = reduced[reduced.length - 1];
+    if (!prev || prev.lat !== last.lat || prev.lng !== last.lng) {
+      reduced.push(last);
+    }
+    simplified = reduced;
+  }
+
+  return simplified;
+}
+
+/** Shrink JSON for the wire without changing client semantics. */
+function compactNearbyPayload(payload: NearbyPathsPreview): NearbyPathsPreview {
+  const paths = payload.paths.map((path) => {
+    const points = path.points.map((p) => ({
+      lat: roundCoord(p.lat),
+      lng: roundCoord(p.lng),
+    }));
+    // Drop redundant name when it only repeats the highway tag
+    const name =
+      path.name && path.name !== path.highway ? path.name.slice(0, 48) : path.highway;
+    return {
+      id: path.id,
+      name,
+      highway: path.highway,
+      kind: path.kind,
+      points,
+    };
+  });
+
+  return {
+    source: payload.source,
+    sourceUrl: payload.sourceUrl,
+    lat: roundCoord(payload.lat, 5),
+    lng: roundCoord(payload.lng, 5),
+    radiusM: payload.radiusM,
+    updatedAt: payload.updatedAt,
+    pathCount: paths.length,
+    roadCount: paths.filter((p) => p.kind === "road" || p.kind === "service").length,
+    footCount: paths.filter((p) => p.kind === "path" || p.kind === "cycle").length,
+    paths,
+    ...(payload.stale ? { stale: true } : {}),
+    ...(payload.note ? { note: payload.note.slice(0, 96) } : {}),
+  };
+}
+
+function buildFallbackNearbyPaths(
+  lat: number,
+  lng: number,
+  radiusM: number,
+): NearbyPathsPreview {
+  // Dense synthetic block grid + paths when live OSM is unavailable
+  const metersPerDegLat = 111_320;
+  const metersPerDegLng = 111_320 * Math.cos((lat * Math.PI) / 180) || 1;
+  const toLat = (northM: number) => lat + northM / metersPerDegLat;
+  const toLng = (eastM: number) => lng + eastM / metersPerDegLng;
+  const arm = radiusM * 0.9;
+  const block = Math.max(70, radiusM / 6);
+  const paths: NearbyPathSegment[] = [];
+
+  // North-south streets
+  for (let i = -4; i <= 4; i++) {
+    const x = i * block;
+    if (Math.abs(x) > arm) continue;
+    const major = i === 0 || i === 2 || i === -2;
+    paths.push({
+      id: `fb-ns-${i}`,
+      name: major ? `Avenue ${Math.abs(i) + 1}` : `Street N${i}`,
+      highway: major ? "secondary" : "residential",
+      kind: major ? "road" : "service",
+      points: [
+        { lat: toLat(-arm), lng: toLng(x) },
+        { lat: toLat(arm), lng: toLng(x) },
+      ],
+    });
+  }
+
+  // East-west streets
+  for (let j = -4; j <= 4; j++) {
+    const y = j * block;
+    if (Math.abs(y) > arm) continue;
+    const major = j === 0 || j === 3 || j === -3;
+    paths.push({
+      id: `fb-ew-${j}`,
+      name: major ? `Boulevard ${Math.abs(j) + 1}` : `Lane E${j}`,
+      highway: major ? "primary" : "residential",
+      kind: "road",
+      points: [
+        { lat: toLat(y), lng: toLng(-arm) },
+        { lat: toLat(y), lng: toLng(arm) },
+      ],
+    });
+  }
+
+  // Foot paths / alleys
+  paths.push(
+    {
+      id: "fb-path-1",
+      name: "Greenway",
+      highway: "footway",
+      kind: "path",
+      points: [
+        { lat: toLat(-arm * 0.55), lng: toLng(-arm * 0.35) },
+        { lat: toLat(-arm * 0.1), lng: toLng(-arm * 0.05) },
+        { lat: toLat(arm * 0.35), lng: toLng(arm * 0.25) },
+        { lat: toLat(arm * 0.65), lng: toLng(arm * 0.55) },
+      ],
+    },
+    {
+      id: "fb-path-2",
+      name: "Alley",
+      highway: "footway",
+      kind: "path",
+      points: [
+        { lat: toLat(arm * 0.2), lng: toLng(-arm * 0.7) },
+        { lat: toLat(arm * 0.15), lng: toLng(-arm * 0.2) },
+        { lat: toLat(-arm * 0.25), lng: toLng(arm * 0.15) },
+        { lat: toLat(-arm * 0.45), lng: toLng(arm * 0.6) },
+      ],
+    },
+    {
+      id: "fb-cycle-1",
+      name: "Cycle loop",
+      highway: "cycleway",
+      kind: "cycle",
+      points: [
+        { lat: toLat(arm * 0.55), lng: toLng(-arm * 0.55) },
+        { lat: toLat(arm * 0.55), lng: toLng(arm * 0.55) },
+        { lat: toLat(-arm * 0.55), lng: toLng(arm * 0.55) },
+        { lat: toLat(-arm * 0.55), lng: toLng(-arm * 0.55) },
+        { lat: toLat(arm * 0.55), lng: toLng(-arm * 0.55) },
+      ],
+    },
+  );
+
+  return {
+    source: NEARBY_PATHS_SOURCE,
+    sourceUrl: NEARBY_PATHS_SOURCE_URL,
+    lat,
+    lng,
+    radiusM,
+    updatedAt: new Date().toISOString(),
+    pathCount: paths.length,
+    roadCount: paths.filter((p) => p.kind === "road" || p.kind === "service").length,
+    footCount: paths.filter((p) => p.kind === "path" || p.kind === "cycle").length,
+    paths,
+    stale: true,
+    note: "Sketch mode — live OSM unavailable from this network",
+  };
+}
+
+function parseNearbyQuery(url: URL): {
+  lat: number;
+  lng: number;
+  radiusM: number;
+} | null {
+  const lat = Number(url.searchParams.get("lat"));
+  const lng = Number(url.searchParams.get("lng"));
+  const radiusRaw = Number(url.searchParams.get("radius") ?? NEARBY_DEFAULT_RADIUS_M);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    return null;
+  }
+
+  const radiusM = Math.min(
+    NEARBY_MAX_RADIUS_M,
+    Math.max(
+      NEARBY_MIN_RADIUS_M,
+      Number.isFinite(radiusRaw) ? Math.round(radiusRaw) : NEARBY_DEFAULT_RADIUS_M,
+    ),
+  );
+
+  return { lat, lng, radiusM };
+}
+
+function parseXmlAttrs(tagInner: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const re = /([A-Za-z_:][\w:.-]*)\s*=\s*["']([^"']*)["']/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(tagInner)) !== null) {
+    attrs[match[1]] = match[2];
+  }
+  return attrs;
+}
+
+function haversineMeters(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number,
+): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const r = 6_371_000;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * r * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function clipPathToRadius(
+  points: Array<{ lat: number; lng: number }>,
+  lat: number,
+  lng: number,
+  radiusM: number,
+): Array<{ lat: number; lng: number }> {
+  // Keep vertices inside radius; drop tiny stubs
+  const kept = points.filter(
+    (p) => haversineMeters(lat, lng, p.lat, p.lng) <= radiusM * 1.08,
+  );
+  return kept.length >= 2 ? kept : [];
+}
+
+function buildPreviewFromPaths(
+  lat: number,
+  lng: number,
+  radiusM: number,
+  paths: NearbyPathSegment[],
+  note: string,
+  stale = false,
+): NearbyPathsPreview {
+  return {
+    source: NEARBY_PATHS_SOURCE,
+    sourceUrl: NEARBY_PATHS_SOURCE_URL,
+    lat,
+    lng,
+    radiusM,
+    updatedAt: new Date().toISOString(),
+    pathCount: paths.length,
+    roadCount: paths.filter((p) => p.kind === "road" || p.kind === "service")
+      .length,
+    footCount: paths.filter((p) => p.kind === "path" || p.kind === "cycle")
+      .length,
+    paths,
+    stale,
+    note,
+  };
+}
+
+function parseOsmMapXml(
+  xml: string,
+  lat: number,
+  lng: number,
+  radiusM: number,
+): NearbyPathSegment[] {
+  const nodes = new Map<string, { lat: number; lng: number }>();
+  const nodeTagRe = /<node\b([^>]*?)\/>/g;
+  let nodeMatch: RegExpExecArray | null;
+  while ((nodeMatch = nodeTagRe.exec(xml)) !== null) {
+    const attrs = parseXmlAttrs(nodeMatch[1]);
+    const id = attrs.id;
+    const nLat = Number(attrs.lat);
+    const nLng = Number(attrs.lon);
+    if (!id || !Number.isFinite(nLat) || !Number.isFinite(nLng)) continue;
+    nodes.set(id, { lat: nLat, lng: nLng });
+  }
+
+  const paths: NearbyPathSegment[] = [];
+  const wayRe = /<way\b([^>]*)>([\s\S]*?)<\/way>/g;
+  let wayMatch: RegExpExecArray | null;
+  while ((wayMatch = wayRe.exec(xml)) !== null) {
+    if (paths.length >= NEARBY_MAX_WAYS) break;
+
+    const wayAttrs = parseXmlAttrs(wayMatch[1]);
+    const body = wayMatch[2];
+    const tags: Record<string, string> = {};
+    const tagRe = /<tag\b([^>]*?)\/>/g;
+    let tagMatch: RegExpExecArray | null;
+    while ((tagMatch = tagRe.exec(body)) !== null) {
+      const t = parseXmlAttrs(tagMatch[1]);
+      if (t.k && t.v) tags[t.k] = t.v;
+    }
+
+    const highway = tags.highway;
+    if (!highway || !HIGHWAY_ALLOW.test(highway)) continue;
+
+    const pts: Array<{ lat: number; lng: number }> = [];
+    const ndRe = /<nd\b([^>]*?)\/>/g;
+    let ndMatch: RegExpExecArray | null;
+    while ((ndMatch = ndRe.exec(body)) !== null) {
+      const ref = parseXmlAttrs(ndMatch[1]).ref;
+      if (!ref) continue;
+      const node = nodes.get(ref);
+      if (node) pts.push(node);
+    }
+
+    const clipped = clipPathToRadius(pts, lat, lng, radiusM);
+    const simplified = simplifyGeometry(
+      clipped.map((p) => ({ lat: p.lat, lon: p.lng })),
+      NEARBY_MAX_POINTS_PER_WAY,
+    );
+    if (simplified.length < 2) continue;
+
+    const name = (tags.name || tags.ref || highway).slice(0, 80);
+    paths.push({
+      id: `w${wayAttrs.id ?? paths.length}`,
+      name,
+      highway: highway.slice(0, 32),
+      kind: classifyHighway(highway),
+      points: simplified,
+    });
+  }
+
+  // Prefer named / major roads first for clarity in dense areas
+  const rank = (p: NearbyPathSegment) => {
+    let score = 0;
+    if (p.name && p.name !== p.highway) score += 3;
+    if (p.kind === "road") score += 2;
+    if (p.kind === "path" || p.kind === "cycle") score += 1;
+    if (
+      p.highway === "primary" ||
+      p.highway === "secondary" ||
+      p.highway === "tertiary"
+    ) {
+      score += 2;
+    }
+    return score;
+  };
+  paths.sort((a, b) => rank(b) - rank(a));
+  return paths.slice(0, NEARBY_MAX_WAYS);
+}
+
+function parseOverpassElements(
+  payload: {
+    elements?: Array<{
+      type?: string;
+      id?: number;
+      tags?: Record<string, string>;
+      geometry?: Array<{ lat?: number; lon?: number }>;
+    }>;
+  },
+  lat: number,
+  lng: number,
+  radiusM: number,
+): NearbyPathSegment[] {
+  const paths: NearbyPathSegment[] = [];
+  for (const element of payload.elements ?? []) {
+    if (element.type !== "way" || !element.geometry || !element.id) {
+      continue;
+    }
+    const highway = element.tags?.highway ?? "";
+    if (!HIGHWAY_ALLOW.test(highway)) continue;
+
+    const raw = element.geometry
+      .map((p) => ({ lat: Number(p.lat), lng: Number(p.lon) }))
+      .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+    const clipped = clipPathToRadius(raw, lat, lng, radiusM);
+    const points = simplifyGeometry(
+      clipped.map((p) => ({ lat: p.lat, lon: p.lng })),
+      NEARBY_MAX_POINTS_PER_WAY,
+    );
+    if (points.length < 2) continue;
+
+    const name = (element.tags?.name || element.tags?.ref || highway).slice(0, 80);
+    paths.push({
+      id: `w${element.id}`,
+      name,
+      highway: highway.slice(0, 32),
+      kind: classifyHighway(highway),
+      points,
+    });
+
+    if (paths.length >= NEARBY_MAX_WAYS) break;
+  }
+  return paths;
+}
+
+async function fetchNearbyPathsFromOsmMapApi(
+  lat: number,
+  lng: number,
+  radiusM: number,
+): Promise<NearbyPathsPreview | null> {
+  // Official OSM map API — real way geometries for a tight bbox
+  const metersPerDegLat = 111_320;
+  const metersPerDegLng = 111_320 * Math.cos((lat * Math.PI) / 180) || 1;
+  // Tight bbox — dense cities otherwise return multi‑MB payloads
+  const fetchRadius = Math.min(radiusM, OSM_FETCH_RADIUS_CAP_M);
+  const dLat = fetchRadius / metersPerDegLat;
+  const dLng = fetchRadius / metersPerDegLng;
+  const left = lng - dLng;
+  const right = lng + dLng;
+  const bottom = lat - dLat;
+  const top = lat + dLat;
+  const bbox = `${left.toFixed(6)},${bottom.toFixed(6)},${right.toFixed(6)},${top.toFixed(6)}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OSM_MAP_ATTEMPT_MS);
+  try {
+    const response = await fetch(`${OSM_MAP_API}?bbox=${bbox}`, {
+      headers: {
+        accept: "application/xml, text/xml, */*",
+        "user-agent":
+          "Mozilla/5.0 (compatible; GlobeNearby/1.1; +https://github.com/m-emilio/globe)",
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) return null;
+
+    const xml = await response.text();
+    if (!xml.includes("<osm") || xml.length < 200) return null;
+
+    const paths = parseOsmMapXml(xml, lat, lng, radiusM);
+    if (paths.length < 3) return null;
+
+    return buildPreviewFromPaths(
+      lat,
+      lng,
+      radiusM,
+      paths,
+      "Live OpenStreetMap streets & paths",
+      false,
+    );
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
+async function fetchNearbyPathsFromOverpass(
+  lat: number,
+  lng: number,
+  radiusM: number,
+): Promise<NearbyPathsPreview | null> {
+  const query = `
+[out:json][timeout:15];
+(
+  way["highway"~"^(primary|secondary|tertiary|residential|unclassified|living_street|service|footway|path|cycleway|pedestrian)$"](around:${Math.min(radiusM, 700)},${lat},${lng});
+);
+out geom;
+`.trim();
+
+  const body = `data=${encodeURIComponent(query)}`;
+
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), OVERPASS_ATTEMPT_MS);
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+          accept: "*/*",
+          "user-agent":
+            "Mozilla/5.0 (compatible; GlobeNearby/1.1; +https://github.com/m-emilio/globe)",
+        },
+        body,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (!response.ok) continue;
+
+      const payload = (await response.json()) as {
+        elements?: Array<{
+          type?: string;
+          id?: number;
+          tags?: Record<string, string>;
+          geometry?: Array<{ lat?: number; lon?: number }>;
+        }>;
+      };
+
+      const paths = parseOverpassElements(payload, lat, lng, radiusM);
+      if (paths.length < 3) continue;
+
+      return buildPreviewFromPaths(
+        lat,
+        lng,
+        radiusM,
+        paths,
+        "Live Overpass streets & paths",
+        false,
+      );
+    } catch {
+      // try next mirror
+    }
+  }
+
+  return null;
+}
+
+async function getNearbyPathsPreview(url: URL) {
+  const query = parseNearbyQuery(url);
+  if (!query) {
+    return jsonResponse(
+      { error: "invalid_coordinates" },
+      {
+        status: 400,
+        headers: { "cache-control": "no-store" },
+      },
+    );
+  }
+
+  const { lat, lng, radiusM } = query;
+  // Higher precision cache key so small moves update geometry
+  const cacheKey = `${lat.toFixed(4)}:${lng.toFixed(4)}:${radiusM}`;
+  const cached = NEARBY_CACHE.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return jsonResponse(cached.payload, {
+      headers: {
+        "cache-control": `public, max-age=${NEARBY_CACHE_SECONDS}`,
+      },
+    });
+  }
+
+  let payload: NearbyPathsPreview | null = null;
+
+  // 1) Official OSM map API (most accurate when reachable)
+  try {
+    payload = await fetchNearbyPathsFromOsmMapApi(lat, lng, radiusM);
+  } catch {
+    payload = null;
+  }
+
+  // 2) Overpass mirrors (quick attempt)
+  if (!payload) {
+    try {
+      payload = await Promise.race([
+        fetchNearbyPathsFromOverpass(lat, lng, radiusM),
+        new Promise<null>((resolve) => {
+          setTimeout(() => resolve(null), OVERPASS_ATTEMPT_MS + 400);
+        }),
+      ]);
+    } catch {
+      payload = null;
+    }
+  }
+
+  // 3) Local sketch only if live data unavailable
+  if (!payload || payload.paths.length === 0) {
+    payload = buildFallbackNearbyPaths(lat, lng, radiusM);
+  }
+
+  NEARBY_CACHE.set(cacheKey, {
+    expiresAt: Date.now() + NEARBY_CACHE_SECONDS * 1000,
+    payload,
+  });
+
+  if (NEARBY_CACHE.size > 64) {
+    const first = NEARBY_CACHE.keys().next().value;
+    if (first) NEARBY_CACHE.delete(first);
+  }
+
+  const compact = compactNearbyPayload(payload);
+
+  return jsonResponse(compact, {
+    headers: {
+      "cache-control": compact.stale
+        ? "public, max-age=60"
+        : `public, max-age=${NEARBY_CACHE_SECONDS}`,
+      // Encourage intermediate/browser reuse on limited Wi‑Fi
+      vary: "accept-encoding",
+    },
+  });
+}
+
 function jsonResponse(data: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json; charset=utf-8");
+  if (!headers.has("vary")) {
+    headers.set("vary", "accept-encoding");
+  }
   applySecurityHeaders(headers);
 
   return new Response(JSON.stringify(data), {
@@ -1811,6 +2506,14 @@ export default {
       }
 
       return withoutResponseBodyForHead(request, await getUnGlobalPreview());
+    }
+
+    if (url.pathname === "/api/nearby-paths") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+
+      return withoutResponseBodyForHead(request, await getNearbyPathsPreview(url));
     }
 
     const response =

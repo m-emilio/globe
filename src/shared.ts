@@ -194,3 +194,33 @@ export type TradePulsePreview = {
   metrics: TradePulseMetricPreview[];
   notes: string[];
 };
+
+export type NearbyPathKind = "road" | "path" | "cycle" | "service";
+
+export type NearbyPathPoint = {
+  lat: number;
+  lng: number;
+};
+
+export type NearbyPathSegment = {
+  id: string;
+  name: string;
+  highway: string;
+  kind: NearbyPathKind;
+  points: NearbyPathPoint[];
+};
+
+export type NearbyPathsPreview = {
+  source: string;
+  sourceUrl: string;
+  lat: number;
+  lng: number;
+  radiusM: number;
+  updatedAt: string;
+  pathCount: number;
+  roadCount: number;
+  footCount: number;
+  paths: NearbyPathSegment[];
+  stale?: boolean;
+  note?: string;
+};

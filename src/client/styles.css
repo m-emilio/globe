@@ -267,15 +267,17 @@ b {
   border-radius: 50%;
 }
 
-/* Bottom-right dock: GLOBE CTRL + Live Feed side by side */
+/* Bottom-left dock: GLOBE CTRL + Live Feed side by side */
 .bottom-dock {
   position: fixed;
-  right: max(16px, env(safe-area-inset-right, 0px));
+  left: max(16px, env(safe-area-inset-left, 0px));
+  right: auto;
   bottom: max(16px, env(safe-area-inset-bottom, 0px));
   z-index: 1100;
   display: flex;
   flex-direction: row;
   align-items: flex-end;
+  justify-content: flex-start;
   gap: 10px;
   pointer-events: none;
   max-width: calc(100vw - 24px);
@@ -400,6 +402,7 @@ b {
 
 .floating-chrome .weather-panel-header,
 .floating-chrome .un-panel-header,
+.floating-chrome .nearby-panel-header,
 .floating-chrome .activity-header,
 .floating-chrome .menu-section-title,
 .floating-chrome.modal-content > h2,
@@ -411,6 +414,7 @@ b {
 
 .floating-chrome .weather-panel-header:active,
 .floating-chrome .un-panel-header:active,
+.floating-chrome .nearby-panel-header:active,
 .floating-chrome .activity-header:active,
 .floating-chrome.modal-content > h2:active,
 .floating-chrome-drag:active {
@@ -420,6 +424,7 @@ b {
 /* Keep header buttons clickable (override grab on the header container) */
 .floating-chrome .un-panel-header button,
 .floating-chrome .weather-panel-header button,
+.floating-chrome .nearby-panel-header button,
 .floating-chrome .activity-header button,
 .floating-chrome .un-panel-actions {
   cursor: pointer;
@@ -2120,6 +2125,396 @@ b {
   text-shadow: 0 0 10px #00ff88;
 }
 
+/* Nearby street/path traces (centerlines only — no basemap tiles) */
+.nearby-icon-btn-open {
+  background: rgba(0, 217, 255, 0.16);
+  box-shadow: 0 0 12px rgba(0, 217, 255, 0.35);
+}
+
+.nearby-icon-btn svg circle {
+  fill: currentColor;
+  stroke: none;
+}
+
+.nearby-panel {
+  position: fixed;
+  top: 82px;
+  right: 30px;
+  width: min(440px, calc(100vw - 40px));
+  max-height: calc(100vh - 104px);
+  z-index: 1012;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.94);
+  border: 1.5px solid #00d9ff;
+  border-radius: 4px;
+  box-shadow: 0 0 30px rgba(0, 217, 255, 0.22);
+  font-family: 'Courier New', monospace;
+  text-align: left;
+}
+
+.nearby-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 15px;
+  border-bottom: 1.5px solid rgba(0, 217, 255, 0.55);
+  background: linear-gradient(90deg, rgba(0, 217, 255, 0.1), transparent 80%);
+  flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
+}
+
+.nearby-panel-header:active {
+  cursor: grabbing;
+}
+
+.nearby-panel-header h3 {
+  margin: 0;
+  color: #00d9ff;
+  font-size: 12px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+}
+
+.nearby-panel-header span {
+  display: block;
+  margin-top: 4px;
+  color: #8b96a1;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+}
+
+.nearby-close {
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgba(0, 217, 255, 0.45);
+  border-radius: 2px;
+  background: transparent;
+  color: #00d9ff;
+  cursor: pointer;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.nearby-close:hover {
+  background: #00d9ff;
+  color: #0a0e27;
+}
+
+.nearby-loading,
+.nearby-error {
+  padding: 22px 16px;
+  color: #9aa5b0;
+  font-size: 12px;
+  text-align: center;
+}
+
+.nearby-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: #ff8a8a;
+}
+
+.nearby-error button,
+.nearby-radius-controls button,
+.nearby-footer-actions button,
+.nearby-footer-actions a {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(0, 217, 255, 0.4);
+  border-radius: 3px;
+  background: transparent;
+  color: #00d9ff;
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  font-weight: bold;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  text-decoration: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nearby-error button:hover,
+.nearby-radius-controls button:hover,
+.nearby-footer-actions button:hover,
+.nearby-footer-actions a:hover {
+  background: rgba(0, 217, 255, 0.12);
+}
+
+.nearby-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid rgba(0, 217, 255, 0.18);
+  flex-shrink: 0;
+}
+
+.nearby-metric {
+  padding: 10px 8px;
+  border-right: 1px solid rgba(0, 217, 255, 0.1);
+}
+
+.nearby-metric:last-child {
+  border-right: none;
+}
+
+.nearby-metric span {
+  display: block;
+  color: #8b96a1;
+  font-size: 9px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.nearby-metric strong {
+  color: #e8f7ff;
+  font-size: 13px;
+}
+
+.nearby-map {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: #0d141e;
+  border-bottom: 1px solid rgba(0, 217, 255, 0.16);
+  overflow: hidden;
+}
+
+.nearby-map-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.nearby-map-water {
+  fill: rgba(35, 70, 110, 0.55);
+  stroke: rgba(90, 150, 200, 0.25);
+  stroke-width: 1;
+}
+
+.nearby-map-park {
+  fill: rgba(40, 70, 48, 0.45);
+  stroke: rgba(90, 140, 90, 0.2);
+  stroke-width: 0.6;
+}
+
+.nearby-map-radius {
+  fill: none;
+  stroke: rgba(0, 255, 136, 0.22);
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+}
+
+.nearby-casing,
+.nearby-fill {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nearby-casing-major {
+  stroke: rgba(8, 12, 18, 0.95);
+  stroke-width: 5.2;
+}
+
+.nearby-casing-minor {
+  stroke: rgba(8, 12, 18, 0.9);
+  stroke-width: 3.4;
+}
+
+.nearby-fill-major {
+  stroke: #f0d48a;
+  stroke-width: 2.6;
+}
+
+.nearby-fill-minor {
+  stroke: #d8e0ea;
+  stroke-width: 1.5;
+}
+
+.nearby-fill-path {
+  stroke: #6fbf7a;
+  stroke-width: 1.15;
+  stroke-dasharray: 2.5 2;
+}
+
+.nearby-fill-cycle {
+  stroke: #5ec8e8;
+  stroke-width: 1.35;
+  stroke-dasharray: 5 2.5;
+}
+
+.nearby-map-label {
+  fill: rgba(220, 230, 240, 0.72);
+  font-size: 7.5px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  letter-spacing: 0.3px;
+  paint-order: stroke;
+  stroke: rgba(10, 14, 22, 0.85);
+  stroke-width: 2.2px;
+  pointer-events: none;
+}
+
+.nearby-map-you-halo {
+  fill: rgba(255, 80, 80, 0.12);
+  stroke: none;
+}
+
+.nearby-map-you-ring {
+  fill: rgba(255, 255, 255, 0.95);
+  stroke: #e63946;
+  stroke-width: 2;
+}
+
+.nearby-map-you-dot {
+  fill: #e63946;
+  stroke: none;
+}
+
+.nearby-map-north-disc {
+  fill: rgba(8, 12, 18, 0.75);
+  stroke: rgba(200, 210, 220, 0.35);
+  stroke-width: 1;
+}
+
+.nearby-map-north-arrow {
+  fill: #f0d48a;
+  stroke: none;
+}
+
+.nearby-map-north-text {
+  fill: rgba(220, 230, 240, 0.85);
+  font-size: 8px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-weight: 700;
+}
+
+.nearby-map-scale {
+  stroke: rgba(220, 230, 240, 0.75);
+  stroke-width: 1.2;
+  fill: rgba(220, 230, 240, 0.85);
+  font-size: 8px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
+.nearby-map-scale-bar {
+  fill: rgba(220, 230, 240, 0.85);
+  stroke: none;
+}
+
+.nearby-map-scale text {
+  stroke: none;
+}
+
+.nearby-map-legend {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.nearby-map-stale-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 3px 7px;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 209, 102, 0.45);
+  background: rgba(0, 0, 0, 0.72);
+  color: #ffd166;
+  font-size: 9px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.nearby-leg {
+  padding: 2px 6px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid rgba(0, 217, 255, 0.25);
+  color: #c9d4df;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.nearby-leg-road {
+  border-color: rgba(0, 217, 255, 0.55);
+  color: #7fdfff;
+}
+
+.nearby-leg-path {
+  border-color: rgba(0, 255, 136, 0.45);
+  color: #8dffc4;
+}
+
+.nearby-leg-cycle {
+  border-color: rgba(255, 209, 102, 0.5);
+  color: #ffd166;
+}
+
+.nearby-leg-you {
+  border-color: rgba(0, 255, 136, 0.65);
+  color: #00ff88;
+}
+
+.nearby-radius-controls {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid rgba(0, 217, 255, 0.16);
+  flex-shrink: 0;
+}
+
+.nearby-radius-controls button.active {
+  background: rgba(0, 217, 255, 0.16);
+  box-shadow: 0 0 10px rgba(0, 217, 255, 0.25);
+  color: #e8f7ff;
+}
+
+.nearby-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  color: #8b96a1;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.nearby-footer-actions {
+  display: flex;
+  gap: 6px;
+}
+
+@media (max-width: 768px) {
+  .nearby-panel {
+    top: calc(var(--mobile-nav-height, 92px) + 8px);
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-height: calc(100dvh - var(--mobile-nav-height, 92px) - 16px);
+  }
+
+  .nearby-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 /* Live Feed — stable bottom-dock panel (expands upward, no FloatingChrome drag glitches) */
 .activity-floating {
   position: relative;
@@ -2127,7 +2522,7 @@ b {
   max-width: min(360px, calc(100vw - 140px));
   display: flex;
   flex-direction: column-reverse;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 8px;
   z-index: 1;
   font-family: 'Courier New', monospace;
@@ -2139,7 +2534,7 @@ b {
 }
 
 .activity-launcher {
-  align-self: flex-end;
+  align-self: flex-start;
   width: min(230px, 100%);
   height: 48px;
   min-height: 48px;
@@ -2779,7 +3174,8 @@ b {
   }
 
   .bottom-dock {
-    right: max(10px, env(safe-area-inset-right, 0px));
+    left: max(10px, env(safe-area-inset-left, 0px));
+    right: auto;
     bottom: max(10px, env(safe-area-inset-bottom, 0px));
     gap: 8px;
   }
