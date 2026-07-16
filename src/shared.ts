@@ -224,3 +224,47 @@ export type NearbyPathsPreview = {
   stale?: boolean;
   note?: string;
 };
+
+export type TransitModePreview = {
+  modeName: string;
+  count: number;
+};
+
+export type TransitRoutePreview = {
+  id: string;
+  shortName: string;
+  longName: string;
+  modeName: string;
+  networkName: string;
+  color: string;
+  textColor: string;
+  closestStopName: string;
+  closestStopDistanceM: number | null;
+  nextDepartures: string[];
+  alertCount: number;
+};
+
+export type TransitStopPreview = {
+  id: string;
+  name: string;
+  code: string;
+  distanceM: number | null;
+  lat: number | null;
+  lng: number | null;
+  routeType: number | null;
+};
+
+export type TransitNearbyPreview = {
+  source: string;
+  sourceUrl: string;
+  lat: number;
+  lng: number;
+  maxDistanceM: number;
+  updatedAt: string;
+  routeCount: number;
+  stopCount: number;
+  modes: TransitModePreview[];
+  routes: TransitRoutePreview[];
+  stops: TransitStopPreview[];
+  note?: string;
+};

@@ -4,6 +4,8 @@
 declare namespace Cloudflare {
 	interface Env {
 		Globe: DurableObjectNamespace<import("./index").Globe>;
+		/** Transit App Public API v4 key (GitHub secret: TRANSIT_PUBLICAPI_V4) */
+		TRANSIT_PUBLICAPI_V4?: string;
 	}
 }
 interface Env extends Cloudflare.Env {}

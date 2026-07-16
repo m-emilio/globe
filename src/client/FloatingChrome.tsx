@@ -36,6 +36,7 @@ const DRAG_HANDLE_SELECTOR = [
   ".un-panel-header",
   ".weather-panel-header",
   ".nearby-panel-header",
+  ".transit-panel-header",
   ".activity-header",
   ".menu-section-title",
   ".modal-content > h2",

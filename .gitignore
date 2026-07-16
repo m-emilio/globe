@@ -181,3 +181,9 @@ build/
 
 # Turbo output
 .turbo/
+
+# Local wrangler secrets
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+

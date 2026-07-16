@@ -1,0 +1,3 @@
+# Copy to .dev.vars for local wrangler dev (never commit .dev.vars)
+# GitHub Actions / repo secret name must match:
+TRANSIT_PUBLICAPI_V4=your_transit_public_api_v4_key_here

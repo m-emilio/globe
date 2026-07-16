@@ -1,0 +1,43 @@
+name: Deploy test local transit
+
+on:
+  push:
+    branches:
+      - test/local-transit-api
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck + dry-run
+        run: npm run check
+        env:
+          # Available if present; deploy uses wrangler secret on Cloudflare side
+          TRANSIT_PUBLICAPI_V4: ${{ secrets.TRANSIT_PUBLICAPI_V4 }}
+
+      - name: Deploy worker (optional)
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+          secrets: |
+            TRANSIT_PUBLICAPI_V4
+        env:
+          TRANSIT_PUBLICAPI_V4: ${{ secrets.TRANSIT_PUBLICAPI_V4 }}

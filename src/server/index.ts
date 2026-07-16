@@ -11,6 +11,10 @@ import type {
   NearbyPathsPreview,
   OutgoingMessage,
   Position,
+  TransitModePreview,
+  TransitNearbyPreview,
+  TransitRoutePreview,
+  TransitStopPreview,
   TradePulseCountryPreview,
   TradePulseMetricPreview,
   TradePulsePreview,
@@ -79,6 +83,19 @@ const UN_BLUE_BOOK_SOURCE_URL = "https://www.un.org/dgacm/en/content/protocol/bl
 const UN_GLOBAL_CACHE_SECONDS = 6 * 60 * 60;
 const NEARBY_PATHS_SOURCE = "OpenStreetMap";
 const NEARBY_PATHS_SOURCE_URL = "https://www.openstreetmap.org/copyright";
+const TRANSIT_API_BASE = "https://external.transitapp.com";
+const TRANSIT_SOURCE = "Transit App Public API v4";
+const TRANSIT_SOURCE_URL = "https://api-doc.transitapp.com/v4.html";
+const TRANSIT_DEFAULT_MAX_DISTANCE_M = 800;
+const TRANSIT_MIN_MAX_DISTANCE_M = 150;
+const TRANSIT_MAX_MAX_DISTANCE_M = 1500;
+const TRANSIT_MAX_ROUTES = 40;
+const TRANSIT_MAX_STOPS = 40;
+const TRANSIT_CACHE_SECONDS = 60;
+const TRANSIT_CACHE = new Map<
+  string,
+  { expiresAt: number; payload: TransitNearbyPreview }
+>();
 const OSM_MAP_API = "https://api.openstreetmap.org/api/0.6/map";
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -1931,6 +1948,324 @@ out geom;
   return null;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asString(value: unknown, max = 120): string {
+  if (typeof value === "string") {
+    return value.trim().slice(0, max);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value).slice(0, max);
+  }
+  const rec = asRecord(value);
+  if (rec) {
+    const nested =
+      rec.id ?? rec.global_id ?? rec.value ?? rec.text ?? rec.name;
+    if (typeof nested === "string" || typeof nested === "number") {
+      return String(nested).trim().slice(0, max);
+    }
+  }
+  return "";
+}
+
+function asNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatTransitDeparture(value: unknown): string | null {
+  const epoch = asNumber(value);
+  if (epoch === null) return null;
+  // Transit may return seconds or milliseconds
+  const ms = epoch > 1e12 ? epoch : epoch * 1000;
+  try {
+    return new Date(ms).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return null;
+  }
+}
+
+function parseTransitRoutes(raw: unknown): TransitRoutePreview[] {
+  const root = asRecord(raw);
+  const list = Array.isArray(root?.nearby_routes)
+    ? root.nearby_routes
+    : Array.isArray(raw)
+      ? raw
+      : [];
+
+  const routes: TransitRoutePreview[] = [];
+  for (const item of list) {
+    if (routes.length >= TRANSIT_MAX_ROUTES) break;
+    const route = asRecord(item);
+    if (!route) continue;
+
+    const shortName =
+      asString(route.route_short_name, 24) ||
+      asString(asRecord(route.route_display_short_name)?.text, 24) ||
+      asString(route.mode_name, 24) ||
+      "—";
+    const longName = asString(route.route_long_name, 100);
+    const id =
+      asString(route.global_route_id, 80) ||
+      asString(route.real_time_route_id, 80) ||
+      `${shortName}-${routes.length}`;
+
+    let closestStopName = "";
+    let closestStopDistanceM: number | null = null;
+    const nextDepartures: string[] = [];
+
+    const merged = Array.isArray(route.merged_itineraries)
+      ? route.merged_itineraries
+      : [];
+    for (const mergedItem of merged) {
+      const mi = asRecord(mergedItem);
+      if (!mi) continue;
+      const stop = asRecord(mi.closest_stop);
+      if (stop && !closestStopName) {
+        closestStopName = asString(stop.stop_name, 80);
+        closestStopDistanceM = asNumber(stop.distance);
+      }
+      const schedule = Array.isArray(mi.schedule_items) ? mi.schedule_items : [];
+      for (const scheduleItem of schedule) {
+        if (nextDepartures.length >= 3) break;
+        const si = asRecord(scheduleItem);
+        if (!si) continue;
+        const label =
+          formatTransitDeparture(si.departure_time) ||
+          formatTransitDeparture(si.departure_time_seconds) ||
+          asString(si.departure_time_str, 16);
+        if (label && !nextDepartures.includes(label)) {
+          nextDepartures.push(label);
+        }
+      }
+      if (closestStopName && nextDepartures.length >= 3) break;
+    }
+
+    const alerts = Array.isArray(route.alerts) ? route.alerts.length : 0;
+    const color = asString(route.route_color, 12).replace(/^#/, "") || "00d9ff";
+    const textColor =
+      asString(route.route_text_color, 12).replace(/^#/, "") || "0a0e27";
+
+    routes.push({
+      id,
+      shortName,
+      longName,
+      modeName: asString(route.mode_name, 40) || "Transit",
+      networkName: asString(route.route_network_name, 60),
+      color,
+      textColor,
+      closestStopName,
+      closestStopDistanceM,
+      nextDepartures,
+      alertCount: alerts,
+    });
+  }
+
+  return routes;
+}
+
+function parseTransitStops(raw: unknown): TransitStopPreview[] {
+  const root = asRecord(raw);
+  const list = Array.isArray(root?.stops)
+    ? root.stops
+    : Array.isArray(raw)
+      ? raw
+      : [];
+
+  const stops: TransitStopPreview[] = [];
+  for (const item of list) {
+    if (stops.length >= TRANSIT_MAX_STOPS) break;
+    const stop = asRecord(item);
+    if (!stop) continue;
+    const name = asString(stop.stop_name, 80);
+    if (!name) continue;
+    stops.push({
+      id: asString(stop.global_stop_id, 80) || `stop-${stops.length}`,
+      name,
+      code: asString(stop.stop_code, 24),
+      distanceM: asNumber(stop.distance),
+      lat: asNumber(stop.stop_lat),
+      lng: asNumber(stop.stop_lon),
+      routeType: asNumber(stop.route_type),
+    });
+  }
+  return stops;
+}
+
+function buildTransitModes(routes: TransitRoutePreview[]): TransitModePreview[] {
+  const counts = new Map<string, number>();
+  for (const route of routes) {
+    const key = route.modeName || "Transit";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([modeName, count]) => ({ modeName, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 12);
+}
+
+async function fetchTransitJson(
+  path: string,
+  params: URLSearchParams,
+  apiKey: string,
+): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const response = await fetch(`${TRANSIT_API_BASE}${path}?${params}`, {
+      headers: {
+        accept: "application/json",
+        apiKey,
+        "user-agent": "GlobeOps/1.0 (local transit preview)",
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) {
+      throw new Error(`transit_upstream_${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timer);
+    throw error;
+  }
+}
+
+async function getTransitNearbyPreview(url: URL, env: Env) {
+  const apiKey = env.TRANSIT_PUBLICAPI_V4?.trim();
+  if (!apiKey) {
+    return jsonResponse(
+      {
+        error: "transit_api_key_missing",
+        message:
+          "Set TRANSIT_PUBLICAPI_V4 (GitHub secret / wrangler secret / .dev.vars) to enable local transit.",
+      },
+      {
+        status: 503,
+        headers: { "cache-control": "no-store" },
+      },
+    );
+  }
+
+  const lat = Number(url.searchParams.get("lat"));
+  const lon = Number(
+    url.searchParams.get("lon") ?? url.searchParams.get("lng"),
+  );
+  const maxDistanceRaw = Number(
+    url.searchParams.get("max_distance") ?? TRANSIT_DEFAULT_MAX_DISTANCE_M,
+  );
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return jsonResponse(
+      { error: "invalid_coordinates" },
+      { status: 400, headers: { "cache-control": "no-store" } },
+    );
+  }
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+    return jsonResponse(
+      { error: "invalid_coordinates" },
+      { status: 400, headers: { "cache-control": "no-store" } },
+    );
+  }
+
+  const maxDistanceM = Math.min(
+    TRANSIT_MAX_MAX_DISTANCE_M,
+    Math.max(
+      TRANSIT_MIN_MAX_DISTANCE_M,
+      Number.isFinite(maxDistanceRaw)
+        ? Math.round(maxDistanceRaw)
+        : TRANSIT_DEFAULT_MAX_DISTANCE_M,
+    ),
+  );
+
+  const cacheKey = `${lat.toFixed(4)}:${lon.toFixed(4)}:${maxDistanceM}`;
+  const cached = TRANSIT_CACHE.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return jsonResponse(cached.payload, {
+      headers: {
+        "cache-control": `public, max-age=${TRANSIT_CACHE_SECONDS}`,
+      },
+    });
+  }
+
+  const shared = new URLSearchParams({
+    lat: String(lat),
+    lon: String(lon),
+    max_distance: String(maxDistanceM),
+  });
+
+  const routesParams = new URLSearchParams(shared);
+  routesParams.set("should_update_realtime", "true");
+  routesParams.set("max_num_departures", "3");
+  routesParams.set("include_stops_and_shapes", "false");
+
+  const stopsParams = new URLSearchParams(shared);
+  stopsParams.set("stop_filter", "Routable");
+  stopsParams.set("stop_detailed", "false");
+
+  try {
+    const [routesRaw, stopsRaw] = await Promise.all([
+      fetchTransitJson("/v4/public/nearby_routes", routesParams, apiKey),
+      fetchTransitJson("/v4/public/nearby_stops", stopsParams, apiKey),
+    ]);
+
+    const routes = parseTransitRoutes(routesRaw);
+    const stops = parseTransitStops(stopsRaw);
+    const payload: TransitNearbyPreview = {
+      source: TRANSIT_SOURCE,
+      sourceUrl: TRANSIT_SOURCE_URL,
+      lat: Math.round(lat * 1e5) / 1e5,
+      lng: Math.round(lon * 1e5) / 1e5,
+      maxDistanceM,
+      updatedAt: new Date().toISOString(),
+      routeCount: routes.length,
+      stopCount: stops.length,
+      modes: buildTransitModes(routes),
+      routes,
+      stops,
+      note:
+        routes.length || stops.length
+          ? "Live local transit from Transit App"
+          : "No routes or stops found for this location",
+    };
+
+    TRANSIT_CACHE.set(cacheKey, {
+      expiresAt: Date.now() + TRANSIT_CACHE_SECONDS * 1000,
+      payload,
+    });
+    if (TRANSIT_CACHE.size > 48) {
+      const first = TRANSIT_CACHE.keys().next().value;
+      if (first) TRANSIT_CACHE.delete(first);
+    }
+
+    return jsonResponse(payload, {
+      headers: {
+        "cache-control": `public, max-age=${TRANSIT_CACHE_SECONDS}`,
+      },
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "transit_upstream_error";
+    return jsonResponse(
+      {
+        error: "transit_upstream_error",
+        message,
+      },
+      {
+        status: 502,
+        headers: { "cache-control": "no-store" },
+      },
+    );
+  }
+}
+
 async function getNearbyPathsPreview(url: URL) {
   const query = parseNearbyQuery(url);
   if (!query) {
@@ -2514,6 +2849,17 @@ export default {
       }
 
       return withoutResponseBodyForHead(request, await getNearbyPathsPreview(url));
+    }
+
+    if (url.pathname === "/api/transit-nearby") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+
+      return withoutResponseBodyForHead(
+        request,
+        await getTransitNearbyPreview(url, env),
+      );
     }
 
     const response =

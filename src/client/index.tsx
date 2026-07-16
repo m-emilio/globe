@@ -20,10 +20,12 @@ import type {
   TradePulseLayer,
   TradePulsePreview,
   TradePulseRoutePreview,
+  TransitNearbyPreview,
   UnGlobalPreview,
 } from "../shared";
 type WeatherStatus = "idle" | "loading" | "ready" | "error";
 type NearbyStatus = "idle" | "loading" | "ready" | "error";
+type TransitStatus = "idle" | "loading" | "ready" | "error";
 type ForecastView = "daily" | "hourly";
 type ComtradeStatus = "idle" | "loading" | "ready" | "error";
 type ComtradeSection = "records" | "availability" | "references" | "reporters";
@@ -703,6 +705,13 @@ function App() {
   );
   const [nearbyError, setNearbyError] = useState("");
   const [nearbyRadiusM, setNearbyRadiusM] = useState(750);
+  const [showTransitPanel, setShowTransitPanel] = useState(false);
+  const [transitStatus, setTransitStatus] = useState<TransitStatus>("idle");
+  const [transitPreview, setTransitPreview] = useState<TransitNearbyPreview | null>(
+    null,
+  );
+  const [transitError, setTransitError] = useState("");
+  const [transitDistanceM, setTransitDistanceM] = useState(800);
   const navBarRef = useRef<HTMLElement | null>(null);
 
   const positions = useRef<
@@ -950,6 +959,63 @@ function App() {
     } catch {
       setNearbyError("Nearby street traces unavailable");
       setNearbyStatus("error");
+    }
+  };
+
+  const loadLocalTransit = async (
+    closeMenu = true,
+    maxDistanceM = transitDistanceM,
+  ) => {
+    setShowTransitPanel(true);
+    if (closeMenu) {
+      setShowMenu(false);
+    }
+    setTransitStatus("loading");
+    setTransitError("");
+
+    const clamped = Math.min(1500, Math.max(150, Math.round(maxDistanceM)));
+    setTransitDistanceM(clamped);
+
+    try {
+      const location = await resolveUserCoordinates(3000);
+      const params = new URLSearchParams({
+        lat: String(location.latitude),
+        lon: String(location.longitude),
+        max_distance: String(clamped),
+      });
+      const response = await fetch(`/api/transit-nearby?${params.toString()}`, {
+        headers: { accept: "application/json" },
+      });
+
+      const payload = (await response.json()) as
+        | TransitNearbyPreview
+        | { error?: string; message?: string };
+
+      if (!response.ok) {
+        const message =
+          "message" in payload && payload.message
+            ? payload.message
+            : "error" in payload && payload.error
+              ? payload.error
+              : "Local transit unavailable";
+        throw new Error(message);
+      }
+
+      if (
+        !("routes" in payload) ||
+        !Array.isArray(payload.routes) ||
+        !Array.isArray(payload.stops)
+      ) {
+        throw new Error("Transit response incomplete");
+      }
+
+      setTransitPreview(payload);
+      setTransitStatus("ready");
+    } catch (error) {
+      setTransitError(
+        error instanceof Error ? error.message : "Local transit unavailable",
+      );
+      setTransitStatus("error");
     }
   };
 
@@ -1496,6 +1562,16 @@ function App() {
           >
             UN LAYER
           </button>
+          <button
+            className={`nav-btn transit-nav-btn ${showTransitPanel ? "active" : ""}`}
+            onClick={() => {
+              void loadLocalTransit();
+            }}
+            aria-pressed={showTransitPanel}
+            title="Local transit options"
+          >
+            TRANSIT
+          </button>
         </div>
 
         <div className="nav-right">
@@ -1551,6 +1627,192 @@ function App() {
           </button>
         </div>
       </nav>
+
+      {showTransitPanel && (
+        <FloatingChrome
+          className="transit-panel"
+          role="dialog"
+          aria-label="Local transit options"
+        >
+          <div className="transit-panel-header nearby-panel-header">
+            <div>
+              <h3>LOCAL TRANSIT</h3>
+              <span>
+                {transitPreview
+                  ? `${transitPreview.lat.toFixed(4)}, ${transitPreview.lng.toFixed(4)} · ${transitPreview.maxDistanceM}m`
+                  : "Routes & stops near you"}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="nearby-close"
+              onClick={() =>
+                runRateLimitedButtonAction("transit-close", () =>
+                  setShowTransitPanel(false),
+                )
+              }
+              aria-label="Close local transit"
+            >
+              x
+            </button>
+          </div>
+
+          {transitStatus === "loading" && (
+            <div className="nearby-loading">Loading local transit...</div>
+          )}
+
+          {transitStatus === "error" && (
+            <div className="nearby-error">
+              <span>{transitError}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  void loadLocalTransit(false);
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {transitStatus === "ready" && transitPreview && (
+            <>
+              <div className="nearby-metrics transit-metrics">
+                <div className="nearby-metric">
+                  <span>Routes</span>
+                  <strong>{transitPreview.routeCount}</strong>
+                </div>
+                <div className="nearby-metric">
+                  <span>Stops</span>
+                  <strong>{transitPreview.stopCount}</strong>
+                </div>
+                <div className="nearby-metric">
+                  <span>Modes</span>
+                  <strong>{transitPreview.modes.length}</strong>
+                </div>
+                <div className="nearby-metric">
+                  <span>Radius</span>
+                  <strong>{transitPreview.maxDistanceM}m</strong>
+                </div>
+              </div>
+
+              {transitPreview.modes.length > 0 && (
+                <div className="transit-mode-chips" aria-label="Transit modes">
+                  {transitPreview.modes.map((mode) => (
+                    <span key={mode.modeName} className="transit-mode-chip">
+                      {mode.modeName} · {mode.count}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="transit-section-title">Routes</div>
+              <div className="transit-list" role="list">
+                {transitPreview.routes.length === 0 ? (
+                  <div className="nearby-loading">No routes nearby</div>
+                ) : (
+                  transitPreview.routes.map((route) => (
+                    <article
+                      key={route.id}
+                      className="transit-route-card"
+                      role="listitem"
+                      style={
+                        {
+                          "--route-color": `#${route.color}`,
+                          "--route-text": `#${route.textColor}`,
+                        } as React.CSSProperties
+                      }
+                    >
+                      <div className="transit-route-badge">{route.shortName}</div>
+                      <div className="transit-route-body">
+                        <strong>{route.longName || route.shortName}</strong>
+                        <span>
+                          {route.modeName}
+                          {route.networkName ? ` · ${route.networkName}` : ""}
+                        </span>
+                        {route.closestStopName && (
+                          <span className="transit-route-stop">
+                            Near {route.closestStopName}
+                            {route.closestStopDistanceM != null
+                              ? ` · ${Math.round(route.closestStopDistanceM)}m`
+                              : ""}
+                          </span>
+                        )}
+                        {route.nextDepartures.length > 0 && (
+                          <span className="transit-route-deps">
+                            Next: {route.nextDepartures.join(" · ")}
+                          </span>
+                        )}
+                        {route.alertCount > 0 && (
+                          <span className="transit-route-alert">
+                            {route.alertCount} alert
+                            {route.alertCount === 1 ? "" : "s"}
+                          </span>
+                        )}
+                      </div>
+                    </article>
+                  ))
+                )}
+              </div>
+
+              <div className="transit-section-title">Stops</div>
+              <div className="transit-stop-list" role="list">
+                {transitPreview.stops.length === 0 ? (
+                  <div className="nearby-loading">No stops nearby</div>
+                ) : (
+                  transitPreview.stops.map((stop) => (
+                    <div key={stop.id} className="transit-stop-row" role="listitem">
+                      <strong>{stop.name}</strong>
+                      <span>
+                        {stop.code ? `#${stop.code}` : "Stop"}
+                        {stop.distanceM != null
+                          ? ` · ${Math.round(stop.distanceM)}m`
+                          : ""}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="nearby-radius-controls" role="group" aria-label="Search radius">
+                {[400, 800, 1200].map((distance) => (
+                  <button
+                    key={distance}
+                    type="button"
+                    className={transitDistanceM === distance ? "active" : ""}
+                    onClick={() => {
+                      void loadLocalTransit(false, distance);
+                    }}
+                  >
+                    {distance}m
+                  </button>
+                ))}
+              </div>
+
+              <div className="nearby-footer">
+                <span>{transitPreview.note ?? "Transit App"}</span>
+                <div className="nearby-footer-actions">
+                  <a
+                    href={transitPreview.sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    API docs
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void loadLocalTransit(false, transitDistanceM);
+                    }}
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </FloatingChrome>
+      )}
 
       {showNearbyPanel && (
         <FloatingChrome
@@ -2959,6 +3221,15 @@ function App() {
           >
             Federalkey
           </a>
+          <button
+            type="button"
+            className={`menu-item menu-item-button ${showTransitPanel ? "active" : ""}`}
+            onClick={() => {
+              void loadLocalTransit(false);
+            }}
+          >
+            Local transit
+          </button>
           <button
             type="button"
             className={`menu-item menu-item-button ${showNearbyPanel ? "active" : ""}`}

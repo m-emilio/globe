@@ -2125,6 +2125,181 @@ b {
   text-shadow: 0 0 10px #00ff88;
 }
 
+/* Local transit (Transit App Public API v4) */
+.transit-nav-btn {
+  border-color: #7c6af7;
+  color: #c4bbff;
+}
+
+.transit-nav-btn:hover,
+.transit-nav-btn.active {
+  background-color: rgba(124, 106, 247, 0.18);
+  color: #efeaff;
+  box-shadow: 0 0 12px rgba(124, 106, 247, 0.4);
+}
+
+.transit-panel {
+  position: fixed;
+  top: 82px;
+  left: 30px;
+  width: min(460px, calc(100vw - 40px));
+  max-height: calc(100vh - 104px);
+  z-index: 1013;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.95);
+  border: 1.5px solid #7c6af7;
+  border-radius: 4px;
+  box-shadow: 0 0 30px rgba(124, 106, 247, 0.25);
+  font-family: 'Courier New', monospace;
+  text-align: left;
+}
+
+.transit-panel .nearby-panel-header {
+  border-bottom-color: rgba(124, 106, 247, 0.55);
+  background: linear-gradient(90deg, rgba(124, 106, 247, 0.14), transparent 80%);
+}
+
+.transit-panel .nearby-panel-header h3 {
+  color: #c4bbff;
+}
+
+.transit-panel .nearby-close {
+  border-color: rgba(124, 106, 247, 0.5);
+  color: #c4bbff;
+}
+
+.transit-panel .nearby-close:hover {
+  background: #7c6af7;
+  color: #0a0e27;
+}
+
+.transit-metrics {
+  border-bottom-color: rgba(124, 106, 247, 0.25);
+}
+
+.transit-mode-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px 0;
+}
+
+.transit-mode-chip {
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(124, 106, 247, 0.45);
+  color: #d9d2ff;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+.transit-section-title {
+  padding: 10px 12px 4px;
+  color: #9aa0c8;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.transit-list,
+.transit-stop-list {
+  overflow-y: auto;
+  max-height: min(220px, 28dvh);
+  padding: 0 10px 8px;
+  overscroll-behavior: contain;
+}
+
+.transit-route-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  padding: 10px;
+  margin-bottom: 6px;
+  border: 1px solid rgba(124, 106, 247, 0.25);
+  border-radius: 4px;
+  background: rgba(20, 16, 40, 0.55);
+}
+
+.transit-route-badge {
+  min-width: 42px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 0.4px;
+  background: var(--route-color, #7c6af7);
+  color: var(--route-text, #0a0e27);
+}
+
+.transit-route-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.transit-route-body strong {
+  color: #efeaff;
+  font-size: 12px;
+}
+
+.transit-route-body span {
+  color: #a8aecf;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.transit-route-stop {
+  color: #c4bbff !important;
+}
+
+.transit-route-deps {
+  color: #8dffc4 !important;
+}
+
+.transit-route-alert {
+  color: #ffb4b4 !important;
+}
+
+.transit-stop-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(124, 106, 247, 0.15);
+}
+
+.transit-stop-row strong {
+  color: #efeaff;
+  font-size: 12px;
+}
+
+.transit-stop-row span {
+  color: #a8aecf;
+  font-size: 10px;
+}
+
+@media (max-width: 768px) {
+  .transit-panel {
+    top: calc(var(--mobile-nav-height, 92px) + 8px);
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-height: calc(100dvh - var(--mobile-nav-height, 92px) - 16px);
+  }
+
+  .nav-center {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 /* Nearby street/path traces (centerlines only — no basemap tiles) */
 .nearby-icon-btn-open {
   background: rgba(0, 217, 255, 0.16);
