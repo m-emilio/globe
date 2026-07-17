@@ -2125,6 +2125,59 @@ b {
   text-shadow: 0 0 10px #00ff88;
 }
 
+/* Stripe Checkout status banner */
+.billing-banner {
+  position: fixed;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(520px, calc(100vw - 24px));
+  padding: 10px 14px;
+  border-radius: 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  box-shadow: 0 0 20px rgba(0, 0, 0, 0.45);
+}
+
+.billing-banner-ok {
+  border: 1px solid rgba(0, 255, 136, 0.55);
+  background: rgba(0, 20, 12, 0.94);
+  color: #8dffc4;
+}
+
+.billing-banner-error {
+  border: 1px solid rgba(255, 107, 107, 0.6);
+  background: rgba(30, 8, 8, 0.94);
+  color: #ffb4b4;
+}
+
+.billing-banner button {
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.billing-menu-item {
+  border-color: rgba(99, 226, 183, 0.55) !important;
+  color: #8dffc4 !important;
+}
+
+.billing-menu-item:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
 /* Local transit (Transit App Public API v4) */
 .transit-nav-btn {
   border-color: #7c6af7;

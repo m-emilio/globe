@@ -6,6 +6,16 @@ declare namespace Cloudflare {
 		Globe: DurableObjectNamespace<import("./index").Globe>;
 		/** Transit App Public API v4 key (GitHub secret: TRANSIT_PUBLICAPI_V4) */
 		TRANSIT_PUBLICAPI_V4?: string;
+		/** Stripe secret key from Dashboard (sk_test_... / sk_live_...) */
+		STRIPE_SECRET_KEY?: string;
+		/** Stripe webhook signing secret (whsec_...) */
+		STRIPE_WEBHOOK_SECRET?: string;
+		/** Optional pre-created Price id; otherwise created via ensure product */
+		STRIPE_PRICE_ID?: string;
+		/** Optional publishable key for client Checkout.js (if used later) */
+		STRIPE_PUBLISHABLE_KEY?: string;
+		/** KV store for product/price ids and payment records */
+		BILLING_KV: KVNamespace;
 	}
 }
 interface Env extends Cloudflare.Env {}

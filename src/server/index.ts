@@ -1,4 +1,10 @@
 import { routePartykitRequest, Server } from "partyserver";
+import {
+  createCheckoutSession,
+  ensureBillingProduct,
+  getPaymentStatus,
+  handleStripeWebhook,
+} from "./billing";
 
 import type {
   ComtradeAvailabilityPreview,
@@ -2859,6 +2865,39 @@ export default {
       return withoutResponseBodyForHead(
         request,
         await getTransitNearbyPreview(url, env),
+      );
+    }
+
+    // --- Stripe one-time Checkout (product → session → webhook) ---
+    if (url.pathname === "/api/billing/ensure-product") {
+      if (request.method !== "POST" && request.method !== "GET") {
+        return methodNotAllowedResponse();
+      }
+      return ensureBillingProduct(env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/billing/create-checkout-session") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return createCheckoutSession(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/billing/webhook") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      // Do not wrap with withSecurityHeaders body clone issues — handler returns JSON
+      return handleStripeWebhook(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/billing/payment-status") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await getPaymentStatus(request, env, applySecurityHeaders),
       );
     }
 

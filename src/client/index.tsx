@@ -712,6 +712,9 @@ function App() {
   );
   const [transitError, setTransitError] = useState("");
   const [transitDistanceM, setTransitDistanceM] = useState(800);
+  const [billingBusy, setBillingBusy] = useState(false);
+  const [billingMessage, setBillingMessage] = useState("");
+  const [billingError, setBillingError] = useState("");
   const navBarRef = useRef<HTMLElement | null>(null);
 
   const positions = useRef<
@@ -731,6 +734,102 @@ function App() {
   useEffect(() => {
     isFeedPausedRef.current = isFeedPaused;
   }, [isFeedPaused]);
+
+  // Stripe Checkout return URLs: /?billing=success&session_id=... or /?billing=cancel
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const billing = params.get("billing");
+    const sessionId = params.get("session_id");
+    if (!billing) {
+      return;
+    }
+
+    if (billing === "cancel") {
+      setBillingMessage("Checkout canceled — no charge was made.");
+      setBillingError("");
+    }
+
+    if (billing === "success" && sessionId) {
+      setBillingMessage("Payment received. Confirming with Stripe…");
+      setBillingError("");
+      void (async () => {
+        try {
+          const response = await fetch(
+            `/api/billing/payment-status?session_id=${encodeURIComponent(sessionId)}`,
+            { headers: { accept: "application/json" } },
+          );
+          const data = (await response.json()) as {
+            paymentStatus?: string;
+            status?: string;
+            amountTotal?: number | null;
+            currency?: string | null;
+            error?: string;
+            message?: string;
+          };
+          if (!response.ok) {
+            throw new Error(data.message || data.error || "Payment status failed");
+          }
+          const paid =
+            data.paymentStatus === "paid" || data.status === "complete";
+          const amount =
+            typeof data.amountTotal === "number"
+              ? `$${(data.amountTotal / 100).toFixed(2)}`
+              : "payment";
+          setBillingMessage(
+            paid
+              ? `Checkout complete — ${amount} confirmed.`
+              : `Checkout session status: ${data.paymentStatus || data.status || "unknown"}.`,
+          );
+        } catch (error) {
+          setBillingError(
+            error instanceof Error ? error.message : "Could not verify payment",
+          );
+          setBillingMessage("");
+        }
+      })();
+    }
+
+    // Clean query params without full reload
+    params.delete("billing");
+    params.delete("session_id");
+    const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash}`;
+    window.history.replaceState({}, "", next);
+  }, []);
+
+  const startCheckout = async () => {
+    setBillingBusy(true);
+    setBillingError("");
+    setBillingMessage("Creating Checkout Session…");
+    setShowMenu(false);
+    try {
+      // Ensure product/price exist (idempotent), then create session
+      await fetch("/api/billing/ensure-product", {
+        method: "POST",
+        headers: { accept: "application/json" },
+      });
+
+      const response = await fetch("/api/billing/create-checkout-session", {
+        method: "POST",
+        headers: { accept: "application/json" },
+      });
+      const data = (await response.json()) as {
+        url?: string | null;
+        sessionId?: string;
+        error?: string;
+        message?: string;
+      };
+      if (!response.ok || !data.url) {
+        throw new Error(data.message || data.error || "Checkout unavailable");
+      }
+      window.location.href = data.url;
+    } catch (error) {
+      setBillingBusy(false);
+      setBillingMessage("");
+      setBillingError(
+        error instanceof Error ? error.message : "Checkout failed",
+      );
+    }
+  };
 
   // Keep menu/panel offsets in sync with the real nav height (prevents overlap/clipping on mobile)
   useEffect(() => {
@@ -1514,6 +1613,23 @@ function App() {
 
   return (
     <div className="App">
+      {(billingMessage || billingError) && (
+        <div
+          className={`billing-banner ${billingError ? "billing-banner-error" : "billing-banner-ok"}`}
+          role="status"
+        >
+          <span>{billingError || billingMessage}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setBillingMessage("");
+              setBillingError("");
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <nav className="nav-bar" ref={navBarRef}>
         <div className="nav-left">
           <h1 className="nav-title">
@@ -3238,6 +3354,16 @@ function App() {
             }}
           >
             Nearby traces
+          </button>
+          <button
+            type="button"
+            className="menu-item menu-item-button billing-menu-item"
+            disabled={billingBusy}
+            onClick={() => {
+              void startCheckout();
+            }}
+          >
+            {billingBusy ? "Redirecting…" : "Buy Example Product ($20)"}
           </button>
           <button
             type="button"
