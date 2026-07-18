@@ -1,4 +1,34 @@
 import { routePartykitRequest, Server } from "partyserver";
+import {
+  adoptSessionToken,
+  createAuthChallenge,
+  getMe,
+  getSessionUser,
+  loginUser,
+  logoutUser,
+  rateLimitOrNull,
+  registerUser,
+  requireTransitAccess,
+  type AuthEnv,
+} from "./auth";
+import {
+  adminClaimSession,
+  adminElevate,
+  adminElevateChallenge,
+  adminGrantTransit,
+  adminListAudit,
+  adminLookupUser,
+  adminRevokeTransit,
+  adminStatus,
+} from "./admin";
+import {
+  claimCheckoutSession,
+  ensureBillingCatalog,
+  getAccessStatus,
+  getPaymentLink,
+  getPaymentStatus,
+  handleStripeWebhook,
+} from "./billing";
 
 import type {
   ComtradeAvailabilityPreview,
@@ -10,6 +40,7 @@ import type {
   NearbyPathSegment,
   NearbyPathsPreview,
   OutgoingMessage,
+  FeedVisitorMeta,
   Position,
   TransitModePreview,
   TransitNearbyPreview,
@@ -100,19 +131,33 @@ const OSM_MAP_API = "https://api.openstreetmap.org/api/0.6/map";
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
 ] as const;
-const OSM_MAP_ATTEMPT_MS = 9_000;
-const OVERPASS_ATTEMPT_MS = 4_000;
+/** OSM 500m cores usually return in 1–3s; keep abort tight for snappy maps */
+const OSM_MAP_ATTEMPT_MS = 7_000;
+/** Single-mirror budget — Overpass is fallback only */
+const OVERPASS_ATTEMPT_MS = 5_000;
+/** Soft cap: dense cities ~10–15MB; still parse when possible */
+const OSM_MAP_MAX_XML_CHARS = 18_000_000;
 const NEARBY_DEFAULT_RADIUS_M = 500;
 const NEARBY_MIN_RADIUS_M = 250;
-const NEARBY_MAX_RADIUS_M = 1000;
-const NEARBY_MAX_WAYS = 90;
-const NEARBY_MAX_POINTS_PER_WAY = 28;
-const OSM_FETCH_RADIUS_CAP_M = 400;
+/** Match transit max so both maps can share the same accurate radius. */
+const NEARBY_MAX_RADIUS_M = 1500;
+/** Enough ways to fill large rings after tiling */
+const NEARBY_MAX_WAYS = 200;
+const NEARBY_MAX_POINTS_PER_WAY = 40;
+/** OSM map API bbox half-size — must cover full user radius. */
+const OSM_FETCH_RADIUS_CAP_M = NEARBY_MAX_RADIUS_M;
 const NEARBY_CACHE_SECONDS = 15 * 60;
-const NEARBY_COORD_DECIMALS = 5;
+/** ~0.1 m at equator — keep geometry true for projection */
+const NEARBY_COORD_DECIMALS = 6;
 const HIGHWAY_ALLOW =
   /^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|track|footway|path|cycleway|pedestrian|steps|bridleway)$/;
+/** Park / green polygons (leisure + landuse) — must stay defined for classifyOsmTags */
+const PARK_LEISURE =
+  /^(park|garden|playground|pitch|nature_reserve|recreation_ground|common|dog_park|village_green)$/;
+const PARK_LANDUSE =
+  /^(grass|recreation_ground|meadow|forest|village_green|orchard|allotments)$/;
 const NEARBY_CACHE = new Map<
   string,
   { expiresAt: number; payload: NearbyPathsPreview }
@@ -120,25 +165,88 @@ const NEARBY_CACHE = new Map<
 const UN_MEMBER_STATES_TOTAL = 193;
 const UN_GEO_AREAS_FALLBACK_TOTAL = 460;
 const UN_GLOBAL_PREVIEW_LIMIT = 100;
+/**
+ * Browser security policy (XSS / supply-chain focused).
+ * - No third-party scripts forever: script-src 'self' only (+ wasm for OpenPGP).
+ * - connect-src: same-origin APIs/WebSocket + open-meteo (browser weather only).
+ * - Upstream Stripe/OSM/Transit/Comtrade are server-side (Worker fetch), not browser connect.
+ * Keep in sync with public/_headers.
+ */
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "frame-src 'none'",
+  "child-src 'none'",
+  "worker-src 'self' blob:",
+  "manifest-src 'self'",
+  // First-party JS only. 'wasm-unsafe-eval' required for OpenPGP Argon2 WASM.
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "script-src-attr 'none'",
+  // React style={{}} attributes; no external stylesheets.
+  "style-src 'self' 'unsafe-inline'",
+  "style-src-attr 'unsafe-inline'",
+  // No remote images in-app (imagedelivery was template metadata only).
+  "img-src 'self' data: blob:",
+  "font-src 'self'",
+  // 'self' covers same-origin fetch + WebSocket (PartyKit). No open ws:/wss: wildcards.
+  "connect-src 'self' https://api.open-meteo.com",
+  "form-action 'self'",
+  // No upgrade-insecure-requests: breaks local http://127.0.0.1 wrangler dev.
+  // Production is HTTPS at the edge.
+].join("; ");
+
 const SECURITY_HEADERS = {
-  "content-security-policy":
-    "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; " +
-    "frame-src 'none'; worker-src 'none'; manifest-src 'self'; script-src 'self'; " +
-    "style-src 'self' 'unsafe-inline'; img-src 'self' data: https://imagedelivery.net; " +
-    "connect-src 'self' ws: wss: https://api.open-meteo.com; form-action 'self'",
+  "content-security-policy": CONTENT_SECURITY_POLICY,
   "cross-origin-opener-policy": "same-origin",
   "cross-origin-resource-policy": "same-origin",
   "origin-agent-cluster": "?1",
   "referrer-policy": "strict-origin-when-cross-origin",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
-  "permissions-policy": "camera=(), microphone=(), geolocation=(self)",
+  "permissions-policy":
+    "camera=(), microphone=(), geolocation=(self), payment=(), usb=(), interest-cohort=()",
+  // Discourage MIME-based XSS / legacy plugins
+  "x-permitted-cross-domain-policies": "none",
 } satisfies Record<string, string>;
 
-// This is the state that we'll store on each connection
+// Connection state: public marker + private feed meta (never fully broadcast)
 type ConnectionState = {
+  /** Public globe marker — no IP/org */
   position: Position;
+  /** Internal rate-limit key (full IP kept server-side only) */
+  clientKey: string;
+  /** Paid Live Feed enrichment — only sent to transitPaid peers */
+  feedMeta: FeedVisitorMeta;
+  joinedAt: number;
+  /** Whether this socket may receive feed-* messages */
+  feedPaid: boolean;
 };
+
+/** Mask IPv4/IPv6 for paid feed only — never send full address on the wire. */
+function maskIpForFeed(ip: string | undefined): string | undefined {
+  if (!ip) return undefined;
+  const value = ip.trim().slice(0, 64);
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
+    const [a, b] = value.split(".");
+    return `${a}.${b}.x.x`;
+  }
+  if (value.includes(":")) {
+    const groups = value.split(":").filter(Boolean).slice(0, 2);
+    return groups.length ? `${groups.join(":")}:…` : "ipv6:…";
+  }
+  return "hidden";
+}
+
+function publicMarker(position: Position): Position {
+  return {
+    lat: position.lat,
+    lng: position.lng,
+    id: position.id,
+    ...(position.country ? { country: position.country } : {}),
+  };
+}
 
 type ConnectionAttemptBucket = {
   windowStart: number;
@@ -751,6 +859,11 @@ function getClientIp(request: Request) {
       (request.cf?.clientIp as string | undefined),
     45,
   );
+}
+
+/** Alias for rate-limit keys on public preview routes */
+function clientIpFromRequest(request: Request): string {
+  return getClientIp(request) || "unknown";
 }
 
 function limitApiText(value: unknown, maxLength: number) {
@@ -1373,7 +1486,86 @@ function classifyHighway(highway: string): NearbyPathKind {
   if (highway === "service" || highway === "track" || highway === "living_street") {
     return "service";
   }
+  if (highway === "park" || highway.startsWith("leisure:") || highway.startsWith("landuse:")) {
+    return "park";
+  }
   return "road";
+}
+
+function classifyOsmTags(tags: Record<string, string>): {
+  kind: NearbyPathKind;
+  tag: string;
+  name: string;
+} | null {
+  const highway = tags.highway;
+  if (highway && HIGHWAY_ALLOW.test(highway)) {
+    return {
+      kind: classifyHighway(highway),
+      tag: highway,
+      name: (tags.name || tags.ref || highway).slice(0, 80),
+    };
+  }
+  const leisure = tags.leisure || "";
+  const landuse = tags.landuse || "";
+  if (PARK_LEISURE.test(leisure) || PARK_LANDUSE.test(landuse)) {
+    const tag = leisure || landuse;
+    return {
+      kind: "park",
+      tag: leisure ? `leisure:${leisure}` : `landuse:${landuse}`,
+      name: (tags.name || tag || "Park").slice(0, 80),
+    };
+  }
+  return null;
+}
+
+/** Keep roads, foot/cycle paths, and parks all represented (not roads-only). */
+function selectBalancedPaths(
+  paths: NearbyPathSegment[],
+  maxTotal: number,
+): NearbyPathSegment[] {
+  const rank = (p: NearbyPathSegment) => {
+    let score = 0;
+    if (p.name && p.name !== p.highway) score += 3;
+    if (p.kind === "road") score += 2;
+    if (p.kind === "path" || p.kind === "cycle") score += 4; // prefer keeping trails
+    if (p.kind === "park") score += 3;
+    if (p.kind === "service") score += 1;
+    if (
+      p.highway === "primary" ||
+      p.highway === "secondary" ||
+      p.highway === "tertiary"
+    ) {
+      score += 2;
+    }
+    return score;
+  };
+  const sortRank = (a: NearbyPathSegment, b: NearbyPathSegment) =>
+    rank(b) - rank(a);
+
+  const parks = paths.filter((p) => p.kind === "park").sort(sortRank);
+  const foots = paths
+    .filter((p) => p.kind === "path" || p.kind === "cycle")
+    .sort(sortRank);
+  const roads = paths
+    .filter((p) => p.kind === "road" || p.kind === "service")
+    .sort(sortRank);
+
+  // Reserve slots so parks + foot/cycle paths never get crowded out by roads
+  const parkN = Math.min(
+    parks.length,
+    Math.max(28, Math.floor(maxTotal * 0.24)),
+  );
+  const footN = Math.min(
+    foots.length,
+    Math.max(40, Math.floor(maxTotal * 0.3)),
+  );
+  const roadN = Math.max(36, maxTotal - parkN - footN);
+
+  return [
+    ...roads.slice(0, roadN),
+    ...foots.slice(0, footN),
+    ...parks.slice(0, parkN),
+  ].slice(0, maxTotal);
 }
 
 function roundCoord(value: number, decimals = NEARBY_COORD_DECIMALS): number {
@@ -1455,8 +1647,8 @@ function simplifyGeometry(
     return cleaned;
   }
 
-  // ~3–4 m tolerance at mid-latitudes for thinner payloads
-  let simplified = douglasPeucker(cleaned, 0.00003);
+  // ~1–1.5 m tolerance — tighter than before so bends stay accurate
+  let simplified = douglasPeucker(cleaned, 0.000012);
   if (simplified.length > maxPoints) {
     const step = Math.ceil(simplified.length / maxPoints);
     const reduced: Array<{ lat: number; lng: number }> = [];
@@ -1501,11 +1693,14 @@ function compactNearbyPayload(payload: NearbyPathsPreview): NearbyPathsPreview {
     radiusM: payload.radiusM,
     updatedAt: payload.updatedAt,
     pathCount: paths.length,
-    roadCount: paths.filter((p) => p.kind === "road" || p.kind === "service").length,
-    footCount: paths.filter((p) => p.kind === "path" || p.kind === "cycle").length,
+    roadCount: paths.filter((p) => p.kind === "road" || p.kind === "service")
+      .length,
+    footCount: paths.filter((p) => p.kind === "path" || p.kind === "cycle")
+      .length,
+    parkCount: paths.filter((p) => p.kind === "park").length,
     paths,
     ...(payload.stale ? { stale: true } : {}),
-    ...(payload.note ? { note: payload.note.slice(0, 96) } : {}),
+    ...(payload.note ? { note: payload.note.slice(0, 120) } : {}),
   };
 }
 
@@ -1514,90 +1709,7 @@ function buildFallbackNearbyPaths(
   lng: number,
   radiusM: number,
 ): NearbyPathsPreview {
-  // Dense synthetic block grid + paths when live OSM is unavailable
-  const metersPerDegLat = 111_320;
-  const metersPerDegLng = 111_320 * Math.cos((lat * Math.PI) / 180) || 1;
-  const toLat = (northM: number) => lat + northM / metersPerDegLat;
-  const toLng = (eastM: number) => lng + eastM / metersPerDegLng;
-  const arm = radiusM * 0.9;
-  const block = Math.max(70, radiusM / 6);
-  const paths: NearbyPathSegment[] = [];
-
-  // North-south streets
-  for (let i = -4; i <= 4; i++) {
-    const x = i * block;
-    if (Math.abs(x) > arm) continue;
-    const major = i === 0 || i === 2 || i === -2;
-    paths.push({
-      id: `fb-ns-${i}`,
-      name: major ? `Avenue ${Math.abs(i) + 1}` : `Street N${i}`,
-      highway: major ? "secondary" : "residential",
-      kind: major ? "road" : "service",
-      points: [
-        { lat: toLat(-arm), lng: toLng(x) },
-        { lat: toLat(arm), lng: toLng(x) },
-      ],
-    });
-  }
-
-  // East-west streets
-  for (let j = -4; j <= 4; j++) {
-    const y = j * block;
-    if (Math.abs(y) > arm) continue;
-    const major = j === 0 || j === 3 || j === -3;
-    paths.push({
-      id: `fb-ew-${j}`,
-      name: major ? `Boulevard ${Math.abs(j) + 1}` : `Lane E${j}`,
-      highway: major ? "primary" : "residential",
-      kind: "road",
-      points: [
-        { lat: toLat(y), lng: toLng(-arm) },
-        { lat: toLat(y), lng: toLng(arm) },
-      ],
-    });
-  }
-
-  // Foot paths / alleys
-  paths.push(
-    {
-      id: "fb-path-1",
-      name: "Greenway",
-      highway: "footway",
-      kind: "path",
-      points: [
-        { lat: toLat(-arm * 0.55), lng: toLng(-arm * 0.35) },
-        { lat: toLat(-arm * 0.1), lng: toLng(-arm * 0.05) },
-        { lat: toLat(arm * 0.35), lng: toLng(arm * 0.25) },
-        { lat: toLat(arm * 0.65), lng: toLng(arm * 0.55) },
-      ],
-    },
-    {
-      id: "fb-path-2",
-      name: "Alley",
-      highway: "footway",
-      kind: "path",
-      points: [
-        { lat: toLat(arm * 0.2), lng: toLng(-arm * 0.7) },
-        { lat: toLat(arm * 0.15), lng: toLng(-arm * 0.2) },
-        { lat: toLat(-arm * 0.25), lng: toLng(arm * 0.15) },
-        { lat: toLat(-arm * 0.45), lng: toLng(arm * 0.6) },
-      ],
-    },
-    {
-      id: "fb-cycle-1",
-      name: "Cycle loop",
-      highway: "cycleway",
-      kind: "cycle",
-      points: [
-        { lat: toLat(arm * 0.55), lng: toLng(-arm * 0.55) },
-        { lat: toLat(arm * 0.55), lng: toLng(arm * 0.55) },
-        { lat: toLat(-arm * 0.55), lng: toLng(arm * 0.55) },
-        { lat: toLat(-arm * 0.55), lng: toLng(-arm * 0.55) },
-        { lat: toLat(arm * 0.55), lng: toLng(-arm * 0.55) },
-      ],
-    },
-  );
-
+  // Never invent fake streets — empty accurate frame only.
   return {
     source: NEARBY_PATHS_SOURCE,
     sourceUrl: NEARBY_PATHS_SOURCE_URL,
@@ -1605,12 +1717,12 @@ function buildFallbackNearbyPaths(
     lng,
     radiusM,
     updatedAt: new Date().toISOString(),
-    pathCount: paths.length,
-    roadCount: paths.filter((p) => p.kind === "road" || p.kind === "service").length,
-    footCount: paths.filter((p) => p.kind === "path" || p.kind === "cycle").length,
-    paths,
+    pathCount: 0,
+    roadCount: 0,
+    footCount: 0,
+    paths: [],
     stale: true,
-    note: "Sketch mode — live OSM unavailable from this network",
+    note: `Live street data unavailable at ${lat.toFixed(4)}, ${lng.toFixed(4)} (${radiusM}m). OSM/Overpass failed or blocked — retry, check network, or allow location.`,
   };
 }
 
@@ -1667,17 +1779,48 @@ function haversineMeters(
   return 2 * r * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
+/**
+ * Keep continuous road geometry that intersects the search circle.
+ * Old filter dropped exterior vertices and *broke* roads that crossed the ring
+ * (sketchy mid-block cuts). Instead: keep the span from first near point to last,
+ * plus one exterior vertex on each end for exit direction.
+ */
 function clipPathToRadius(
   points: Array<{ lat: number; lng: number }>,
   lat: number,
   lng: number,
   radiusM: number,
+  kind?: NearbyPathKind,
 ): Array<{ lat: number; lng: number }> {
-  // Keep vertices inside radius; drop tiny stubs
-  const kept = points.filter(
-    (p) => haversineMeters(lat, lng, p.lat, p.lng) <= radiusM * 1.08,
-  );
-  return kept.length >= 2 ? kept : [];
+  if (points.length < 2) return [];
+  // Slightly larger than UI ring so edges don't vanish at the dashed circle
+  const keepR = radiusM * 1.12;
+
+  // Parks are closed polygons — keep the full ring if any vertex is in range
+  // (continuous-span clipping shreds green areas).
+  if (kind === "park") {
+    if (points.length < 3) return [];
+    const hits = points.some(
+      (p) => haversineMeters(lat, lng, p.lat, p.lng) <= keepR,
+    );
+    if (!hits) return [];
+    return points;
+  }
+
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    if (haversineMeters(lat, lng, p.lat, p.lng) <= keepR) {
+      if (first < 0) first = i;
+      last = i;
+    }
+  }
+  if (first < 0) return [];
+  const start = Math.max(0, first - 1);
+  const end = Math.min(points.length - 1, last + 1);
+  const slice = points.slice(start, end + 1);
+  return slice.length >= 2 ? slice : [];
 }
 
 function buildPreviewFromPaths(
@@ -1688,6 +1831,7 @@ function buildPreviewFromPaths(
   note: string,
   stale = false,
 ): NearbyPathsPreview {
+  const balanced = selectBalancedPaths(paths, NEARBY_MAX_WAYS);
   return {
     source: NEARBY_PATHS_SOURCE,
     sourceUrl: NEARBY_PATHS_SOURCE_URL,
@@ -1695,12 +1839,13 @@ function buildPreviewFromPaths(
     lng,
     radiusM,
     updatedAt: new Date().toISOString(),
-    pathCount: paths.length,
-    roadCount: paths.filter((p) => p.kind === "road" || p.kind === "service")
+    pathCount: balanced.length,
+    roadCount: balanced.filter((p) => p.kind === "road" || p.kind === "service")
       .length,
-    footCount: paths.filter((p) => p.kind === "path" || p.kind === "cycle")
+    footCount: balanced.filter((p) => p.kind === "path" || p.kind === "cycle")
       .length,
-    paths,
+    parkCount: balanced.filter((p) => p.kind === "park").length,
+    paths: balanced,
     stale,
     note,
   };
@@ -1713,7 +1858,8 @@ function parseOsmMapXml(
   radiusM: number,
 ): NearbyPathSegment[] {
   const nodes = new Map<string, { lat: number; lng: number }>();
-  const nodeTagRe = /<node\b([^>]*?)\/>/g;
+  // Self-closing and open node tags (OSM uses both forms)
+  const nodeTagRe = /<node\b([^>/]*)(?:\/>|>)/g;
   let nodeMatch: RegExpExecArray | null;
   while ((nodeMatch = nodeTagRe.exec(xml)) !== null) {
     const attrs = parseXmlAttrs(nodeMatch[1]);
@@ -1725,10 +1871,12 @@ function parseOsmMapXml(
   }
 
   const paths: NearbyPathSegment[] = [];
+  // Collect more than max so balanced selection can keep paths + parks
+  const collectCap = NEARBY_MAX_WAYS * 3;
   const wayRe = /<way\b([^>]*)>([\s\S]*?)<\/way>/g;
   let wayMatch: RegExpExecArray | null;
   while ((wayMatch = wayRe.exec(xml)) !== null) {
-    if (paths.length >= NEARBY_MAX_WAYS) break;
+    if (paths.length >= collectCap) break;
 
     const wayAttrs = parseXmlAttrs(wayMatch[1]);
     const body = wayMatch[2];
@@ -1740,8 +1888,8 @@ function parseOsmMapXml(
       if (t.k && t.v) tags[t.k] = t.v;
     }
 
-    const highway = tags.highway;
-    if (!highway || !HIGHWAY_ALLOW.test(highway)) continue;
+    const classified = classifyOsmTags(tags);
+    if (!classified) continue;
 
     const pts: Array<{ lat: number; lng: number }> = [];
     const ndRe = /<nd\b([^>]*?)\/>/g;
@@ -1753,40 +1901,43 @@ function parseOsmMapXml(
       if (node) pts.push(node);
     }
 
-    const clipped = clipPathToRadius(pts, lat, lng, radiusM);
+    // Parks need closed rings; paths/roads need ≥2 points
+    if (classified.kind === "park") {
+      if (pts.length < 3) continue;
+      // Close ring if needed
+      const first = pts[0];
+      const last = pts[pts.length - 1];
+      if (first && last && (first.lat !== last.lat || first.lng !== last.lng)) {
+        pts.push({ ...first });
+      }
+    }
+
+    const clipped = clipPathToRadius(
+      pts,
+      lat,
+      lng,
+      radiusM,
+      classified.kind,
+    );
     const simplified = simplifyGeometry(
       clipped.map((p) => ({ lat: p.lat, lon: p.lng })),
-      NEARBY_MAX_POINTS_PER_WAY,
+      classified.kind === "park"
+        ? Math.min(NEARBY_MAX_POINTS_PER_WAY, 28)
+        : NEARBY_MAX_POINTS_PER_WAY,
     );
-    if (simplified.length < 2) continue;
+    if (simplified.length < (classified.kind === "park" ? 3 : 2)) continue;
 
-    const name = (tags.name || tags.ref || highway).slice(0, 80);
     paths.push({
       id: `w${wayAttrs.id ?? paths.length}`,
-      name,
-      highway: highway.slice(0, 32),
-      kind: classifyHighway(highway),
+      name: classified.name,
+      highway: classified.tag.slice(0, 40),
+      kind: classified.kind,
       points: simplified,
     });
   }
 
-  // Prefer named / major roads first for clarity in dense areas
-  const rank = (p: NearbyPathSegment) => {
-    let score = 0;
-    if (p.name && p.name !== p.highway) score += 3;
-    if (p.kind === "road") score += 2;
-    if (p.kind === "path" || p.kind === "cycle") score += 1;
-    if (
-      p.highway === "primary" ||
-      p.highway === "secondary" ||
-      p.highway === "tertiary"
-    ) {
-      score += 2;
-    }
-    return score;
-  };
-  paths.sort((a, b) => rank(b) - rank(a));
-  return paths.slice(0, NEARBY_MAX_WAYS);
+  // Defer balanced trim to merge step so multi-tile + Overpass keep parks/paths
+  return paths;
 }
 
 function parseOverpassElements(
@@ -1803,54 +1954,80 @@ function parseOverpassElements(
   radiusM: number,
 ): NearbyPathSegment[] {
   const paths: NearbyPathSegment[] = [];
+  const collectCap = NEARBY_MAX_WAYS * 3;
   for (const element of payload.elements ?? []) {
     if (element.type !== "way" || !element.geometry || !element.id) {
       continue;
     }
-    const highway = element.tags?.highway ?? "";
-    if (!HIGHWAY_ALLOW.test(highway)) continue;
+    if (paths.length >= collectCap) break;
+
+    const classified = classifyOsmTags(element.tags || {});
+    if (!classified) continue;
 
     const raw = element.geometry
       .map((p) => ({ lat: Number(p.lat), lng: Number(p.lon) }))
       .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
-    const clipped = clipPathToRadius(raw, lat, lng, radiusM);
+    if (classified.kind === "park" && raw.length >= 3) {
+      const first = raw[0];
+      const last = raw[raw.length - 1];
+      if (first && last && (first.lat !== last.lat || first.lng !== last.lng)) {
+        raw.push({ ...first });
+      }
+    }
+    const clipped = clipPathToRadius(
+      raw,
+      lat,
+      lng,
+      radiusM,
+      classified.kind,
+    );
     const points = simplifyGeometry(
       clipped.map((p) => ({ lat: p.lat, lon: p.lng })),
-      NEARBY_MAX_POINTS_PER_WAY,
+      classified.kind === "park"
+        ? Math.min(NEARBY_MAX_POINTS_PER_WAY, 28)
+        : NEARBY_MAX_POINTS_PER_WAY,
     );
-    if (points.length < 2) continue;
+    if (points.length < (classified.kind === "park" ? 3 : 2)) continue;
 
-    const name = (element.tags?.name || element.tags?.ref || highway).slice(0, 80);
     paths.push({
       id: `w${element.id}`,
-      name,
-      highway: highway.slice(0, 32),
-      kind: classifyHighway(highway),
+      name: classified.name,
+      highway: classified.tag.slice(0, 40),
+      kind: classified.kind,
       points,
     });
-
-    if (paths.length >= NEARBY_MAX_WAYS) break;
   }
+  // Defer balanced trim so OSM+Overpass merge can preserve all feature types
   return paths;
 }
 
-async function fetchNearbyPathsFromOsmMapApi(
-  lat: number,
-  lng: number,
-  radiusM: number,
-): Promise<NearbyPathsPreview | null> {
-  // Official OSM map API — real way geometries for a tight bbox
+/**
+ * OSM /api/0.6/map rejects dense bboxes with HTTP 400
+ * ("too many nodes", limit 50k). Tile larger radii with safe tiles.
+ */
+const OSM_MAP_SAFE_RADIUS_M = 500;
+/** Spacing between tile centers when covering large rings (meters). */
+const OSM_TILE_STEP_M = 650;
+
+/** Fetch one OSM bbox centered on (lat,lng) with bboxRadiusM, clip to clip*. */
+async function fetchOsmTilePaths(
+  tileLat: number,
+  tileLng: number,
+  bboxRadiusM: number,
+  clipLat: number,
+  clipLng: number,
+  clipRadiusM: number,
+): Promise<NearbyPathSegment[]> {
   const metersPerDegLat = 111_320;
-  const metersPerDegLng = 111_320 * Math.cos((lat * Math.PI) / 180) || 1;
-  // Tight bbox — dense cities otherwise return multi‑MB payloads
-  const fetchRadius = Math.min(radiusM, OSM_FETCH_RADIUS_CAP_M);
+  const metersPerDegLng =
+    111_320 * Math.cos((tileLat * Math.PI) / 180) || 1;
+  const fetchRadius = Math.min(
+    Math.max(bboxRadiusM, NEARBY_MIN_RADIUS_M),
+    OSM_MAP_SAFE_RADIUS_M,
+  );
   const dLat = fetchRadius / metersPerDegLat;
   const dLng = fetchRadius / metersPerDegLng;
-  const left = lng - dLng;
-  const right = lng + dLng;
-  const bottom = lat - dLat;
-  const top = lat + dLat;
-  const bbox = `${left.toFixed(6)},${bottom.toFixed(6)},${right.toFixed(6)},${top.toFixed(6)}`;
+  const bbox = `${(tileLng - dLng).toFixed(6)},${(tileLat - dLat).toFixed(6)},${(tileLng + dLng).toFixed(6)},${(tileLat + dLat).toFixed(6)}`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), OSM_MAP_ATTEMPT_MS);
@@ -1859,31 +2036,86 @@ async function fetchNearbyPathsFromOsmMapApi(
       headers: {
         accept: "application/xml, text/xml, */*",
         "user-agent":
-          "Mozilla/5.0 (compatible; GlobeNearby/1.1; +https://github.com/m-emilio/globe)",
+          "Mozilla/5.0 (compatible; GlobeNearby/1.3; +https://github.com/m-emilio/globe)",
       },
       signal: controller.signal,
     });
     clearTimeout(timer);
-    if (!response.ok) return null;
+    if (!response.ok) return [];
 
     const xml = await response.text();
-    if (!xml.includes("<osm") || xml.length < 200) return null;
+    if (!xml.includes("<osm") || xml.length < 200) return [];
+    if (xml.length > OSM_MAP_MAX_XML_CHARS) return [];
 
-    const paths = parseOsmMapXml(xml, lat, lng, radiusM);
-    if (paths.length < 3) return null;
-
-    return buildPreviewFromPaths(
-      lat,
-      lng,
-      radiusM,
-      paths,
-      "Live OpenStreetMap streets & paths",
-      false,
-    );
+    // Parse/clip against the *search* center so the full ring is populated
+    return parseOsmMapXml(xml, clipLat, clipLng, clipRadiusM);
   } catch {
     clearTimeout(timer);
-    return null;
+    return [];
   }
+}
+
+function osmTileCenters(
+  lat: number,
+  lng: number,
+  radiusM: number,
+): Array<{ lat: number; lng: number }> {
+  const metersPerDegLat = 111_320;
+  const metersPerDegLng = 111_320 * Math.cos((lat * Math.PI) / 180) || 1;
+  const centers: Array<{ lat: number; lng: number }> = [{ lat, lng }];
+  if (radiusM <= OSM_MAP_SAFE_RADIUS_M) return centers;
+
+  const step = OSM_TILE_STEP_M;
+  for (let east = -radiusM; east <= radiusM + 1; east += step) {
+    for (let north = -radiusM; north <= radiusM + 1; north += step) {
+      if (east * east + north * north > radiusM * radiusM * 1.05) continue;
+      if (Math.abs(east) < 80 && Math.abs(north) < 80) continue;
+      centers.push({
+        lat: lat + north / metersPerDegLat,
+        lng: lng + east / metersPerDegLng,
+      });
+    }
+  }
+  // Cap concurrent tiles (9 covers 1500m well with 650m step)
+  return centers.slice(0, 9);
+}
+
+async function fetchNearbyPathsFromOsmMapApi(
+  lat: number,
+  lng: number,
+  radiusM: number,
+): Promise<NearbyPathsPreview | null> {
+  const tileCenters = osmTileCenters(lat, lng, radiusM);
+  const byId = new Map<string, NearbyPathSegment>();
+
+  // All tiles in parallel (max 9) — faster than sequential batches
+  const results = await Promise.all(
+    tileCenters.map((c) =>
+      fetchOsmTilePaths(
+        c.lat,
+        c.lng,
+        OSM_MAP_SAFE_RADIUS_M,
+        lat,
+        lng,
+        radiusM,
+      ),
+    ),
+  );
+  for (const tilePaths of results) {
+    for (const p of tilePaths) {
+      if (!byId.has(p.id)) byId.set(p.id, p);
+    }
+  }
+
+  const paths = [...byId.values()];
+  if (paths.length < 1) return null;
+
+  const tileNote =
+    tileCenters.length > 1
+      ? `Live OSM map (${tileCenters.length} tiles · ${radiusM}m · roads/paths/parks)`
+      : "Live OpenStreetMap streets, paths & parks";
+
+  return buildPreviewFromPaths(lat, lng, radiusM, paths, tileNote, false);
 }
 
 async function fetchNearbyPathsFromOverpass(
@@ -1891,61 +2123,121 @@ async function fetchNearbyPathsFromOverpass(
   lng: number,
   radiusM: number,
 ): Promise<NearbyPathsPreview | null> {
+  // Overpass is preferred for Workers: compact JSON + out geom (not multi‑MB OSM XML).
+  const aroundM = Math.min(
+    Math.max(radiusM, NEARBY_MIN_RADIUS_M),
+    NEARBY_MAX_RADIUS_M,
+  );
+  // Highways + parks/greenways in one query
   const query = `
-[out:json][timeout:15];
+[out:json][timeout:20];
 (
-  way["highway"~"^(primary|secondary|tertiary|residential|unclassified|living_street|service|footway|path|cycleway|pedestrian)$"](around:${Math.min(radiusM, 700)},${lat},${lng});
+  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|footway|path|cycleway|pedestrian|track|steps|bridleway)$"](around:${aroundM},${lat},${lng});
+  way["leisure"~"^(park|garden|playground|pitch|nature_reserve|recreation_ground|common)$"](around:${aroundM},${lat},${lng});
+  way["landuse"~"^(grass|recreation_ground|meadow|forest|village_green)$"](around:${aroundM},${lat},${lng});
 );
 out geom;
 `.trim();
 
   const body = `data=${encodeURIComponent(query)}`;
 
-  for (const endpoint of OVERPASS_ENDPOINTS) {
+  // One mirror only — cycling all three cost 15–40s when they 504
+  const endpoint = OVERPASS_ENDPOINTS[0];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OVERPASS_ATTEMPT_MS);
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+        accept: "application/json",
+        "user-agent":
+          "Mozilla/5.0 (compatible; GlobeNearby/1.2; +https://github.com/m-emilio/globe)",
+      },
+      body,
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (!response.ok) return null;
+
+    const text = await response.text();
+    if (!text || text.length < 20) return null;
+    let payload: {
+      elements?: Array<{
+        type?: string;
+        id?: number;
+        tags?: Record<string, string>;
+        geometry?: Array<{ lat?: number; lon?: number }>;
+      }>;
+      remark?: string;
+    };
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), OVERPASS_ATTEMPT_MS);
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
-          accept: "*/*",
-          "user-agent":
-            "Mozilla/5.0 (compatible; GlobeNearby/1.1; +https://github.com/m-emilio/globe)",
-        },
-        body,
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-
-      if (!response.ok) continue;
-
-      const payload = (await response.json()) as {
-        elements?: Array<{
-          type?: string;
-          id?: number;
-          tags?: Record<string, string>;
-          geometry?: Array<{ lat?: number; lon?: number }>;
-        }>;
-      };
-
-      const paths = parseOverpassElements(payload, lat, lng, radiusM);
-      if (paths.length < 3) continue;
-
-      return buildPreviewFromPaths(
-        lat,
-        lng,
-        radiusM,
-        paths,
-        "Live Overpass streets & paths",
-        false,
-      );
+      payload = JSON.parse(text) as typeof payload;
     } catch {
-      // try next mirror
+      return null;
+    }
+
+    const paths = parseOverpassElements(payload, lat, lng, radiusM);
+    if (paths.length < 1) return null;
+
+    return buildPreviewFromPaths(
+      lat,
+      lng,
+      radiusM,
+      paths,
+      "Live Overpass streets, paths & parks",
+      false,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Full-radius coverage + speed:
+ * - OSM tiles and Overpass run in parallel (not sequential fallback)
+ * - Merge by way id so parks/paths from either source are kept
+ * - Single balanced trim at the end
+ */
+async function fetchLiveNearbyPaths(
+  lat: number,
+  lng: number,
+  radiusM: number,
+): Promise<NearbyPathsPreview | null> {
+  const [osmResult, overpassResult] = await Promise.all([
+    fetchNearbyPathsFromOsmMapApi(lat, lng, radiusM).catch(() => null),
+    fetchNearbyPathsFromOverpass(lat, lng, radiusM).catch(() => null),
+  ]);
+
+  const byId = new Map<string, NearbyPathSegment>();
+  for (const preview of [osmResult, overpassResult]) {
+    if (!preview?.paths?.length) continue;
+    for (const p of preview.paths) {
+      if (!byId.has(p.id)) byId.set(p.id, p);
     }
   }
 
-  return null;
+  if (byId.size < 1) return null;
+
+  const sources: string[] = [];
+  if (osmResult?.paths?.length) sources.push("OSM");
+  if (overpassResult?.paths?.length) sources.push("Overpass");
+  const note =
+    sources.length > 1
+      ? `Live ${sources.join("+")} · ${radiusM}m · roads/paths/parks`
+      : osmResult?.note ||
+        overpassResult?.note ||
+        "Live streets, paths & parks";
+
+  return buildPreviewFromPaths(
+    lat,
+    lng,
+    radiusM,
+    [...byId.values()],
+    note,
+    false,
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -2138,7 +2430,12 @@ async function fetchTransitJson(
   }
 }
 
-async function getTransitNearbyPreview(url: URL, env: Env) {
+async function getTransitNearbyPreview(request: Request, url: URL, env: Env) {
+  const gate = await requireTransitAccess(request, env, applySecurityHeaders);
+  if (gate) {
+    return gate;
+  }
+
   const apiKey = env.TRANSIT_PUBLICAPI_V4?.trim();
   if (!apiKey) {
     return jsonResponse(
@@ -2256,7 +2553,10 @@ async function getTransitNearbyPreview(url: URL, env: Env) {
     return jsonResponse(
       {
         error: "transit_upstream_error",
-        message,
+        message: "Transit upstream unavailable. Try again shortly.",
+        code: message.startsWith("transit_upstream_")
+          ? message
+          : "transit_upstream_error",
       },
       {
         status: 502,
@@ -2266,7 +2566,20 @@ async function getTransitNearbyPreview(url: URL, env: Env) {
   }
 }
 
-async function getNearbyPathsPreview(url: URL) {
+async function getNearbyPathsPreview(request: Request, url: URL, env: Env) {
+  // Same gate as Transit when payment enforced; always requires login
+  const gate = await requireTransitAccess(
+    request,
+    env,
+    applySecurityHeaders,
+    {
+      rateKey: "nearby",
+      rateLimit: 20,
+      featureName: "Nearby maps",
+    },
+  );
+  if (gate) return gate;
+
   const query = parseNearbyQuery(url);
   if (!query) {
     return jsonResponse(
@@ -2290,38 +2603,32 @@ async function getNearbyPathsPreview(url: URL) {
     });
   }
 
+  // Parallel Overpass (primary for Workers) + OSM map API; pick denser result
   let payload: NearbyPathsPreview | null = null;
-
-  // 1) Official OSM map API (most accurate when reachable)
   try {
-    payload = await fetchNearbyPathsFromOsmMapApi(lat, lng, radiusM);
+    payload = await fetchLiveNearbyPaths(lat, lng, radiusM);
   } catch {
     payload = null;
   }
 
-  // 2) Overpass mirrors (quick attempt)
-  if (!payload) {
-    try {
-      payload = await Promise.race([
-        fetchNearbyPathsFromOverpass(lat, lng, radiusM),
-        new Promise<null>((resolve) => {
-          setTimeout(() => resolve(null), OVERPASS_ATTEMPT_MS + 400);
-        }),
-      ]);
-    } catch {
-      payload = null;
-    }
-  }
-
-  // 3) Local sketch only if live data unavailable
+  // Empty accurate frame only if live data unavailable (no invented streets)
   if (!payload || payload.paths.length === 0) {
     payload = buildFallbackNearbyPaths(lat, lng, radiusM);
   }
 
-  NEARBY_CACHE.set(cacheKey, {
-    expiresAt: Date.now() + NEARBY_CACHE_SECONDS * 1000,
-    payload,
-  });
+  // Never cache empty/stale failures for long — that trapped users after one outage
+  if (!payload.stale && payload.paths.length > 0) {
+    NEARBY_CACHE.set(cacheKey, {
+      expiresAt: Date.now() + NEARBY_CACHE_SECONDS * 1000,
+      payload,
+    });
+  } else {
+    // Brief negative cache so we don't hammer upstream while still allowing quick retry
+    NEARBY_CACHE.set(cacheKey, {
+      expiresAt: Date.now() + 15_000,
+      payload,
+    });
+  }
 
   if (NEARBY_CACHE.size > 64) {
     const first = NEARBY_CACHE.keys().next().value;
@@ -2333,9 +2640,8 @@ async function getNearbyPathsPreview(url: URL) {
   return jsonResponse(compact, {
     headers: {
       "cache-control": compact.stale
-        ? "public, max-age=60"
+        ? "no-store"
         : `public, max-age=${NEARBY_CACHE_SECONDS}`,
-      // Encourage intermediate/browser reuse on limited Wi‑Fi
       vary: "accept-encoding",
     },
   });
@@ -2384,17 +2690,24 @@ function withoutResponseBodyForHead(request: Request, response: Response) {
   });
 }
 
-function applySecurityHeaders(headers: Headers) {
+function applySecurityHeaders(headers: Headers, _request?: Request) {
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
     if (!headers.has(name)) {
       headers.set(name, value);
     }
   }
+  // HSTS: browsers ignore over plain HTTP; safe to always emit for HTTPS prod
+  if (!headers.has("strict-transport-security")) {
+    headers.set(
+      "strict-transport-security",
+      "max-age=31536000; includeSubDomains; preload",
+    );
+  }
 }
 
-function withSecurityHeaders(response: Response) {
+function withSecurityHeaders(response: Response, request?: Request) {
   const headers = new Headers(response.headers);
-  applySecurityHeaders(headers);
+  applySecurityHeaders(headers, request);
 
   return new Response(response.body, {
     status: response.status,
@@ -2643,7 +2956,7 @@ async function getUnGlobalPreview() {
   );
 }
 
-export class Globe extends Server {
+export class Globe extends Server<Env> {
   private connectionAttempts = new Map<string, ConnectionAttemptBucket>();
 
   private getConnectionLimitReason(clientKey: string) {
@@ -2693,11 +3006,25 @@ export class Globe extends Server {
     }
   }
 
-  onConnect(conn: Connection<ConnectionState>, ctx: ConnectionContext) {
-    // Whenever a fresh connection is made, we'll
-    // send the entire state to the new connection
+  private sendJson(conn: Connection, message: OutgoingMessage) {
+    try {
+      conn.send(JSON.stringify(message));
+    } catch {
+      // connection may be closing
+    }
+  }
 
-    // First, let's extract the position from the Cloudflare headers
+  /** Deliver feed-* only to connections that proved transitPaid via session cookie */
+  private broadcastFeed(message: OutgoingMessage, excludeId?: string) {
+    for (const connection of this.getConnections<ConnectionState>()) {
+      if (excludeId && connection.id === excludeId) continue;
+      const state = connection.state as ConnectionState | undefined;
+      if (!state?.feedPaid) continue;
+      this.sendJson(connection, message);
+    }
+  }
+
+  async onConnect(conn: Connection<ConnectionState>, ctx: ConnectionContext) {
     const latitude = ctx.request.cf?.latitude as string | undefined;
     const longitude = ctx.request.cf?.longitude as string | undefined;
     const lat = parseBoundedCoordinate(latitude, -90, 90);
@@ -2707,6 +3034,8 @@ export class Globe extends Server {
       this.closeConnection(conn, CLOSE_POLICY_VIOLATION, "invalid location");
       return;
     }
+
+    // Full IP only for server rate limits — never on the wire
     const ip = getClientIp(ctx.request);
     const clientKey = ip ?? "unknown";
     const rateLimitReason = this.getConnectionLimitReason(clientKey);
@@ -2725,7 +3054,7 @@ export class Globe extends Server {
 
     const matchingIpConnections = connections.filter((connection) => {
       const state = connection.state as ConnectionState | undefined;
-      return state?.position.ip === ip;
+      return state?.clientKey === clientKey && clientKey !== "unknown";
     });
 
     if (ip && matchingIpConnections.length >= MAX_CONNECTIONS_PER_IP) {
@@ -2737,50 +3066,74 @@ export class Globe extends Server {
     const city = limitText(ctx.request.cf?.city as string | undefined, 80);
     const org = limitText(ctx.request.cf?.org as string | undefined, 120);
 
-    const position = {
+    // Public marker: lat/lng/id + coarse country only
+    const position: Position = publicMarker({
       lat,
       lng,
       id: conn.id,
-      ip,
       country,
-      city,
-      org,
-    };
-    // And save this on the connection's state
-    conn.setState({
-      position,
     });
 
-    // Now, let's send the entire state to the new connection
+    // Paid feed meta — never includes full IP
+    const feedMeta: FeedVisitorMeta = {
+      id: conn.id,
+      city,
+      country,
+      org,
+      ipMasked: maskIpForFeed(ip),
+    };
+
+    // Cookie session on same-origin WS determines paid feed access
+    let feedPaid = false;
+    try {
+      const session = await getSessionUser(
+        ctx.request,
+        this.env as AuthEnv,
+      );
+      feedPaid = Boolean(session?.user.transitPaid);
+    } catch {
+      feedPaid = false;
+    }
+
+    const joinedAt = Date.now();
+    conn.setState({
+      position,
+      clientKey,
+      feedMeta,
+      joinedAt,
+      feedPaid,
+    });
+
+    // Tell this client whether it will receive feed events
+    this.sendJson(conn, { type: "feed-access", paid: feedPaid });
+
+    // Replay public markers (+ paid feed meta if entitled)
     let replayedMarkers = 0;
     for (const connection of connections) {
       try {
         const state = connection.state as ConnectionState | undefined;
+        if (!state?.position) continue;
+        if (replayedMarkers >= MAX_REPLAY_MARKERS) break;
 
-        if (!state?.position) {
-          continue;
+        this.sendJson(conn, {
+          type: "add-marker",
+          position: publicMarker(state.position),
+        });
+        if (feedPaid && state.feedMeta) {
+          this.sendJson(conn, { type: "feed-join", meta: state.feedMeta });
         }
-
-        if (replayedMarkers >= MAX_REPLAY_MARKERS) {
-          break;
-        }
-
-        conn.send(
-          JSON.stringify({
-              type: "add-marker",
-              position: state.position,
-        } satisfies OutgoingMessage),
-      );
         replayedMarkers += 1;
 
-        // And let's send the new connection's position to all other connections
+        // Notify other clients of the newcomer
         if (connection.id !== conn.id) {
-          connection.send(
-            JSON.stringify({
-              type: "add-marker",
-              position,
-            } satisfies OutgoingMessage),
-          );
+          this.sendJson(connection, {
+            type: "add-marker",
+            position,
+          });
+          const peer = connection.state as ConnectionState | undefined;
+          if (peer?.feedPaid) {
+            this.sendJson(connection, { type: "feed-join", meta: feedMeta });
+          }
         }
       } catch {
         this.onCloseOrError(connection);
@@ -2788,8 +3141,6 @@ export class Globe extends Server {
     }
   }
 
-  // Whenever a connection closes (or errors), we'll broadcast a message to all
-  // other connections to remove the marker.
   onCloseOrError(connection: Connection) {
     const state = connection.state as ConnectionState | undefined;
 
@@ -2797,12 +3148,25 @@ export class Globe extends Server {
       return;
     }
 
+    const sessionMs = Math.max(0, Date.now() - (state.joinedAt || Date.now()));
+
     this.broadcast(
       JSON.stringify({
         type: "remove-marker",
         id: connection.id,
       } satisfies OutgoingMessage),
       [connection.id],
+    );
+
+    // Paid feed leave (no full IP)
+    this.broadcastFeed(
+      {
+        type: "feed-leave",
+        id: connection.id,
+        sessionMs,
+        meta: state.feedMeta,
+      },
+      connection.id,
     );
   }
 
@@ -2823,6 +3187,13 @@ export default {
       if (!isReadApiMethod(request)) {
         return methodNotAllowedResponse();
       }
+      const limited = rateLimitOrNull(
+        `preview:comtrade:${clientIpFromRequest(request)}`,
+        30,
+        60_000,
+        applySecurityHeaders,
+      );
+      if (limited) return limited;
 
       return withoutResponseBodyForHead(request, await getComtradePreview());
     }
@@ -2831,6 +3202,13 @@ export default {
       if (!isReadApiMethod(request)) {
         return methodNotAllowedResponse();
       }
+      const limited = rateLimitOrNull(
+        `preview:pulse:${clientIpFromRequest(request)}`,
+        40,
+        60_000,
+        applySecurityHeaders,
+      );
+      if (limited) return limited;
 
       return withoutResponseBodyForHead(request, getTradePulsePreview());
     }
@@ -2839,6 +3217,13 @@ export default {
       if (!isReadApiMethod(request)) {
         return methodNotAllowedResponse();
       }
+      const limited = rateLimitOrNull(
+        `preview:un:${clientIpFromRequest(request)}`,
+        30,
+        60_000,
+        applySecurityHeaders,
+      );
+      if (limited) return limited;
 
       return withoutResponseBodyForHead(request, await getUnGlobalPreview());
     }
@@ -2848,7 +3233,10 @@ export default {
         return methodNotAllowedResponse();
       }
 
-      return withoutResponseBodyForHead(request, await getNearbyPathsPreview(url));
+      return withoutResponseBodyForHead(
+        request,
+        await getNearbyPathsPreview(request, url, env),
+      );
     }
 
     if (url.pathname === "/api/transit-nearby") {
@@ -2858,7 +3246,164 @@ export default {
 
       return withoutResponseBodyForHead(
         request,
-        await getTransitNearbyPreview(url, env),
+        await getTransitNearbyPreview(request, url, env),
+      );
+    }
+
+    // --- Auth (OpenPGP challenge–response + HttpOnly session cookie) ---
+    if (url.pathname === "/api/auth/register") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return registerUser(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/challenge") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return createAuthChallenge(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/login") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return loginUser(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/adopt-token") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adoptSessionToken(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/logout") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return logoutUser(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/me") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await getMe(request, env, applySecurityHeaders),
+      );
+    }
+
+    // --- Admin portal (allowlist + secret + PGP elevation for mutations) ---
+    if (url.pathname === "/api/admin/status") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminStatus(request, env, applySecurityHeaders),
+      );
+    }
+    if (url.pathname === "/api/admin/elevate-challenge") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adminElevateChallenge(request, env, applySecurityHeaders);
+    }
+    if (url.pathname === "/api/admin/elevate") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adminElevate(request, env, applySecurityHeaders);
+    }
+    if (url.pathname === "/api/admin/lookup") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminLookupUser(request, env, applySecurityHeaders),
+      );
+    }
+    if (url.pathname === "/api/admin/grant-transit") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adminGrantTransit(request, env, applySecurityHeaders);
+    }
+    if (url.pathname === "/api/admin/revoke-transit") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adminRevokeTransit(request, env, applySecurityHeaders);
+    }
+    if (url.pathname === "/api/admin/claim-session") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adminClaimSession(request, env, applySecurityHeaders);
+    }
+    if (url.pathname === "/api/admin/audit") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminListAudit(request, env, applySecurityHeaders),
+      );
+    }
+
+    // --- Stripe Payment Link + webhook entitlement ---
+    if (url.pathname === "/api/billing/ensure-catalog") {
+      if (request.method !== "POST" && request.method !== "GET") {
+        return methodNotAllowedResponse();
+      }
+      return ensureBillingCatalog(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/billing/payment-link") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await getPaymentLink(request, env, applySecurityHeaders),
+      );
+    }
+
+    if (url.pathname === "/api/billing/access") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await getAccessStatus(request, env, applySecurityHeaders),
+      );
+    }
+
+    if (url.pathname === "/api/billing/claim-session") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return claimCheckoutSession(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/billing/webhook") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return handleStripeWebhook(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/billing/payment-status") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await getPaymentStatus(request, env, applySecurityHeaders),
       );
     }
 
@@ -2871,6 +3416,8 @@ export default {
         },
       });
 
-    return isWebSocketRequest(request) ? response : withSecurityHeaders(response);
+    return isWebSocketRequest(request)
+      ? response
+      : withSecurityHeaders(response, request);
   },
 } satisfies ExportedHandler<Env>;

@@ -17,10 +17,12 @@
   },
   "dependencies": {
     "cobe": "^2.0.1",
+    "openpgp": "^6.3.1",
     "partyserver": "0.0.66",
     "partysocket": "^1.1.3",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "stripe": "^22.3.2"
   },
   "devDependencies": {
     "@types/react": "^18.0.0",
@@ -30,10 +32,15 @@
     "wrangler": "4.107.0"
   },
   "scripts": {
-    "build:client": "esbuild ./src/client/index.tsx --bundle --outdir=public/dist --splitting --sourcemap --format=esm --minify --legal-comments=none --tree-shaking=true",
+    "build:client": "esbuild ./src/client/index.tsx --bundle --outdir=public/dist --format=esm --minify --legal-comments=none --tree-shaking=true && node scripts/apply-sri.mjs",
+    "build:client:dev": "esbuild ./src/client/index.tsx --bundle --outdir=public/dist --sourcemap --format=esm --minify --legal-comments=none --tree-shaking=true && node scripts/apply-sri.mjs",
+    "audit:deps": "npm audit --audit-level=moderate",
+    "security:check": "npm run audit:deps && npm run check",
     "cf-typegen": "wrangler types ./src/server/worker-configuration.d.ts",
     "check": "tsc --project src/client && tsc --project src/server && wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "setup:stripe": "node scripts/setup-stripe-billing.mjs",
+    "setup:stripe:prod": "node scripts/setup-stripe-billing.mjs --webhook"
   }
 }

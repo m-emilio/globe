@@ -1,0 +1,91 @@
+# Deploy the security-hardening testing branch to a NON-PRODUCTION Worker.
+# Does NOT deploy to main or overwrite the production `globe` Worker name.
+name: Deploy security test worker
+
+on:
+  push:
+    branches:
+      - testing/security-hardening
+  workflow_dispatch:
+    inputs:
+      worker_name:
+        description: "Cloudflare Worker name (never use production 'globe' unless intentional)"
+        required: true
+        default: "globe-security-test"
+
+jobs:
+  deploy-security-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      WORKER_NAME: ${{ github.event.inputs.worker_name || 'globe-security-test' }}
+    steps:
+      - name: Guard — refuse main / production worker name by default
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "Refusing to run on main branch"
+            exit 1
+          fi
+          if [ "$WORKER_NAME" = "globe" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Refusing automatic deploy to production Worker name 'globe'"
+            exit 1
+          fi
+          echo "Deploy target Worker: $WORKER_NAME"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck + dry-run
+        run: npm run check
+
+      - name: Deploy to security test Worker
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Override name so we never overwrite production `globe` by accident
+          command: deploy --name ${{ env.WORKER_NAME }}
+          secrets: |
+            TRANSIT_PUBLICAPI_V4
+            TRANSIT_REQUIRE_PAYMENT
+            STRIPE_SECRET_KEY
+            STRIPE_WEBHOOK_SECRET
+            STRIPE_PUBLISHABLE_KEY
+            STRIPE_PAYMENT_LINK_URL
+            STRIPE_MIN_AMOUNT_CENTS
+            STRIPE_SUCCESS_URL
+            STRIPE_CANCEL_URL
+            ADMIN_ACTION_SECRET
+            ADMIN_FINGERPRINTS
+            ADMIN_USER_IDS
+        env:
+          TRANSIT_PUBLICAPI_V4: ${{ secrets.TRANSIT_PUBLICAPI_V4 }}
+          TRANSIT_REQUIRE_PAYMENT: ${{ secrets.TRANSIT_REQUIRE_PAYMENT }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_PUBLISHABLE_KEY: ${{ secrets.STRIPE_PUBLISHABLE_KEY }}
+          STRIPE_PAYMENT_LINK_URL: ${{ secrets.STRIPE_PAYMENT_LINK_URL }}
+          STRIPE_MIN_AMOUNT_CENTS: ${{ secrets.STRIPE_MIN_AMOUNT_CENTS }}
+          STRIPE_SUCCESS_URL: ${{ secrets.STRIPE_SUCCESS_URL }}
+          STRIPE_CANCEL_URL: ${{ secrets.STRIPE_CANCEL_URL }}
+          ADMIN_ACTION_SECRET: ${{ secrets.ADMIN_ACTION_SECRET }}
+          ADMIN_FINGERPRINTS: ${{ secrets.ADMIN_FINGERPRINTS }}
+          ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+
+      - name: Skip note
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN == '' || secrets.CLOUDFLARE_ACCOUNT_ID == '' }}
+        run: |
+          echo "CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set in GitHub Actions secrets."
+          echo "Set them under Settings → Secrets and variables → Actions, then re-run."
+          echo "Also set Worker app secrets listed in the deploy step."
