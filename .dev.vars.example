@@ -1,11 +1,28 @@
 # Copy to .dev.vars for local wrangler dev (never commit .dev.vars)
-# Obtain Stripe keys from https://dashboard.stripe.com/apikeys
-# Webhook secret from https://dashboard.stripe.com/webhooks (or stripe listen)
 
+# Required for Local Transit data
 TRANSIT_PUBLICAPI_V4=your_transit_public_api_v4_key_here
 
+# Auth = OpenPGP public keys + challenge signatures (openpgp.js).
+# Sessions use BILLING_KV (bound in wrangler.json).
+
+# Transit requires login AND paid unlock (Stripe)
+TRANSIT_REQUIRE_PAYMENT=1
+
+# Stripe Payment Link + webhook unlock (use sk_test_ locally — never commit live keys)
+STRIPE_PAYMENT_LINK_URL=https://buy.stripe.com/fZubJ2aGpgzr0sX0gW0oM00
 STRIPE_SECRET_KEY=sk_test_...
-STRIPE_PUBLISHABLE_KEY=pk_test_...
+# From Dashboard webhook endpoint or: npm run setup:stripe
 STRIPE_WEBHOOK_SECRET=whsec_...
-# Optional: reuse an existing Price instead of creating Example Product
-# STRIPE_PRICE_ID=price_...
+# STRIPE_PUBLISHABLE_KEY=pk_test_...
+# Minimum paid unlock amount in cents (default 2000 = $20)
+STRIPE_MIN_AMOUNT_CENTS=2000
+# Only set to 1 if you intentionally allow $0 / no_payment_required checkouts
+# STRIPE_ALLOW_FREE=0
+
+# Admin portal (Menu → Admin). Allowlist only — never trust the client.
+# Paste your fingerprint from the signed-in menu (no spaces) after first login.
+ADMIN_FINGERPRINTS=
+# Or: ADMIN_USER_IDS=your_user_id_hex
+# Optional second factor for grant/revoke/claim:
+# ADMIN_ACTION_SECRET=long-random-string

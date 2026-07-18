@@ -6,15 +6,25 @@ declare namespace Cloudflare {
 		Globe: DurableObjectNamespace<import("./index").Globe>;
 		/** Transit App Public API v4 key (GitHub secret: TRANSIT_PUBLICAPI_V4) */
 		TRANSIT_PUBLICAPI_V4?: string;
-		/** Stripe secret key from Dashboard (sk_test_... / sk_live_...) */
+		/** When "1"/"true", transit also requires user.transitPaid (Stripe). Default: login only. */
+		TRANSIT_REQUIRE_PAYMENT?: string;
+		/** Comma-separated admin OpenPGP fingerprints (server allowlist). */
+		ADMIN_FINGERPRINTS?: string;
+		/** Comma-separated admin user ids (server allowlist). */
+		ADMIN_USER_IDS?: string;
+		/** Optional secret required for grant/revoke/claim (header x-admin-action-secret). */
+		ADMIN_ACTION_SECRET?: string;
+		/** Stripe secret key (optional until payment enforcement is enabled) */
 		STRIPE_SECRET_KEY?: string;
-		/** Stripe webhook signing secret (whsec_...) */
+		/** Stripe webhook signing secret (optional) */
 		STRIPE_WEBHOOK_SECRET?: string;
-		/** Optional pre-created Price id; otherwise created via ensure product */
+		/** Optional Price id (unused when using Payment Link) */
 		STRIPE_PRICE_ID?: string;
-		/** Optional publishable key for client Checkout.js (if used later) */
+		/** Optional publishable key */
 		STRIPE_PUBLISHABLE_KEY?: string;
-		/** KV store for product/price ids and payment records */
+		/** Hosted Payment Link URL (buy.stripe.com/...) */
+		STRIPE_PAYMENT_LINK_URL?: string;
+		/** KV for auth users/sessions, entitlements, and catalog */
 		BILLING_KV: KVNamespace;
 	}
 }

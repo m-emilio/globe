@@ -1,14 +1,28 @@
 // Messages that we'll send to the client
 
-// Representing a person's position
+/**
+ * Public globe marker — no raw IP / ASN / org (privacy).
+ * Coarse country may be included for map context only.
+ */
 export type Position = {
   lat: number;
   lng: number;
   id: string;
-  ip?: string;
+  /** ISO country code only (optional, coarse) */
   country?: string;
+};
+
+/**
+ * Paid Live Feed enrichment (server sends only to transitPaid sessions).
+ * Never includes full IP — only a privacy-masked form when present.
+ */
+export type FeedVisitorMeta = {
+  id: string;
   city?: string;
+  country?: string;
   org?: string;
+  /** Masked IP only (e.g. 1.2.x.x) — never full address */
+  ipMasked?: string;
 };
 
 export type OutgoingMessage =
@@ -19,6 +33,21 @@ export type OutgoingMessage =
   | {
       type: "remove-marker";
       id: string;
+    }
+  | {
+      type: "feed-join";
+      meta: FeedVisitorMeta;
+    }
+  | {
+      type: "feed-leave";
+      id: string;
+      sessionMs?: number;
+      meta?: FeedVisitorMeta;
+    }
+  | {
+      /** Whether this connection receives paid feed events */
+      type: "feed-access";
+      paid: boolean;
     };
 
 export type ComtradeTradeRecordPreview = {
@@ -195,7 +224,7 @@ export type TradePulsePreview = {
   notes: string[];
 };
 
-export type NearbyPathKind = "road" | "path" | "cycle" | "service";
+export type NearbyPathKind = "road" | "path" | "cycle" | "service" | "park";
 
 export type NearbyPathPoint = {
   lat: number;
@@ -205,6 +234,7 @@ export type NearbyPathPoint = {
 export type NearbyPathSegment = {
   id: string;
   name: string;
+  /** highway=* or leisure/landuse tag for parks */
   highway: string;
   kind: NearbyPathKind;
   points: NearbyPathPoint[];
@@ -220,6 +250,8 @@ export type NearbyPathsPreview = {
   pathCount: number;
   roadCount: number;
   footCount: number;
+  /** Park / green area polygons when present */
+  parkCount?: number;
   paths: NearbyPathSegment[];
   stale?: boolean;
   note?: string;

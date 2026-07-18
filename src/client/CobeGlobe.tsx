@@ -57,11 +57,20 @@ const GLOBE_ROTATION_RADIANS_PER_MS = 0.0003;
 const MAX_RENDER_DELTA_MS = 64;
 const POINTER_DRAG_DIVISOR = 200;
 const TOUCH_DRAG_DIVISOR = 100;
+/**
+ * Cobe draws the sphere inside a fixed canvas. Raising cobe `scale` above ~1
+ * makes the sphere larger than the canvas/circle clip → edges get cut off.
+ * We keep render scale fixed and zoom with CSS transform on the whole sphere
+ * so the full disc scales together without clipping.
+ */
 const GLOBE_SCREEN_RADIUS_RATIO = 0.4;
-const DEFAULT_GLOBE_SCALE = 1;
-const MIN_GLOBE_SCALE = 0.72;
-const MAX_GLOBE_SCALE = 1.45;
-const GLOBE_SCALE_STEP = 0.12;
+const COBE_RENDER_SCALE = 1;
+/** Visual zoom (CSS) — full globe stays intact at every level */
+const DEFAULT_VIEW_ZOOM = 1;
+const MIN_VIEW_ZOOM = 0.65;
+const MAX_VIEW_ZOOM = 1.75;
+const VIEW_ZOOM_STEP = 0.1;
+const MAX_TILT = 1.15;
 
 type RoutePoint = {
   key: string;
@@ -353,9 +362,9 @@ export function Cobe({
   const pointerRotationRef = useRef<GlobeRotation>({ phi: 0, theta: 0 });
   const autoRotationRef = useRef(0);
   const isAutoRotatePausedRef = useRef(false);
-  const globeScaleRef = useRef(DEFAULT_GLOBE_SCALE);
+  const globeScaleRef = useRef(DEFAULT_VIEW_ZOOM);
   const [isAutoRotatePaused, setIsAutoRotatePaused] = useState(false);
-  const [globeScale, setGlobeScale] = useState(DEFAULT_GLOBE_SCALE);
+  const [globeScale, setGlobeScale] = useState(DEFAULT_VIEW_ZOOM);
   const [isGlobeControlsOpen, setIsGlobeControlsOpen] = useState(false);
   const routeOverlayData = useMemo(
     () => prepareRouteOverlay(overlayRoutes),
@@ -385,7 +394,11 @@ export function Cobe({
     if (interaction !== null) {
       pointerRotationRef.current = {
         phi: interaction.startPhi + (clientX - interaction.startX) / divisor,
-        theta: interaction.startTheta + (clientY - interaction.startY) / divisor,
+        theta: clamp(
+          interaction.startTheta + (clientY - interaction.startY) / divisor,
+          -MAX_TILT,
+          MAX_TILT,
+        ),
       };
     }
   };
@@ -395,16 +408,25 @@ export function Cobe({
     setIsAutoRotatePaused(paused);
   };
 
-  const setGlobeScaleValue = (scale: number) => {
-    const nextScale = clamp(scale, MIN_GLOBE_SCALE, MAX_GLOBE_SCALE);
-    globeScaleRef.current = nextScale;
-    setGlobeScale(nextScale);
+  const setViewZoomValue = (zoom: number) => {
+    const next = clamp(
+      Math.round(zoom * 100) / 100,
+      MIN_VIEW_ZOOM,
+      MAX_VIEW_ZOOM,
+    );
+    globeScaleRef.current = next;
+    setGlobeScale(next);
+  };
+
+  const nudgeViewZoom = (delta: number) => {
+    setViewZoomValue(globeScaleRef.current + delta);
   };
 
   const resetGlobeView = () => {
     autoRotationRef.current = 0;
     pointerRotationRef.current = { phi: 0, theta: 0 };
-    setGlobeScaleValue(DEFAULT_GLOBE_SCALE);
+    setViewZoomValue(DEFAULT_VIEW_ZOOM);
+    setAutoRotatePausedValue(false);
   };
 
   useEffect(() => {
@@ -442,7 +464,8 @@ export function Cobe({
           glowColor: glowColorRef.current,
           markers: [],
           opacity: 0.7,
-          scale: DEFAULT_GLOBE_SCALE,
+          // Fixed fit — visual zoom is CSS on the sphere wrapper (no edge cut-off)
+          scale: COBE_RENDER_SCALE,
         });
       } catch {
         // WebGL/init failure — keep UI shell; render loop no-ops without globe
@@ -471,7 +494,6 @@ export function Cobe({
         theta: pointerRotationRef.current.theta,
       };
       const currentWidth = width || 400;
-      const currentScale = globeScaleRef.current;
 
       globe.update({
         markers: [...positions.values(), ...overlayMarkersRef.current],
@@ -481,15 +503,16 @@ export function Cobe({
         theta: currentRotation.theta,
         width: currentWidth,
         height: currentWidth,
-        scale: currentScale,
+        scale: COBE_RENDER_SCALE,
       });
 
+      // Overlay uses cobe render scale (not CSS zoom); CSS scales the parent as a unit.
       updateRouteOverlay(
         routeOverlayRef.current,
         overlayRoutesRef.current,
         currentRotation,
         currentWidth,
-        currentScale,
+        COBE_RENDER_SCALE,
         routeOverlayCacheRef,
       );
 
@@ -523,6 +546,10 @@ export function Cobe({
     return () => window.cancelAnimationFrame(frame);
   }, []);
 
+  const zoomPercent = Math.round(globeScale * 100);
+  const atMinZoom = globeScale <= MIN_VIEW_ZOOM + 0.001;
+  const atMaxZoom = globeScale >= MAX_VIEW_ZOOM - 0.001;
+
   const globeControls = (
     <div
       className={`globe-controls ${isGlobeControlsOpen ? "globe-controls-open" : "globe-controls-compact"}`}
@@ -536,58 +563,83 @@ export function Cobe({
         aria-expanded={isGlobeControlsOpen}
         aria-controls="globe-controls-panel"
         aria-label={
-          isGlobeControlsOpen
-            ? "Hide globe zoom controls"
-            : "Show globe zoom controls"
+          isGlobeControlsOpen ? "Hide globe controls" : "Show globe controls"
         }
-        title="GLOBE CTRL"
+        title="Globe view controls"
       >
-        GLOBE CTRL
+        {isGlobeControlsOpen ? "Globe ▾" : "Globe ▴"}
       </button>
       {isGlobeControlsOpen && (
         <div id="globe-controls-panel" className="globe-controls-panel">
+          <div className="globe-controls-section-label">Zoom</div>
+          <div className="globe-zoom-row" role="group" aria-label="Zoom">
+            <button
+              type="button"
+              className="globe-control-btn globe-zoom-btn"
+              onClick={() => nudgeViewZoom(-VIEW_ZOOM_STEP)}
+              disabled={atMinZoom}
+              aria-label="Zoom out"
+              title="Zoom out"
+            >
+              −
+            </button>
+            <span className="globe-zoom-readout" aria-live="polite">
+              {zoomPercent}%
+            </span>
+            <button
+              type="button"
+              className="globe-control-btn globe-zoom-btn"
+              onClick={() => nudgeViewZoom(VIEW_ZOOM_STEP)}
+              disabled={atMaxZoom}
+              aria-label="Zoom in"
+              title="Zoom in"
+            >
+              +
+            </button>
+          </div>
+          <label className="globe-zoom-slider-label">
+            <span className="visually-hidden">Zoom level</span>
+            <input
+              type="range"
+              className="globe-zoom-slider"
+              min={MIN_VIEW_ZOOM}
+              max={MAX_VIEW_ZOOM}
+              step={0.01}
+              value={globeScale}
+              onChange={(e) => setViewZoomValue(Number(e.target.value))}
+              aria-valuemin={Math.round(MIN_VIEW_ZOOM * 100)}
+              aria-valuemax={Math.round(MAX_VIEW_ZOOM * 100)}
+              aria-valuenow={zoomPercent}
+              aria-label="Zoom level"
+            />
+          </label>
+
+          <div className="globe-controls-section-label">Motion</div>
           <button
             type="button"
-            className={`globe-control-btn ${isAutoRotatePaused ? "active" : ""}`}
-            onClick={() => setAutoRotatePausedValue(!isAutoRotatePausedRef.current)}
-            aria-pressed={isAutoRotatePaused}
+            className={`globe-control-btn ${!isAutoRotatePaused ? "active" : ""}`}
+            onClick={() =>
+              setAutoRotatePausedValue(!isAutoRotatePausedRef.current)
+            }
+            aria-pressed={!isAutoRotatePaused}
             aria-label={
-              isAutoRotatePaused ? "Start globe rotation" : "Stop globe rotation"
+              isAutoRotatePaused ? "Resume auto-rotate" : "Pause auto-rotate"
             }
+            title="Spin the globe slowly"
           >
-            {isAutoRotatePaused ? "START" : "STOP"}
+            {isAutoRotatePaused ? "Auto-rotate: Off" : "Auto-rotate: On"}
           </button>
+
           <button
             type="button"
-            className="globe-control-btn"
-            onClick={() =>
-              setGlobeScaleValue(globeScaleRef.current + GLOBE_SCALE_STEP)
-            }
-            aria-label="Zoom globe in"
-          >
-            ZOOM
-          </button>
-          <button
-            type="button"
-            className="globe-control-btn"
-            onClick={() =>
-              setGlobeScaleValue(globeScaleRef.current - GLOBE_SCALE_STEP)
-            }
-            aria-label="Zoom globe out"
-          >
-            UNZOOM
-          </button>
-          <button
-            type="button"
-            className="globe-control-btn"
+            className="globe-control-btn globe-control-btn-reset"
             onClick={resetGlobeView}
-            aria-label="Reset globe view"
+            aria-label="Reset view to default zoom and rotation"
+            title="Reset zoom, tilt, and spin"
           >
-            RESET
+            Reset view
           </button>
-          <span className="globe-zoom-readout">
-            {Math.round(globeScale * 100)}%
-          </span>
+          <p className="globe-controls-hint">Drag globe to look around · scroll to zoom</p>
         </div>
       )}
     </div>
@@ -606,6 +658,15 @@ export function Cobe({
           touchAction: "none",
           overscrollBehavior: "contain",
           userSelect: "none",
+          // CSS zoom keeps the full sphere disc intact (no canvas edge cut-off)
+          transform: `scale(${globeScale})`,
+          transformOrigin: "center center",
+        }}
+        onWheel={(e) => {
+          // Pinch/trackpad/mouse wheel zoom without cutting the globe
+          e.preventDefault();
+          const delta = e.deltaY > 0 ? -VIEW_ZOOM_STEP : VIEW_ZOOM_STEP;
+          nudgeViewZoom(delta * (e.ctrlKey ? 1.5 : 1));
         }}
       >
       <div
@@ -704,7 +765,8 @@ export function Cobe({
           height: "100%",
           cursor: "grab",
           background: "transparent",
-          borderRadius: "50%",
+          // No circular clip on the canvas — clipping was cutting zoomed edges
+          borderRadius: 0,
           opacity: 1,
           transition: "opacity 1s ease",
           display: "block",

@@ -25,12 +25,12 @@
   "kv_namespaces": [
     {
       "binding": "BILLING_KV",
-      "id": "local-billing-kv",
-      "preview_id": "local-billing-kv-preview"
+      "id": "351eb0e39a014fb3912e709d85a4a445",
+      "preview_id": "25476e1f195246afb1bc8cee3d9f8ba8"
     }
   ],
   "observability": {
     "enabled": true
   },
-  "upload_source_maps": true
+  "upload_source_maps": false
 }

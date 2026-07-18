@@ -1,33 +1,108 @@
+/**
+ * Stripe Payment Link + webhook entitlement (optional, for later).
+ *
+ * Default product path uses Cloudflare login (auth.ts). Payment enforcement
+ * is off unless TRANSIT_REQUIRE_PAYMENT=1. When Stripe is enabled later:
+ * 1. Logged-in user opens Payment Link with client_reference_id=<userId>
+ * 2. Webhook verifies signature and sets user.transitPaid
+ * 3. claim-session only grants if client_reference_id === session user id
+ */
+
 import Stripe from "stripe";
+import {
+  getSessionUser,
+  rateLimitOrNull,
+  setUserTransitPaid,
+  clientIp,
+  type AuthEnv,
+} from "./auth";
 
-const PRODUCT_NAME = "Example Product";
-const PRODUCT_AMOUNT_CENTS = 2000;
-const PRODUCT_CURRENCY = "usd";
-const PRICE_KV_KEY = "stripe:example-product:price_id";
-const PRODUCT_KV_KEY = "stripe:example-product:product_id";
+const DEFAULT_PAYMENT_LINK_URL =
+  "https://buy.stripe.com/fZubJ2aGpgzr0sX0gW0oM00";
+const PAYMENT_LINK_KV_KEY = "stripe:payment_link_url";
+const CATALOG_KV_KEY = "stripe:catalog";
+const CLAIMED_SESSION_PREFIX = "payment:claimed:";
 
-export type BillingEnv = {
+export type BillingEnv = AuthEnv & {
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_PRICE_ID?: string;
-  BILLING_KV?: KVNamespace;
+  STRIPE_PAYMENT_LINK_URL?: string;
+  STRIPE_PUBLISHABLE_KEY?: string;
+  /** Minimum paid amount in cents (default 2000 = $20). */
+  STRIPE_MIN_AMOUNT_CENTS?: string;
+  /** When "1", allow payment_status=no_payment_required to grant access. */
+  STRIPE_ALLOW_FREE?: string;
 };
 
-type PaymentRecord = {
-  sessionId: string;
-  paymentStatus: string;
+/** Default $20 unlock price in cents. */
+const DEFAULT_MIN_AMOUNT_CENTS = 2000;
+
+function minAmountCents(env: BillingEnv): number {
+  const n = Number(env.STRIPE_MIN_AMOUNT_CENTS);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : DEFAULT_MIN_AMOUNT_CENTS;
+}
+
+function allowFreeCheckout(env: BillingEnv): boolean {
+  const v = env.STRIPE_ALLOW_FREE?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+function paymentQualifies(
+  env: BillingEnv,
+  paymentStatus: string,
+  amountTotal: number | null,
+): { ok: true } | { ok: false; reason: string } {
+  if (paymentStatus === "no_payment_required") {
+    if (!allowFreeCheckout(env)) {
+      return {
+        ok: false,
+        reason: "free_checkout_disabled",
+      };
+    }
+    return { ok: true };
+  }
+  if (paymentStatus !== "paid") {
+    return { ok: false, reason: "payment_not_complete" };
+  }
+  const min = minAmountCents(env);
+  if (min > 0) {
+    if (amountTotal == null || !Number.isFinite(amountTotal)) {
+      return { ok: false, reason: "amount_missing" };
+    }
+    if (amountTotal < min) {
+      return { ok: false, reason: "amount_too_low" };
+    }
+  }
+  return { ok: true };
+}
+
+export type EntitlementRecord = {
+  status: "active" | "inactive";
+  userId: string;
+  sessionId: string | null;
   customerId: string | null;
   customerEmail: string | null;
+  paymentStatus: string;
   amountTotal: number | null;
   currency: string | null;
-  priceId: string | null;
-  completedAt: string;
+  grantedAt: string;
+  source: "webhook" | "claim";
 };
+
+type BillingCatalog = {
+  paymentLinkUrl: string;
+  label: string;
+  amountLabel: string;
+  updatedAt: string;
+};
+
+type SecurityHeadersFn = (headers: Headers) => void;
 
 function json(
   data: unknown,
   init?: ResponseInit,
-  applySecurityHeaders?: (headers: Headers) => void,
+  applySecurityHeaders?: SecurityHeadersFn,
 ) {
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json; charset=utf-8");
@@ -37,202 +112,340 @@ function json(
 }
 
 function createStripeClient(secretKey: string) {
-  // API version intentionally left unset (use account default / SDK default)
   return new Stripe(secretKey, {
     httpClient: Stripe.createFetchHttpClient(),
   } as ConstructorParameters<typeof Stripe>[1]);
 }
 
-function requireStripeSecret(env: BillingEnv): string | Response {
-  const key = env.STRIPE_SECRET_KEY?.trim();
-  if (!key) {
-    return json(
-      {
-        error: "stripe_secret_missing",
-        message:
-          "Set STRIPE_SECRET_KEY in .dev.vars (local) or as a Cloudflare/GitHub secret. Get keys from the Stripe Dashboard.",
-      },
-      { status: 503 },
-    );
-  }
-  return key;
+function resolvePaymentLinkUrl(env: BillingEnv): string {
+  return env.STRIPE_PAYMENT_LINK_URL?.trim() || DEFAULT_PAYMENT_LINK_URL;
 }
 
-async function readStoredPriceId(env: BillingEnv): Promise<string | null> {
-  if (env.STRIPE_PRICE_ID?.trim()) {
-    return env.STRIPE_PRICE_ID.trim();
-  }
-  if (!env.BILLING_KV) {
-    return null;
-  }
-  return env.BILLING_KV.get(PRICE_KV_KEY);
+function entitlementUserKey(userId: string) {
+  return `entitlement:user:${userId}`;
+}
+
+function paymentSessionKey(sessionId: string) {
+  return `payment:session:${sessionId}`;
+}
+
+function claimedSessionKey(sessionId: string) {
+  return `${CLAIMED_SESSION_PREFIX}${sessionId}`;
 }
 
 /**
- * Ensure the one-time Example Product + default price exist.
- * Reuses env STRIPE_PRICE_ID or KV-stored price when present.
+ * Return Payment Link URL for the *authenticated* user only.
+ * client_reference_id is always the server-side user id (not client-supplied).
  */
-export async function ensureBillingProduct(
+export async function getPaymentLink(
+  request: Request,
   env: BillingEnv,
-  applySecurityHeaders?: (headers: Headers) => void,
+  applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const secretOrError = requireStripeSecret(env);
-  if (secretOrError instanceof Response) {
-    return secretOrError;
-  }
+  const limited = rateLimitOrNull(
+    `billing:link:${clientIp(request)}`,
+    20,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
 
-  const existingPriceId = await readStoredPriceId(env);
-  if (existingPriceId) {
+  const session = await getSessionUser(request, env);
+  if (!session) {
     return json(
       {
-        productId: env.BILLING_KV
-          ? await env.BILLING_KV.get(PRODUCT_KV_KEY)
-          : null,
-        priceId: existingPriceId,
-        reused: true,
+        error: "login_required",
+        message: "Log in before starting checkout.",
+      },
+      { status: 401 },
+      applySecurityHeaders,
+    );
+  }
+
+  if (session.user.transitPaid) {
+    return json(
+      {
+        error: "already_paid",
+        message:
+          "Stripe access is already unlocked on this account (Transit + Live Feed).",
+        url: null,
+      },
+      { status: 409 },
+      applySecurityHeaders,
+    );
+  }
+
+  let paymentLinkUrl =
+    (env.BILLING_KV && (await env.BILLING_KV.get(PAYMENT_LINK_KV_KEY))) ||
+    resolvePaymentLinkUrl(env);
+
+  // Always bind checkout to the authenticated user id (never client-supplied).
+  try {
+    const link = new URL(paymentLinkUrl);
+    link.searchParams.set("client_reference_id", session.user.id);
+    // Strip any client-tampered params that might have been stored in KV.
+    paymentLinkUrl = link.toString();
+  } catch {
+    return json(
+      {
+        error: "payment_link_invalid",
+        message: "Payment link is misconfigured.",
+      },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+
+  return json(
+    {
+      url: paymentLinkUrl,
+      label: "Transit + Live Feed",
+      amountLabel: "$20",
+    },
+    { status: 200 },
+    applySecurityHeaders,
+  );
+}
+
+/**
+ * Minimal access status for the logged-in user (no setup recon, no PII dump).
+ */
+export async function getAccessStatus(
+  request: Request,
+  env: BillingEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const session = await getSessionUser(request, env);
+  if (!session) {
+    return json(
+      {
+        authenticated: false,
+        hasAccess: false,
       },
       { status: 200 },
       applySecurityHeaders,
     );
   }
 
-  const stripe = createStripeClient(secretOrError);
+  return json(
+    {
+      authenticated: true,
+      hasAccess: Boolean(session.user.transitPaid),
+      fingerprint: session.user.fingerprint,
+    },
+    { status: 200 },
+    applySecurityHeaders,
+  );
+}
+
+/**
+ * Grant paid entitlement with claim-first race reduction and amount checks.
+ * Exported for admin claim path.
+ */
+export async function grantPaidToUser(
+  env: BillingEnv,
+  input: {
+    userId: string;
+    sessionId: string | null;
+    customerId: string | null;
+    customerEmail: string | null;
+    paymentStatus: string;
+    amountTotal: number | null;
+    currency: string | null;
+    source: EntitlementRecord["source"];
+    /** Admin recovery may rebind when true and secret path already gated */
+    forceRebind?: boolean;
+  },
+): Promise<EntitlementRecord | null> {
+  if (!env.BILLING_KV) return null;
+  if (!/^[a-f0-9]{16,64}$/i.test(input.userId)) {
+    return null;
+  }
+
+  const qual = paymentQualifies(env, input.paymentStatus, input.amountTotal);
+  if (!qual.ok) {
+    return null;
+  }
+
+  // Claim-first: write claimed key before unlocking (reduces dual-grant race)
+  if (input.sessionId) {
+    const claimKey = claimedSessionKey(input.sessionId);
+    const existing = await env.BILLING_KV.get(claimKey);
+    if (existing && existing !== input.userId && !input.forceRebind) {
+      return null;
+    }
+    // Reserve claim for this user before grant
+    await env.BILLING_KV.put(claimKey, input.userId, {
+      expirationTtl: 60 * 60 * 24 * 365,
+    });
+    // Re-read winner
+    const winner = await env.BILLING_KV.get(claimKey);
+    if (winner !== input.userId && !input.forceRebind) {
+      return null;
+    }
+  }
+
+  const user = await setUserTransitPaid(env, input.userId, true);
+  if (!user) return null;
+
+  const record: EntitlementRecord = {
+    status: "active",
+    userId: input.userId,
+    sessionId: input.sessionId,
+    customerId: input.customerId,
+    customerEmail: input.customerEmail,
+    paymentStatus: input.paymentStatus,
+    amountTotal: input.amountTotal,
+    currency: input.currency,
+    grantedAt: new Date().toISOString(),
+    source: input.source,
+  };
+
+  await env.BILLING_KV.put(
+    entitlementUserKey(input.userId),
+    JSON.stringify(record),
+  );
+  if (input.sessionId) {
+    await env.BILLING_KV.put(
+      paymentSessionKey(input.sessionId),
+      JSON.stringify({ userId: input.userId, grantedAt: record.grantedAt }),
+    );
+  }
+
+  return record;
+}
+
+/**
+ * Secure claim: caller must be logged in; Stripe session.client_reference_id
+ * must equal the logged-in user id. No free rebinding of paid sessions.
+ */
+export async function claimCheckoutSession(
+  request: Request,
+  env: BillingEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const limited = rateLimitOrNull(
+    `billing:claim:${clientIp(request)}`,
+    10,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
+
+  if (!env.BILLING_KV) {
+    return json(
+      { error: "kv_missing", message: "BILLING_KV is required." },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+
+  const auth = await getSessionUser(request, env);
+  if (!auth) {
+    return json(
+      { error: "login_required", message: "Log in before claiming a purchase." },
+      { status: 401 },
+      applySecurityHeaders,
+    );
+  }
+
+  const secret = env.STRIPE_SECRET_KEY?.trim();
+  if (!secret) {
+    return json(
+      {
+        error: "stripe_not_configured",
+        message: "Stripe is not configured on this deployment.",
+      },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+
+  let body: { session_id?: string } = {};
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    body = {};
+  }
+
+  const url = new URL(request.url);
+  const sessionId =
+    body.session_id?.trim() || url.searchParams.get("session_id")?.trim();
+
+  if (!sessionId || !/^cs_[a-zA-Z0-9_]+$/.test(sessionId)) {
+    return json(
+      { error: "session_id_required" },
+      { status: 400 },
+      applySecurityHeaders,
+    );
+  }
 
   try {
-    const product = await stripe.products.create({
-      name: PRODUCT_NAME,
-      default_price_data: {
-        currency: PRODUCT_CURRENCY,
-        unit_amount: PRODUCT_AMOUNT_CENTS,
-      },
-    });
+    const stripe = createStripeClient(secret);
+    const checkout = await stripe.checkout.sessions.retrieve(sessionId);
 
-    const priceId =
-      typeof product.default_price === "string"
-        ? product.default_price
-        : product.default_price?.id;
+    const ref =
+      typeof checkout.client_reference_id === "string"
+        ? checkout.client_reference_id.trim()
+        : "";
 
-    if (!priceId) {
+    // Critical: paid session may only unlock the user named in client_reference_id
+    if (!ref || ref !== auth.user.id) {
       return json(
         {
-          error: "stripe_price_missing",
-          message: "Product created without a default price id",
+          error: "session_user_mismatch",
+          message:
+            "This checkout session is not linked to your account. Open checkout while logged in.",
         },
-        { status: 502 },
+        { status: 403 },
         applySecurityHeaders,
       );
     }
 
-    if (env.BILLING_KV) {
-      await env.BILLING_KV.put(PRICE_KV_KEY, priceId);
-      await env.BILLING_KV.put(PRODUCT_KV_KEY, product.id);
-    }
-
-    return json(
-      {
-        productId: product.id,
-        priceId,
-        reused: false,
-      },
-      { status: 200 },
-      applySecurityHeaders,
-    );
-  } catch (error) {
-    return json(
-      {
-        error: "stripe_product_create_failed",
-        message: error instanceof Error ? error.message : "unknown_error",
-      },
-      { status: 502 },
-      applySecurityHeaders,
-    );
-  }
-}
-
-/**
- * Create a Checkout Session for a one-time payment (mode=payment).
- */
-export async function createCheckoutSession(
-  request: Request,
-  env: BillingEnv,
-  applySecurityHeaders?: (headers: Headers) => void,
-): Promise<Response> {
-  const secretOrError = requireStripeSecret(env);
-  if (secretOrError instanceof Response) {
-    return secretOrError;
-  }
-
-  const stripe = createStripeClient(secretOrError);
-
-  let priceId = await readStoredPriceId(env);
-  if (!priceId) {
-    const ensured = await ensureBillingProduct(env, applySecurityHeaders);
-    if (!ensured.ok) {
-      return ensured;
-    }
-    const body = (await ensured.json()) as { priceId?: string };
-    priceId = body.priceId ?? null;
-  }
-
-  if (!priceId) {
-    return json(
-      {
-        error: "stripe_price_unavailable",
-        message: "Could not resolve a Stripe price for checkout",
-      },
-      { status: 502 },
-      applySecurityHeaders,
-    );
-  }
-
-  const origin = new URL(request.url).origin;
-  const successUrl = `${origin}/?billing=success&session_id={CHECKOUT_SESSION_ID}`;
-  const cancelUrl = `${origin}/?billing=cancel`;
-
-  try {
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      line_items: [
-        {
-          price: priceId,
-          quantity: 1,
-        },
-      ],
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      // Persist linkage for later webhook / status lookups
-      metadata: {
-        product_name: PRODUCT_NAME,
-        price_id: priceId,
-      },
+    const record = await grantPaidToUser(env, {
+      userId: auth.user.id,
+      sessionId: checkout.id,
+      customerId:
+        typeof checkout.customer === "string"
+          ? checkout.customer
+          : checkout.customer?.id ?? null,
+      customerEmail:
+        checkout.customer_details?.email ?? checkout.customer_email ?? null,
+      paymentStatus: checkout.payment_status,
+      amountTotal: checkout.amount_total,
+      currency: checkout.currency,
+      source: "claim",
     });
 
-    if (env.BILLING_KV && session.id) {
-      await env.BILLING_KV.put(
-        `checkout:session:${session.id}`,
-        JSON.stringify({
-          sessionId: session.id,
-          status: session.status,
-          paymentStatus: session.payment_status,
-          priceId,
-          createdAt: new Date().toISOString(),
-        }),
+    if (!record) {
+      const qual = paymentQualifies(
+        env,
+        checkout.payment_status,
+        checkout.amount_total,
+      );
+      return json(
+        {
+          error: qual.ok ? "claim_unavailable" : "payment_not_complete",
+          message: qual.ok
+            ? "Session was already claimed by another account."
+            : "Payment is incomplete or does not meet the minimum amount.",
+          code: qual.ok ? "claim_unavailable" : qual.reason,
+        },
+        { status: 402 },
+        applySecurityHeaders,
       );
     }
 
     return json(
-      {
-        sessionId: session.id,
-        url: session.url,
-      },
+      { hasAccess: true, authenticated: true },
       { status: 200 },
       applySecurityHeaders,
     );
-  } catch (error) {
+  } catch {
     return json(
       {
-        error: "stripe_checkout_create_failed",
-        message: error instanceof Error ? error.message : "unknown_error",
+        error: "claim_failed",
+        message: "Could not claim checkout session. Try again shortly.",
       },
       { status: 502 },
       applySecurityHeaders,
@@ -241,26 +454,30 @@ export async function createCheckoutSession(
 }
 
 /**
- * Handle Stripe webhooks. Confirms one-time payment via checkout.session.completed.
+ * Stripe webhook: unlock transit for user id in client_reference_id.
  */
 export async function handleStripeWebhook(
   request: Request,
   env: BillingEnv,
-  applySecurityHeaders?: (headers: Headers) => void,
+  applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const secretOrError = requireStripeSecret(env);
-  if (secretOrError instanceof Response) {
-    return secretOrError;
-  }
-
   const webhookSecret = env.STRIPE_WEBHOOK_SECRET?.trim();
-  if (!webhookSecret) {
+  const secretKey = env.STRIPE_SECRET_KEY?.trim();
+
+  if (!webhookSecret || !secretKey) {
     return json(
       {
-        error: "stripe_webhook_secret_missing",
-        message:
-          "Set STRIPE_WEBHOOK_SECRET from the Stripe Dashboard webhook signing secret.",
+        error: "stripe_not_configured",
+        message: "Webhook secret and secret key must be set.",
       },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+
+  if (!env.BILLING_KV) {
+    return json(
+      { error: "kv_missing" },
       { status: 503 },
       applySecurityHeaders,
     );
@@ -275,7 +492,7 @@ export async function handleStripeWebhook(
     );
   }
 
-  const stripe = createStripeClient(secretOrError);
+  const stripe = createStripeClient(secretKey);
   const payload = await request.text();
 
   let event: Stripe.Event;
@@ -285,65 +502,42 @@ export async function handleStripeWebhook(
       signature,
       webhookSecret,
     );
-  } catch (error) {
+  } catch {
     return json(
       {
         error: "stripe_signature_invalid",
-        message: error instanceof Error ? error.message : "invalid_signature",
+        message: "Invalid Stripe webhook signature.",
       },
       { status: 400 },
       applySecurityHeaders,
     );
   }
 
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object as Stripe.Checkout.Session;
+  if (
+    event.type === "checkout.session.completed" ||
+    event.type === "checkout.session.async_payment_succeeded"
+  ) {
+    const checkout = event.data.object as Stripe.Checkout.Session;
+    const userId =
+      typeof checkout.client_reference_id === "string"
+        ? checkout.client_reference_id.trim()
+        : "";
 
-    const record: PaymentRecord = {
-      sessionId: session.id,
-      paymentStatus: session.payment_status,
-      customerId:
-        typeof session.customer === "string"
-          ? session.customer
-          : session.customer?.id ?? null,
-      customerEmail:
-        session.customer_details?.email ??
-        session.customer_email ??
-        null,
-      amountTotal: session.amount_total,
-      currency: session.currency,
-      priceId: session.metadata?.price_id ?? null,
-      completedAt: new Date().toISOString(),
-    };
-
-    if (env.BILLING_KV) {
-      await env.BILLING_KV.put(
-        `payment:session:${session.id}`,
-        JSON.stringify(record),
-      );
-      if (record.customerId) {
-        await env.BILLING_KV.put(
-          `payment:customer:${record.customerId}:latest`,
-          session.id,
-        );
-      }
-      if (record.customerEmail) {
-        await env.BILLING_KV.put(
-          `payment:email:${record.customerEmail.toLowerCase()}:latest`,
-          session.id,
-        );
-      }
-      // Mark session as completed for status polling
-      await env.BILLING_KV.put(
-        `checkout:session:${session.id}`,
-        JSON.stringify({
-          sessionId: session.id,
-          status: "complete",
-          paymentStatus: session.payment_status,
-          priceId: record.priceId,
-          completedAt: record.completedAt,
-        }),
-      );
+    if (userId) {
+      await grantPaidToUser(env, {
+        userId,
+        sessionId: checkout.id,
+        customerId:
+          typeof checkout.customer === "string"
+            ? checkout.customer
+            : checkout.customer?.id ?? null,
+        customerEmail:
+          checkout.customer_details?.email ?? checkout.customer_email ?? null,
+        paymentStatus: checkout.payment_status,
+        amountTotal: checkout.amount_total,
+        currency: checkout.currency,
+        source: "webhook",
+      });
     }
   }
 
@@ -351,16 +545,84 @@ export async function handleStripeWebhook(
 }
 
 /**
- * Look up payment completion status for a Checkout Session id.
+ * Seed catalog — login required; never returns secrets or raw payment URLs.
+ */
+export async function ensureBillingCatalog(
+  request: Request,
+  env: BillingEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const limited = rateLimitOrNull(
+    `billing:catalog:${clientIp(request)}`,
+    20,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
+
+  const session = await getSessionUser(request, env);
+  if (!session) {
+    return json(
+      {
+        error: "login_required",
+        message: "Log in before starting checkout.",
+      },
+      { status: 401 },
+      applySecurityHeaders,
+    );
+  }
+
+  const paymentLinkUrl = resolvePaymentLinkUrl(env);
+  const catalog: BillingCatalog = {
+    paymentLinkUrl,
+    label: "Transit + Live Feed",
+    amountLabel: "$20",
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (env.BILLING_KV) {
+    await env.BILLING_KV.put(PAYMENT_LINK_KV_KEY, paymentLinkUrl);
+    await env.BILLING_KV.put(CATALOG_KV_KEY, JSON.stringify(catalog));
+  }
+
+  return json(
+    {
+      label: catalog.label,
+      amountLabel: catalog.amountLabel,
+    },
+    { status: 200 },
+    applySecurityHeaders,
+  );
+}
+
+/**
+ * Read-only payment status — never claims / never rebinds.
  */
 export async function getPaymentStatus(
   request: Request,
   env: BillingEnv,
-  applySecurityHeaders?: (headers: Headers) => void,
+  applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
+  const limited = rateLimitOrNull(
+    `billing:status:${clientIp(request)}`,
+    20,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
+
+  const auth = await getSessionUser(request, env);
+  if (!auth) {
+    return json(
+      { error: "login_required" },
+      { status: 401 },
+      applySecurityHeaders,
+    );
+  }
+
   const url = new URL(request.url);
   const sessionId = url.searchParams.get("session_id")?.trim();
-  if (!sessionId) {
+  if (!sessionId || !/^cs_[a-zA-Z0-9_]+$/.test(sessionId)) {
     return json(
       { error: "session_id_required" },
       { status: 400 },
@@ -368,60 +630,30 @@ export async function getPaymentStatus(
     );
   }
 
-  // Prefer persisted webhook/checkout records
   if (env.BILLING_KV) {
-    const paymentRaw = await env.BILLING_KV.get(`payment:session:${sessionId}`);
-    if (paymentRaw) {
+    const claimed = await env.BILLING_KV.get(claimedSessionKey(sessionId));
+    if (claimed) {
       return json(
-        { source: "webhook", ...JSON.parse(paymentRaw) },
-        { status: 200 },
-        applySecurityHeaders,
-      );
-    }
-    const sessionRaw = await env.BILLING_KV.get(
-      `checkout:session:${sessionId}`,
-    );
-    if (sessionRaw) {
-      return json(
-        { source: "session", ...JSON.parse(sessionRaw) },
+        {
+          claimed: true,
+          belongsToYou: claimed === auth.user.id,
+          hasAccess: Boolean(auth.user.transitPaid),
+        },
         { status: 200 },
         applySecurityHeaders,
       );
     }
   }
 
-  const secretOrError = requireStripeSecret(env);
-  if (secretOrError instanceof Response) {
-    return secretOrError;
-  }
-
-  try {
-    const stripe = createStripeClient(secretOrError);
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-    return json(
-      {
-        source: "stripe",
-        sessionId: session.id,
-        status: session.status,
-        paymentStatus: session.payment_status,
-        customerId:
-          typeof session.customer === "string"
-            ? session.customer
-            : session.customer?.id ?? null,
-        amountTotal: session.amount_total,
-        currency: session.currency,
-      },
-      { status: 200 },
-      applySecurityHeaders,
-    );
-  } catch (error) {
-    return json(
-      {
-        error: "stripe_session_lookup_failed",
-        message: error instanceof Error ? error.message : "unknown_error",
-      },
-      { status: 404 },
-      applySecurityHeaders,
-    );
-  }
+  return json(
+    {
+      claimed: false,
+      hasAccess: Boolean(auth.user.transitPaid),
+    },
+    { status: 200 },
+    applySecurityHeaders,
+  );
 }
+
+// Re-export transit gate from auth (single source of truth)
+export { requireTransitAccess } from "./auth";

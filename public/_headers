@@ -1,12 +1,14 @@
 /*
-  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://imagedelivery.net; connect-src 'self' ws: wss: https://api.open-meteo.com; form-action 'self'
+  # Keep CSP in sync with SECURITY_HEADERS in src/server/index.ts
+  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; frame-src 'none'; child-src 'none'; worker-src 'self' blob:; manifest-src 'self'; script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://api.open-meteo.com; form-action 'self'
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Resource-Policy: same-origin
   Origin-Agent-Cluster: ?1
   Referrer-Policy: strict-origin-when-cross-origin
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
-  Permissions-Policy: camera=(), microphone=(), geolocation=(self)
+  Permissions-Policy: camera=(), microphone=(), geolocation=(self), payment=(), usb=(), interest-cohort=()
+  X-Permitted-Cross-Domain-Policies: none
 
 # Long-cache fingerprinted/static client assets to cut repeat Wi‑Fi usage
 /dist/*
@@ -15,6 +17,12 @@
 /normalize.css
   Cache-Control: public, max-age=604800, stale-while-revalidate=86400
 
-# Source maps are for debugging only — discourage default download
+# Source maps are not shipped in production builds; block if present
 /dist/*.map
   Cache-Control: private, max-age=0, must-revalidate
+  X-Robots-Tag: noindex
+  Content-Security-Policy: default-src 'none'
+
+# SRI manifest is public verification data
+/dist/sri-manifest.json
+  Cache-Control: public, max-age=300

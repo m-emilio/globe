@@ -120,6 +120,7 @@ export function FloatingChrome({
       const el = rootRef.current;
       if (!el) return;
 
+      // Visual box only — avoid content-scroll height when measuring
       const rect = el.getBoundingClientRect();
       resizeRef.current = {
         pointerId: e.pointerId,
@@ -130,18 +131,22 @@ export function FloatingChrome({
       };
 
       // Keep position stable while resizing (switch to left/top anchors)
-      if (!pos) {
-        setPos({ left: rect.left, top: rect.top });
-      }
+      setPos((prev) => prev ?? { left: rect.left, top: rect.top });
       setSize({ width: rect.width, height: rect.height });
 
       try {
-        e.currentTarget.setPointerCapture(e.pointerId);
+        // Capture on the panel root so the grip stays under the pointer
+        // even if the handle reflows mid-drag.
+        el.setPointerCapture(e.pointerId);
       } catch {
-        // ignore
+        try {
+          e.currentTarget.setPointerCapture(e.pointerId);
+        } catch {
+          // ignore
+        }
       }
     },
-    [pos],
+    [],
   );
 
   useEffect(() => {
@@ -149,11 +154,12 @@ export function FloatingChrome({
       const el = rootRef.current;
 
       if (dragRef.current && e.pointerId === dragRef.current.pointerId) {
+        e.preventDefault();
         const { startX, startY, origLeft, origTop } = dragRef.current;
         const dx = e.clientX - startX;
         const dy = e.clientY - startY;
-        const width = el?.offsetWidth ?? 200;
-        const height = el?.offsetHeight ?? 120;
+        const width = el?.getBoundingClientRect().width ?? 200;
+        const height = el?.getBoundingClientRect().height ?? 120;
         const maxLeft = Math.max(0, window.innerWidth - Math.min(width, 80));
         const maxTop = Math.max(0, window.innerHeight - Math.min(height, 48));
         setPos({
@@ -164,11 +170,15 @@ export function FloatingChrome({
       }
 
       if (resizeRef.current && e.pointerId === resizeRef.current.pointerId) {
+        e.preventDefault();
         const { startX, startY, origWidth, origHeight } = resizeRef.current;
         const minW = 220;
-        const minH = 120;
-        const maxW = window.innerWidth - 8;
-        const maxH = window.innerHeight - 8;
+        const minH = 140;
+        // Leave room so the panel never leaves the viewport
+        const originLeft = el?.getBoundingClientRect().left ?? 0;
+        const originTop = el?.getBoundingClientRect().top ?? 0;
+        const maxW = Math.max(minW, window.innerWidth - originLeft - 8);
+        const maxH = Math.max(minH, window.innerHeight - originTop - 8);
         const nextW = Math.min(
           maxW,
           Math.max(minW, origWidth + (e.clientX - startX)),
@@ -190,7 +200,7 @@ export function FloatingChrome({
       }
     };
 
-    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointermove", onMove, { passive: false });
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
     return () => {
@@ -219,7 +229,12 @@ export function FloatingChrome({
           // While minimized, never force a tall locked height
           ...(isMinimized
             ? { height: "auto", maxHeight: "none" }
-            : { height: size.height, maxHeight: "none" }),
+            : {
+                height: size.height,
+                maxHeight: "none",
+                // Keep chrome layout stable so the grip never scrolls away
+                overflow: "hidden",
+              }),
         }
       : null),
   };
@@ -228,6 +243,7 @@ export function FloatingChrome({
     <div
       ref={rootRef}
       className={["floating-chrome", className].filter(Boolean).join(" ")}
+      data-resized={size ? "true" : undefined}
       {...rest}
       style={mergedStyle}
       onPointerDown={onDragPointerDown}
