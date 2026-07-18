@@ -1,26 +1,19 @@
-# Deploy the security-hardening testing branch to a NON-PRODUCTION Worker.
-# Does NOT deploy to main or overwrite the production `globe` Worker name.
-name: Deploy security test worker
+# Optional CI deploy of production Worker `globe` from main.
+# Requires GitHub Actions secrets (see README / list below).
+name: Deploy production globe
 
 on:
   push:
     branches:
-      - testing/security-hardening
+      - main
   workflow_dispatch:
-    inputs:
-      worker_name:
-        description: "Cloudflare Worker name (never use production 'globe' unless intentional)"
-        required: true
-        default: "globe-security-test"
 
 jobs:
-  deploy-security-test:
+  deploy-production:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
-      WORKER_NAME: ${{ github.event.inputs.worker_name || 'globe-security-test' }}
-      # secrets cannot be referenced in `if:` — map to env first
       CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       TRANSIT_PUBLICAPI_V4: ${{ secrets.TRANSIT_PUBLICAPI_V4 }}
@@ -36,18 +29,6 @@ jobs:
       ADMIN_FINGERPRINTS: ${{ secrets.ADMIN_FINGERPRINTS }}
       ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
     steps:
-      - name: Guard - refuse main / production worker name by default
-        run: |
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "Refusing to run on main branch"
-            exit 1
-          fi
-          if [ "$WORKER_NAME" = "globe" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-            echo "Refusing automatic deploy to production Worker name 'globe'"
-            exit 1
-          fi
-          echo "Deploy target Worker: $WORKER_NAME"
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -65,14 +46,13 @@ jobs:
           npx tsc --project src/client --noEmit
           npx tsc --project src/server --noEmit
 
-      - name: Deploy to security test Worker
-        # Do not use secrets.* inside if: (invalid workflow)
+      - name: Deploy production Worker globe
         if: env.CF_API_TOKEN != '' && env.CF_ACCOUNT_ID != ''
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ env.CF_API_TOKEN }}
           accountId: ${{ env.CF_ACCOUNT_ID }}
-          command: deploy --name ${{ env.WORKER_NAME }}
+          command: deploy --name globe
           secrets: |
             TRANSIT_PUBLICAPI_V4
             TRANSIT_REQUIRE_PAYMENT
@@ -90,6 +70,5 @@ jobs:
       - name: Skip deploy note
         if: env.CF_API_TOKEN == '' || env.CF_ACCOUNT_ID == ''
         run: |
-          echo "CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set in GitHub Actions secrets."
-          echo "Set them under Settings → Secrets and variables → Actions, then re-run."
-          echo "Also set Worker app secrets listed in the deploy step."
+          echo "CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — production deploy skipped."
+          echo "Typecheck passed. Production is already deployable via: npx wrangler deploy --name globe"

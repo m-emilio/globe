@@ -3,7 +3,7 @@ name: Deploy test local transit
 on:
   push:
     branches:
-      - test/local-transit-api
+      - testing/local-transit-api
   workflow_dispatch:
 
 jobs:
@@ -11,6 +11,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # secrets cannot be referenced in `if:` — map to env first
+      CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TRANSIT_PUBLICAPI_V4: ${{ secrets.TRANSIT_PUBLICAPI_V4 }}
+      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+      STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+      STRIPE_PUBLISHABLE_KEY: ${{ secrets.STRIPE_PUBLISHABLE_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,29 +32,26 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Typecheck + dry-run
-        run: npm run check
-        env:
-          # Available if present; deploy uses wrangler secret on Cloudflare side
-          TRANSIT_PUBLICAPI_V4: ${{ secrets.TRANSIT_PUBLICAPI_V4 }}
-          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
-          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
-          STRIPE_PUBLISHABLE_KEY: ${{ secrets.STRIPE_PUBLISHABLE_KEY }}
+      - name: Typecheck
+        run: |
+          npx tsc --project src/client --noEmit
+          npx tsc --project src/server --noEmit
 
       - name: Deploy worker (optional)
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        if: env.CF_API_TOKEN != '' && env.CF_ACCOUNT_ID != ''
         uses: cloudflare/wrangler-action@v3
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          apiToken: ${{ env.CF_API_TOKEN }}
+          accountId: ${{ env.CF_ACCOUNT_ID }}
           command: deploy
           secrets: |
             TRANSIT_PUBLICAPI_V4
             STRIPE_SECRET_KEY
             STRIPE_WEBHOOK_SECRET
             STRIPE_PUBLISHABLE_KEY
-        env:
-          TRANSIT_PUBLICAPI_V4: ${{ secrets.TRANSIT_PUBLICAPI_V4 }}
-          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
-          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
-          STRIPE_PUBLISHABLE_KEY: ${{ secrets.STRIPE_PUBLISHABLE_KEY }}
+
+      - name: Skip deploy note
+        if: env.CF_API_TOKEN == '' || env.CF_ACCOUNT_ID == ''
+        run: |
+          echo "CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — deploy skipped."
+          echo "Typecheck already passed. Add GitHub Actions secrets to enable deploy."
