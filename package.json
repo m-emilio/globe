@@ -32,8 +32,9 @@
     "wrangler": "4.107.0"
   },
   "scripts": {
-    "build:client": "esbuild ./src/client/index.tsx --bundle --outdir=public/dist --format=esm --minify --legal-comments=none --tree-shaking=true && node scripts/apply-sri.mjs",
-    "build:client:dev": "esbuild ./src/client/index.tsx --bundle --outdir=public/dist --sourcemap --format=esm --minify --legal-comments=none --tree-shaking=true && node scripts/apply-sri.mjs",
+    "build:client": "esbuild ./src/client/index.tsx --bundle --outdir=public/dist --format=esm --minify --legal-comments=none --tree-shaking=true",
+    "build:client:sri": "npm run build:client && node scripts/apply-sri.mjs",
+    "build:client:dev": "esbuild ./src/client/index.tsx --bundle --outdir=public/dist --sourcemap --format=esm --minify --legal-comments=none --tree-shaking=true",
     "audit:deps": "npm audit --audit-level=moderate",
     "security:check": "npm run audit:deps && npm run check",
     "cf-typegen": "wrangler types ./src/server/worker-configuration.d.ts",

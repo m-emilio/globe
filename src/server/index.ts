@@ -200,6 +200,8 @@ const CONTENT_SECURITY_POLICY = [
 const SECURITY_HEADERS = {
   "content-security-policy": CONTENT_SECURITY_POLICY,
   "cross-origin-opener-policy": "same-origin",
+  // CORP same-origin is fine for API JSON. Static /dist assets set
+  // CORP cross-origin via public/_headers so SRI+crossorigin scripts load.
   "cross-origin-resource-policy": "same-origin",
   "origin-agent-cluster": "?1",
   "referrer-policy": "strict-origin-when-cross-origin",
