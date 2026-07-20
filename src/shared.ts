@@ -104,6 +104,17 @@ export type ComtradePreview = {
   availability: ComtradeAvailabilityPreview[];
   references: ComtradeReferencePreview[];
   reporters: ComtradeReporterPreview[];
+  /**
+   * public-preview: unauthenticated /public/v1 sample.
+   * free-subscription: Worker-held Free API key → /data/v1 (key never sent to client).
+   */
+  dataMode: "public-preview" | "free-subscription";
+  /** Path A: free public viz; Transit/Live Feed remain the paid product. */
+  accessTier: "free-public";
+  sampleLimit: number;
+  complianceNotes: string[];
+  /** True when Worker has COMTRADE_SUBSCRIPTION_KEY and used Free /data/v1 for trade rows. */
+  subscriptionBacked?: boolean;
   stale?: boolean;
 };
 
@@ -218,10 +229,25 @@ export type TradePulsePreview = {
   updatedAt: string;
   queryLabel: string;
   period: string;
-  dataMode: "derived-preview";
+  /**
+   * derived-preview: synthetic scenario routes.
+   * free-subscription: route values hydrated from Free /data/v1 (Worker key only).
+   */
+  dataMode: "derived-preview" | "free-subscription";
+  /** Path A: free public UI; not gated by Stripe Transit. */
+  accessTier: "free-public";
+  /** True only when Free API successfully hydrated route values (still not a bulk dump). */
+  isOfficialLiveStats: boolean;
+  /** True when Worker Free API key backed the trade values. */
+  subscriptionBacked?: boolean;
+  /** How many template routes got at least one live Free API row. */
+  liveRouteCount?: number;
+  /** Annual periods selectable in the UI (Free API). */
+  availablePeriods?: string[];
   routes: TradePulseRoutePreview[];
   metrics: TradePulseMetricPreview[];
   notes: string[];
+  complianceNotes: string[];
 };
 
 export type NearbyPathKind = "road" | "path" | "cycle" | "service" | "park";

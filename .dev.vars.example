@@ -26,3 +26,9 @@ ADMIN_FINGERPRINTS=
 # Or: ADMIN_USER_IDS=your_user_id_hex
 # Optional second factor for grant/revoke/claim:
 # ADMIN_ACTION_SECRET=long-random-string
+
+# Optional UN Comtrade Free APIs key (comtrade - v1 from comtradedeveloper.un.org).
+# Server-only: enables /data/v1; without it the Worker uses public /public/v1/preview.
+# Never commit a real key. Prefer:
+#   npx wrangler secret put COMTRADE_SUBSCRIPTION_KEY --name globe-security-test
+# COMTRADE_SUBSCRIPTION_KEY=

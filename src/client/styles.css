@@ -640,6 +640,7 @@ b {
   transition: opacity 120ms linear;
   animation: globe-arc-point-pulse 1.8s ease-in-out infinite;
   transform-origin: center;
+  pointer-events: none; /* only the + button is clickable */
 }
 
 .globe-arc-point::after {
@@ -655,6 +656,55 @@ b {
   width: 12px;
   height: 12px;
   animation-duration: 1.2s;
+}
+
+.globe-arc-point-open {
+  z-index: 6;
+  box-shadow: 0 0 20px var(--arc-color);
+}
+
+/* + button next to each Trade Pulse / route point */
+.globe-arc-plus {
+  position: absolute;
+  left: calc(100% + 4px);
+  top: 50%;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--arc-color) 75%, #fff 20%);
+  border-radius: 4px;
+  background: rgba(4, 8, 14, 0.92);
+  color: #f4fbff;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: auto;
+  transform: translateY(-50%);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--arc-color) 45%, transparent);
+}
+
+.globe-arc-plus:hover {
+  background: color-mix(in srgb, var(--arc-color) 55%, #0a1018);
+  color: #fff;
+}
+
+.globe-arc-point-destination .globe-arc-plus {
+  left: 50%;
+  top: calc(100% + 4px);
+  transform: translateX(-50%);
+}
+
+.globe-arc-point-relay .globe-arc-plus {
+  left: calc(100% + 4px);
+  top: calc(100% + 2px);
+  transform: none;
 }
 
 .globe-arc-label {
@@ -681,6 +731,213 @@ b {
   text-transform: uppercase;
   transform: translateX(-50%);
   white-space: nowrap;
+}
+
+/* Portaled to document.body so Trade Pulse / floating panels cannot cover it.
+   Snaps next to the globe point; header drag moves; SE handle resizes. */
+.globe-arc-comtrade-popup {
+  position: fixed;
+  z-index: 12000;
+  display: flex;
+  flex-direction: column;
+  min-width: 260px;
+  min-height: 200px;
+  max-width: min(520px, calc(100vw - 16px));
+  max-height: min(560px, calc(100vh - 16px));
+  overflow: hidden;
+  border: 1.5px solid color-mix(in srgb, var(--arc-color) 70%, #fff 15%);
+  border-radius: 8px;
+  background: rgba(4, 8, 14, 0.97);
+  box-shadow:
+    0 16px 48px rgba(0, 0, 0, 0.65),
+    0 0 28px color-mix(in srgb, var(--arc-color) 40%, transparent);
+  color: #eef6ff;
+  font-family: var(--font-ui);
+  pointer-events: auto;
+  text-align: left;
+  animation: globe-arc-comtrade-popup-in 140ms ease-out;
+}
+
+@keyframes globe-arc-comtrade-popup-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.globe-cobe-root:has(.globe-arc-point-open) .globe-cobe-sphere canvas {
+  cursor: default !important;
+}
+
+.globe-arc-comtrade-popup-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.globe-arc-comtrade-popup-header:active {
+  cursor: grabbing;
+}
+
+.globe-arc-comtrade-popup-header strong {
+  display: block;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  color: #fff;
+}
+
+.globe-arc-comtrade-popup-header span {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.78;
+  text-transform: capitalize;
+}
+
+.globe-arc-comtrade-drag-hint {
+  font-style: normal;
+  opacity: 0.55;
+  text-transform: none;
+}
+
+.globe-arc-comtrade-header-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.globe-arc-comtrade-close,
+.globe-arc-comtrade-snap {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.globe-arc-comtrade-close:hover,
+.globe-arc-comtrade-snap:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.globe-arc-comtrade-popup-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 12px;
+  overscroll-behavior: contain;
+}
+
+.globe-arc-comtrade-resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 0 0 6px 0;
+  background:
+    linear-gradient(
+      135deg,
+      transparent 0 45%,
+      rgba(255, 255, 255, 0.35) 46% 52%,
+      transparent 53% 68%,
+      rgba(255, 255, 255, 0.45) 69% 75%,
+      transparent 76%
+    );
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.globe-arc-comtrade-route {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--arc-color) 80%, #fff);
+}
+
+.globe-arc-comtrade-commodity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+
+.globe-arc-comtrade-commodity span {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.globe-arc-comtrade-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.globe-arc-comtrade-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.globe-arc-comtrade-grid span {
+  font-size: 10px;
+  opacity: 0.65;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.globe-arc-comtrade-grid strong {
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.globe-arc-comtrade-layers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.globe-arc-comtrade-layers span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--arc-color) 55%, transparent);
+  background: color-mix(in srgb, var(--arc-color) 18%, transparent);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.globe-arc-comtrade-insight {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: 0.88;
 }
 
 .globe-arc-point-destination .globe-arc-label {
@@ -2156,6 +2413,111 @@ b {
   text-transform: uppercase;
 }
 
+.compliance-banner {
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.18);
+  background: rgba(212, 175, 55, 0.06);
+  color: #b8c0c8;
+  font-size: 9px;
+  line-height: 1.45;
+  letter-spacing: 0.2px;
+}
+
+.compliance-banner-pulse {
+  border-bottom-color: rgba(255, 59, 59, 0.18);
+  background: rgba(255, 59, 59, 0.06);
+}
+
+.compliance-banner-live {
+  border-bottom-color: rgba(46, 204, 113, 0.28);
+  background: rgba(46, 204, 113, 0.08);
+  color: #c8d6cf;
+}
+
+.trade-pulse-year-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 59, 59, 0.16);
+}
+
+.trade-pulse-year-label {
+  color: #8f99a2;
+  font-size: 9px;
+  font-weight: bold;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.trade-pulse-year-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.trade-pulse-year-btn {
+  min-width: 52px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.28);
+  color: #c6ced6;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+}
+
+.trade-pulse-year-btn:hover:not(:disabled) {
+  border-color: rgba(255, 59, 59, 0.45);
+  color: #fff;
+}
+
+.trade-pulse-year-btn.active {
+  border-color: rgba(255, 59, 59, 0.7);
+  background: rgba(255, 59, 59, 0.16);
+  color: #ffb4b0;
+}
+
+.trade-pulse-year-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.menu-trade-pulse-years {
+  display: grid;
+  gap: 0;
+}
+
+.compliance-notes {
+  border-top-color: rgba(212, 175, 55, 0.18);
+}
+
+.compliance-notes strong {
+  color: #d4af37;
+}
+
+.menu-compliance-hint {
+  display: block;
+  margin-top: 6px;
+  color: #8f99a2;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.globe-arc-comtrade-disclaimer {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #8a939c;
+  font-size: 8px;
+  line-height: 1.4;
+  letter-spacing: 0.2px;
+}
+
 .trade-pulse-overlay {
   position: absolute;
   top: 40px;
@@ -2418,8 +2780,62 @@ b {
 }
 
 .auth-user-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  opacity: 0.95;
+  line-height: 1.35;
+}
+
+.auth-user-meta-status {
   opacity: 0.85;
+}
+
+/* Full fingerprint — never ellipsis/truncate */
+.auth-user-fingerprint {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: #ffd166;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  user-select: all;
+  line-height: 1.45;
+}
+
+.admin-identity-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0 14px;
+  padding: 12px;
+  border: 1px solid rgba(255, 209, 102, 0.35);
+  border-radius: 4px;
+  background: rgba(40, 28, 8, 0.55);
+  font-size: 11px;
+  color: #c9d4df;
+}
+
+.admin-fp-hex {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: #8dffc4;
   word-break: break-all;
+  user-select: all;
+  line-height: 1.4;
+}
+
+.admin-identity-status {
+  margin-top: 4px;
+  color: #ffd166;
+  font-weight: 600;
+}
+
+.admin-menu-item-locked {
+  opacity: 0.85;
+  border-color: rgba(255, 209, 102, 0.45) !important;
+  color: #ffd166 !important;
 }
 
 .auth-modal-backdrop {
@@ -2571,6 +2987,46 @@ b {
   color: rgba(210, 240, 224, 0.88);
   text-transform: none;
   letter-spacing: 0.01em;
+}
+
+.auth-mobile-hint {
+  margin: -6px 0 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 217, 255, 0.28);
+  background: rgba(0, 40, 50, 0.35);
+  color: rgba(200, 240, 255, 0.9);
+  line-height: 1.45;
+}
+
+.auth-ecdhe-title {
+  margin-top: 18px;
+  color: #c4bbff;
+}
+
+.auth-ecdhe-lab {
+  margin: 8px 0 12px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(124, 106, 247, 0.35);
+  background: rgba(40, 28, 70, 0.28);
+}
+
+.auth-ecdhe-lab textarea {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.auth-inline-ok {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(61, 255, 168, 0.35);
+  background: rgba(20, 60, 40, 0.35);
+  color: rgba(200, 255, 220, 0.92);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .auth-field {
@@ -2849,17 +3305,27 @@ button[aria-busy="true"],
   color: rgba(220, 255, 236, 0.85);
 }
 
-/* Local transit (Transit App Public API v4) */
-.transit-nav-btn {
+/* Local transit — compact icon (matches nearby / weather) */
+.transit-icon-btn {
   border-color: #7c6af7;
   color: #c4bbff;
 }
 
-.transit-nav-btn:hover,
-.transit-nav-btn.active {
-  background-color: rgba(124, 106, 247, 0.18);
-  color: #efeaff;
+.transit-icon-btn:hover {
+  background-color: #7c6af7;
+  color: #0a0e27;
+  box-shadow: 0 0 10px rgba(124, 106, 247, 0.55);
+}
+
+.transit-icon-btn-open {
+  background: rgba(124, 106, 247, 0.18);
   box-shadow: 0 0 12px rgba(124, 106, 247, 0.4);
+  color: #efeaff;
+}
+
+.transit-icon-btn svg circle {
+  fill: currentColor;
+  stroke: none;
 }
 
 .transit-panel {
@@ -5249,4 +5715,128 @@ button[aria-busy="true"],
   font-style: normal;
   opacity: 0.75;
   width: 100%;
+}
+
+.admin-users-filters {
+  flex-wrap: wrap;
+}
+
+.admin-users-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow: auto;
+  margin: 8px 0 12px;
+  padding: 4px;
+  border: 1px solid rgba(255, 180, 80, 0.2);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.admin-users-meta {
+  font-size: 11px;
+  opacity: 0.75;
+  padding: 2px 6px 6px;
+}
+
+.admin-user-row-wrap {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.admin-user-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto auto;
+  gap: 2px 10px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 180, 80, 0.22);
+  border-radius: 6px;
+  background: rgba(20, 16, 10, 0.55);
+  color: rgba(255, 240, 220, 0.9);
+  cursor: pointer;
+  font: inherit;
+}
+
+.admin-user-row:hover {
+  border-color: rgba(0, 217, 255, 0.45);
+  background: rgba(0, 40, 50, 0.35);
+}
+
+.admin-user-remove {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 90, 90, 0.45);
+  background: rgba(80, 20, 20, 0.45);
+  color: #ffb0b0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.admin-user-remove:hover:not(:disabled) {
+  background: rgba(140, 30, 30, 0.65);
+  border-color: rgba(255, 120, 120, 0.7);
+  color: #fff;
+}
+
+.admin-user-remove:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.admin-user-badge {
+  grid-row: 1 / span 3;
+  align-self: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 4px 6px;
+  border-radius: 4px;
+  min-width: 52px;
+  text-align: center;
+}
+
+.admin-user-badge.paid {
+  background: rgba(40, 160, 90, 0.25);
+  color: #8dffb5;
+  border: 1px solid rgba(80, 220, 130, 0.35);
+}
+
+.admin-user-badge.locked {
+  background: rgba(120, 60, 40, 0.3);
+  color: #ffb090;
+  border: 1px solid rgba(255, 140, 90, 0.3);
+}
+
+.admin-user-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #ffd08a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-user-fp {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  opacity: 0.85;
+  grid-column: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-user-uid,
+.admin-user-created {
+  font-size: 10px;
+  opacity: 0.7;
+  grid-column: 2;
 }

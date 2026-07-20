@@ -24,6 +24,12 @@ declare namespace Cloudflare {
 		STRIPE_PUBLISHABLE_KEY?: string;
 		/** Hosted Payment Link URL (buy.stripe.com/...) */
 		STRIPE_PAYMENT_LINK_URL?: string;
+		/**
+		 * Optional UN Comtrade Free APIs subscription key (comtrade - v1).
+		 * Worker secret only — never client/git. When set, trade data uses /data/v1
+		 * with Ocp-Apim-Subscription-Key; otherwise public /public/v1/preview.
+		 */
+		COMTRADE_SUBSCRIPTION_KEY?: string;
 		/** KV for auth users/sessions, entitlements, and catalog */
 		BILLING_KV: KVNamespace;
 	}

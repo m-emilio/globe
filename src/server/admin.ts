@@ -6,8 +6,10 @@
  * - Session alone is NOT enough for grant/revoke/claim (stolen token risk).
  * - Mutating actions require ALL of:
  *     1) Logged-in session whose fingerprint is in ADMIN_FINGERPRINTS (or id in ADMIN_USER_IDS)
- *     2) ADMIN_ACTION_SECRET (mandatory — fail closed if unset)
+ *     2) ADMIN_ACTION_SECRET Worker secret (mandatory — fail closed if unset; never store in KV)
  *     3) Short-lived elevation token from a fresh PGP signature (proves key still held)
+ * - Admin UI may generate a candidate secret in browser memory only; operator must set it
+ *   as a Cloudflare Worker secret (wrangler secret put / dashboard). Never KV, git, or logs.
  * - Read-only lookup/audit need (1) only.
  * - Empty ADMIN_FINGERPRINTS + ADMIN_USER_IDS ⇒ no admins (fail closed).
  */
@@ -19,9 +21,10 @@ import {
   getSessionUser,
   getUserByFingerprint,
   getUserById,
+  deleteUserAccount,
   isAdminUser,
   normalizeFingerprint,
-  rateLimitOrNull,
+  rateLimitDurable,
   setUserTransitPaid,
   type AuthEnv,
   type UserRecord,
@@ -115,132 +118,26 @@ function elevTokenKey(token: string) {
   return `admin:elev:${token}`;
 }
 
+/**
+ * Action secret from Worker secret / .dev.vars only — never KV or client storage.
+ * Rejects empty / placeholder values. Never log the value.
+ */
 function actionSecretConfigured(env: AdminEnv): string | null {
   const s = env.ADMIN_ACTION_SECRET?.trim() || "";
-  // Reject empty / placeholder values
   if (!s || s.length < 16) return null;
   if (/^(change-me|secret|password|todo|placeholder)/i.test(s)) return null;
   return s;
 }
 
-async function writeAudit(env: AdminEnv, entry: AuditEntry) {
-  if (!env.BILLING_KV) return;
-  const id = `${Date.now()}_${randomHex(4)}`;
-  await env.BILLING_KV.put(`admin:audit:${id}`, JSON.stringify(entry), {
-    expirationTtl: 60 * 60 * 24 * 180,
-  });
-}
-
 /**
- * Session + allowlist only (read paths).
- * Does NOT authorize grant/revoke/claim.
+ * Verify elevation token matches this admin session.
  */
-async function requireAdminSession(
+async function requireElevation(
   request: Request,
   env: AdminEnv,
+  user: UserRecord,
   applySecurityHeaders?: SecurityHeadersFn,
-): Promise<
-  | { ok: true; user: UserRecord; sessionId: string }
-  | { ok: false; response: Response }
-> {
-  const limited = rateLimitOrNull(
-    `admin:${clientIp(request)}`,
-    30,
-    60_000,
-    applySecurityHeaders,
-  );
-  if (limited) return { ok: false, response: limited };
-
-  const session = await getSessionUser(request, env);
-  if (!session) {
-    return {
-      ok: false,
-      response: json(
-        { error: "login_required", message: "Sign in as an admin." },
-        { status: 401 },
-        applySecurityHeaders,
-      ),
-    };
-  }
-
-  if (!isAdminUser(session.user, env)) {
-    await writeAudit(env, {
-      at: new Date().toISOString(),
-      adminUserId: session.user.id,
-      adminFingerprint: session.user.fingerprint,
-      action: "admin_denied",
-      detail: "not_on_allowlist",
-      ip: clientIp(request),
-      ok: false,
-    });
-    return {
-      ok: false,
-      response: json(
-        { error: "forbidden", message: "Admin access required." },
-        { status: 403 },
-        applySecurityHeaders,
-      ),
-    };
-  }
-
-  return { ok: true, user: session.user, sessionId: session.sessionId };
-}
-
-/**
- * Mutating admin actions: session allowlist + action secret + elevation token.
- * Fail closed if ADMIN_ACTION_SECRET is missing/weak.
- */
-async function requireAdminMutation(
-  request: Request,
-  env: AdminEnv,
-  applySecurityHeaders?: SecurityHeadersFn,
-): Promise<
-  | { ok: true; user: UserRecord; sessionId: string }
-  | { ok: false; response: Response }
-> {
-  const gate = await requireAdminSession(request, env, applySecurityHeaders);
-  if (!gate.ok) return gate;
-
-  const expectedSecret = actionSecretConfigured(env);
-  if (!expectedSecret) {
-    return {
-      ok: false,
-      response: json(
-        {
-          error: "admin_misconfigured",
-          message:
-            "ADMIN_ACTION_SECRET must be set (≥16 chars) for grant/revoke/claim. Fail-closed.",
-        },
-        { status: 503 },
-        applySecurityHeaders,
-      ),
-    };
-  }
-
-  const provided = request.headers.get("x-admin-action-secret")?.trim() || "";
-  if (!provided || !timingSafeEqualString(provided, expectedSecret)) {
-    await writeAudit(env, {
-      at: new Date().toISOString(),
-      adminUserId: gate.user.id,
-      adminFingerprint: gate.user.fingerprint,
-      action: "admin_secret_failed",
-      ip: clientIp(request),
-      ok: false,
-    });
-    return {
-      ok: false,
-      response: json(
-        {
-          error: "admin_secret_required",
-          message:
-            "Valid x-admin-action-secret header required for privileged admin actions.",
-        },
-        { status: 403 },
-        applySecurityHeaders,
-      ),
-    };
-  }
-
+): Promise<{ ok: true } | { ok: false; response: Response }> {
   const elev =
     request.headers.get("x-admin-elevation")?.trim() ||
     request.headers.get("x-admin-elevation-token")?.trim() ||
@@ -291,8 +188,8 @@ async function requireAdminMutation(
   }
 
   if (
-    elevRec.userId !== gate.user.id ||
-    elevRec.fingerprint !== gate.user.fingerprint ||
+    elevRec.userId !== user.id ||
+    elevRec.fingerprint !== user.fingerprint ||
     new Date(elevRec.expiresAt).getTime() <= Date.now()
   ) {
     await env.BILLING_KV.delete(elevTokenKey(elev));
@@ -308,6 +205,136 @@ async function requireAdminMutation(
       ),
     };
   }
+
+  return { ok: true };
+}
+
+async function writeAudit(env: AdminEnv, entry: AuditEntry) {
+  if (!env.BILLING_KV) return;
+  const id = `${Date.now()}_${randomHex(4)}`;
+  await env.BILLING_KV.put(`admin:audit:${id}`, JSON.stringify(entry), {
+    expirationTtl: 60 * 60 * 24 * 180,
+  });
+}
+
+/**
+ * Session + allowlist only (read paths).
+ * Does NOT authorize grant/revoke/claim.
+ */
+async function requireAdminSession(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<
+  | { ok: true; user: UserRecord; sessionId: string }
+  | { ok: false; response: Response }
+> {
+  const limited = await rateLimitDurable(
+    env,
+    `admin:${clientIp(request)}`,
+    30,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return { ok: false, response: limited };
+
+  const session = await getSessionUser(request, env);
+  if (!session) {
+    return {
+      ok: false,
+      response: json(
+        { error: "login_required", message: "Sign in as an admin." },
+        { status: 401 },
+        applySecurityHeaders,
+      ),
+    };
+  }
+
+  if (!isAdminUser(session.user, env)) {
+    await writeAudit(env, {
+      at: new Date().toISOString(),
+      adminUserId: session.user.id,
+      adminFingerprint: session.user.fingerprint,
+      action: "admin_denied",
+      detail: "not_on_allowlist",
+      ip: clientIp(request),
+      ok: false,
+    });
+    return {
+      ok: false,
+      response: json(
+        { error: "forbidden", message: "Admin access required." },
+        { status: 403 },
+        applySecurityHeaders,
+      ),
+    };
+  }
+
+  return { ok: true, user: session.user, sessionId: session.sessionId };
+}
+
+/**
+ * Mutating admin actions: session allowlist + action secret + elevation token.
+ * Fail closed if ADMIN_ACTION_SECRET Worker secret is missing/weak.
+ */
+async function requireAdminMutation(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<
+  | { ok: true; user: UserRecord; sessionId: string }
+  | { ok: false; response: Response }
+> {
+  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate;
+
+  const expectedSecret = actionSecretConfigured(env);
+  if (!expectedSecret) {
+    return {
+      ok: false,
+      response: json(
+        {
+          error: "admin_misconfigured",
+          message:
+            "ADMIN_ACTION_SECRET must be set as a Worker secret (≥16 chars) for grant/revoke/claim. Fail-closed. Never store in KV.",
+        },
+        { status: 503 },
+        applySecurityHeaders,
+      ),
+    };
+  }
+
+  const provided = request.headers.get("x-admin-action-secret")?.trim() || "";
+  if (!provided || !timingSafeEqualString(provided, expectedSecret)) {
+    await writeAudit(env, {
+      at: new Date().toISOString(),
+      adminUserId: gate.user.id,
+      adminFingerprint: gate.user.fingerprint,
+      action: "admin_secret_failed",
+      ip: clientIp(request),
+      ok: false,
+    });
+    return {
+      ok: false,
+      response: json(
+        {
+          error: "admin_secret_required",
+          message:
+            "Valid x-admin-action-secret header required for privileged admin actions.",
+        },
+        { status: 403 },
+        applySecurityHeaders,
+      ),
+    };
+  }
+
+  const elevGate = await requireElevation(
+    request,
+    env,
+    gate.user,
+    applySecurityHeaders,
+  );
+  if (!elevGate.ok) return elevGate;
 
   return gate;
 }
@@ -333,11 +360,20 @@ export async function adminStatus(
           "admin_action_secret",
           "pgp_step_up_elevation",
         ],
+        actionSecretStorage:
+          "Cloudflare Worker secret ADMIN_ACTION_SECRET only. Never KV, git, or browser storage.",
         note: "Client isAdmin is UI only; mutations re-verify on the server.",
       },
       capabilities: {
         read: ["lookup_user", "list_recent_audit", "elevate"],
-        mutate: ["grant_transit", "revoke_transit", "claim_session"],
+        /** list_users is elevated (PGP + action secret) — bulk directory, not open to session-only admin. */
+        elevatedRead: ["list_users"],
+        mutate: [
+          "grant_transit",
+          "revoke_transit",
+          "claim_session",
+          "delete_user",
+        ],
       },
     },
     { status: 200 },
@@ -370,7 +406,7 @@ export async function adminElevateChallenge(
       {
         error: "admin_misconfigured",
         message:
-          "Set ADMIN_ACTION_SECRET (≥16 random chars) in .dev.vars / secrets before elevation.",
+          "Set ADMIN_ACTION_SECRET (≥16 random chars) as a Cloudflare Worker secret before elevation. Never store it in KV.",
       },
       { status: 503 },
       applySecurityHeaders,
@@ -438,7 +474,8 @@ export async function adminElevate(
     );
   }
 
-  const limited = rateLimitOrNull(
+  const limited = await rateLimitDurable(
+    env,
     `admin:elevate:${gate.user.id}`,
     8,
     60_000,
@@ -1009,6 +1046,310 @@ export async function adminListAudit(
 
   return json(
     { entries: entries.slice(0, 40) },
+    { status: 200 },
+    applySecurityHeaders,
+  );
+}
+
+/**
+ * List all registered users (public fields only — never public keys).
+ * Requires full elevation: allowlisted session + action secret + PGP step-up.
+ * Accepts GET or POST (POST preferred — avoids intermediary GET quirks with admin headers).
+ * Paginated via KV cursor; filters scan additional pages when needed.
+ */
+export async function adminListUsers(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminMutation(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+
+  if (!env.BILLING_KV) {
+    return json(
+      { error: "kv_missing", users: [], cursor: null, complete: true },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+
+  const limited = await rateLimitDurable(
+    env,
+    `admin:list-users:${gate.user.id}`,
+    40,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
+
+  const url = new URL(request.url);
+  let body: {
+    limit?: number;
+    cursor?: string | null;
+    paid?: boolean | string;
+    locked?: boolean | string;
+  } = {};
+  if (request.method === "POST") {
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      body = {};
+    }
+  }
+
+  const rawLimit = Number(
+    body.limit ?? (url.searchParams.get("limit") || "100"),
+  );
+  const limit = Math.min(
+    200,
+    Math.max(1, Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 100),
+  );
+  let cursorParam =
+    (typeof body.cursor === "string" ? body.cursor.trim() : "") ||
+    url.searchParams.get("cursor")?.trim() ||
+    undefined;
+  const paidOnly =
+    body.paid === true ||
+    body.paid === "1" ||
+    url.searchParams.get("paid") === "1";
+  const lockedOnly =
+    body.locked === true ||
+    body.locked === "1" ||
+    url.searchParams.get("locked") === "1";
+
+  try {
+    const users: ReturnType<typeof publicUser>[] = [];
+    const seenIds = new Set<string>();
+    let complete = true;
+    let nextCursor: string | null = null;
+    // When filtering, scan up to a few KV pages so the first response isn't empty.
+    const maxPages = paidOnly || lockedOnly ? 8 : 1;
+    let filledEarly = false;
+
+    for (let page = 0; page < maxPages; page++) {
+      const listed = await env.BILLING_KV.list({
+        prefix: "auth:user:",
+        limit: Math.min(200, Math.max(limit, 50)),
+        ...(cursorParam ? { cursor: cursorParam } : {}),
+      });
+
+      for (const key of listed.keys) {
+        // Only accept expected user record keys (defense-in-depth against odd prefixes)
+        if (!/^auth:user:[a-f0-9]{16,64}$/i.test(key.name)) continue;
+        const raw = await env.BILLING_KV.get(key.name);
+        if (!raw) continue;
+        try {
+          const rec = JSON.parse(raw) as UserRecord;
+          if (!rec?.id || !rec?.fingerprint) continue;
+          // Never include private key material even if a corrupt record had extra fields
+          const pub = publicUser(rec);
+          if (paidOnly && !pub.transitPaid) continue;
+          if (lockedOnly && pub.transitPaid) continue;
+          if (seenIds.has(pub.id)) continue;
+          seenIds.add(pub.id);
+          users.push(pub);
+          if (users.length >= limit) {
+            filledEarly = true;
+            break;
+          }
+        } catch {
+          // skip corrupt records
+        }
+      }
+
+      complete = listed.list_complete;
+      nextCursor = listed.list_complete ? null : listed.cursor || null;
+      cursorParam = nextCursor || undefined;
+
+      if (users.length >= limit || listed.list_complete) break;
+    }
+
+    // If we stopped because the page filled mid-scan, more KV keys may remain
+    // even when list_complete is false; keep cursor for Load more. Client dedupes.
+    if (filledEarly && !complete && !nextCursor) {
+      // should not happen if KV returns cursor when incomplete; fail closed to complete
+      complete = true;
+    }
+
+    users.sort((a, b) => {
+      const ca = a.createdAt || "";
+      const cb = b.createdAt || "";
+      return cb.localeCompare(ca);
+    });
+
+    // Trim to requested limit after multi-page filter fill
+    const trimmed = users.slice(0, limit);
+
+    try {
+      await writeAudit(env, {
+        at: new Date().toISOString(),
+        adminUserId: gate.user.id,
+        adminFingerprint: gate.user.fingerprint,
+        action: "list_users",
+        detail: `count=${trimmed.length} complete=${complete}`,
+        ip: clientIp(request),
+        ok: true,
+      });
+    } catch {
+      // listing still succeeds if audit write fails
+    }
+
+    return json(
+      {
+        ok: true,
+        users: trimmed,
+        count: trimmed.length,
+        cursor: complete ? null : nextCursor,
+        complete,
+      },
+      { status: 200 },
+      applySecurityHeaders,
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "list_failed";
+    return json(
+      {
+        error: "list_failed",
+        message: `Could not list users from storage (${detail}).`,
+        users: [],
+        cursor: null,
+        complete: true,
+      },
+      { status: 500 },
+      applySecurityHeaders,
+    );
+  }
+}
+
+/**
+ * Permanently delete a user account (KV identity + sessions + entitlement index).
+ * Requires full elevation. Cannot delete your own admin session account.
+ */
+export async function adminDeleteUser(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminMutation(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+
+  const limited = await rateLimitDurable(
+    env,
+    `admin:delete-user:${gate.user.id}`,
+    20,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
+
+  let body: { userId?: string; fingerprint?: string; confirm?: string } = {};
+  try {
+    body = (await request.json()) as typeof body;
+    assertNoPrivateKeyMaterial(body);
+  } catch (error) {
+    if (error instanceof Error && error.message === "private_key_rejected") {
+      return json(
+        { error: "private_key_rejected" },
+        { status: 400 },
+        applySecurityHeaders,
+      );
+    }
+    body = {};
+  }
+
+  // Require explicit confirm token to avoid mis-clicks
+  if ((body.confirm || "").trim().toUpperCase() !== "DELETE") {
+    return json(
+      {
+        error: "confirm_required",
+        message: 'Send confirm: "DELETE" to permanently remove a user.',
+      },
+      { status: 400 },
+      applySecurityHeaders,
+    );
+  }
+
+  let user: UserRecord | null = null;
+  if (body.userId?.trim()) {
+    user = await getUserById(env, body.userId.trim());
+  }
+  if (!user && body.fingerprint?.trim()) {
+    user = await getUserByFingerprint(env, body.fingerprint.trim());
+  }
+  if (!user) {
+    return json(
+      {
+        error: "user_not_found",
+        message: "Provide a valid userId or fingerprint.",
+      },
+      { status: 404 },
+      applySecurityHeaders,
+    );
+  }
+
+  if (user.id === gate.user.id) {
+    return json(
+      {
+        error: "cannot_delete_self",
+        message: "You cannot delete the account for your own admin session.",
+      },
+      { status: 400 },
+      applySecurityHeaders,
+    );
+  }
+
+  // Do not allow elevated admins to wipe other allowlisted admin identities
+  // (compromised support key should not delete co-admins).
+  if (isAdminUser(user, env)) {
+    await writeAudit(env, {
+      at: new Date().toISOString(),
+      adminUserId: gate.user.id,
+      adminFingerprint: gate.user.fingerprint,
+      action: "delete_user_denied",
+      targetUserId: user.id,
+      targetFingerprint: user.fingerprint,
+      detail: "target_is_allowlisted_admin",
+      ip: clientIp(request),
+      ok: false,
+    });
+    return json(
+      {
+        error: "cannot_delete_admin",
+        message:
+          "Refusing to delete an allowlisted admin account. Remove them from ADMIN_FINGERPRINTS / ADMIN_USER_IDS first if intentional.",
+      },
+      { status: 403 },
+      applySecurityHeaders,
+    );
+  }
+
+  const removed = await deleteUserAccount(env, user.id);
+  if (!removed) {
+    return json(
+      { error: "delete_failed", message: "Could not delete user." },
+      { status: 500 },
+      applySecurityHeaders,
+    );
+  }
+
+  await writeAudit(env, {
+    at: new Date().toISOString(),
+    adminUserId: gate.user.id,
+    adminFingerprint: gate.user.fingerprint,
+    action: "delete_user",
+    targetUserId: removed.id,
+    targetFingerprint: removed.fingerprint,
+    detail: `sessions_revoked=${removed.sessionsRevoked}`,
+    ip: clientIp(request),
+    ok: true,
+  });
+
+  return json(
+    {
+      ok: true,
+      deleted: removed,
+      message: `User ${removed.id.slice(0, 12)}… permanently removed (${removed.sessionsRevoked} sessions revoked).`,
+    },
     { status: 200 },
     applySecurityHeaders,
   );

@@ -7,6 +7,38 @@ type GlobeMarker = {
   size: number;
 };
 
+/** Comtrade / Trade Pulse payload attached to globe route endpoints for + popups */
+export type GlobeArcComtradeDetail = {
+  routeId: string;
+  commodity: string;
+  commodityCode: string;
+  period: string;
+  originName: string;
+  originIso3: string;
+  destName: string;
+  destIso3: string;
+  hubName?: string | null;
+  hubIso3?: string | null;
+  transportMode: string;
+  customsProcedure: string;
+  valueUsd: number;
+  quantity: string;
+  supplierSharePct: number;
+  exportValueUsd: number;
+  importValueUsd: number;
+  asymmetryPct: number;
+  fobValueUsd: number;
+  cifValueUsd: number;
+  frictionPct: number;
+  reExportSharePct: number;
+  confidencePct: number;
+  severity: string;
+  layers: string[];
+  insight: string;
+  /** free-subscription when Worker hydrated from Free API */
+  dataMode?: "derived-preview" | "free-subscription";
+};
+
 export type GlobeArc = {
   id: string;
   from: [number, number];
@@ -19,6 +51,8 @@ export type GlobeArc = {
   width: number;
   dash: string;
   severity: string;
+  /** Optional Comtrade-shaped metrics for point + popups */
+  comtrade?: GlobeArcComtradeDetail;
 };
 
 interface CobeProps {
@@ -79,6 +113,8 @@ type RoutePoint = {
   severity: string;
   label: string;
   role: string;
+  countryName: string;
+  comtrade?: GlobeArcComtradeDetail;
 };
 
 type PreparedRoute = {
@@ -238,6 +274,8 @@ function getRoutePoints(routes: GlobeArc[]): RoutePoint[] {
       severity: route.severity,
       label: route.fromLabel ?? "Origin",
       role: "origin",
+      countryName: route.comtrade?.originName ?? route.fromLabel ?? "Origin",
+      comtrade: route.comtrade,
     },
     ...(route.via
       ? [
@@ -248,6 +286,9 @@ function getRoutePoints(routes: GlobeArc[]): RoutePoint[] {
             severity: route.severity,
             label: route.viaLabel ?? "Relay",
             role: "relay",
+            countryName:
+              route.comtrade?.hubName ?? route.viaLabel ?? "Relay",
+            comtrade: route.comtrade,
           },
         ]
       : []),
@@ -258,8 +299,25 @@ function getRoutePoints(routes: GlobeArc[]): RoutePoint[] {
       severity: route.severity,
       label: route.toLabel ?? "Destination",
       role: "destination",
+      countryName: route.comtrade?.destName ?? route.toLabel ?? "Destination",
+      comtrade: route.comtrade,
     },
   ]);
+}
+
+function formatPopupUsd(value: number): string {
+  if (!Number.isFinite(value)) return "n/a";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: Math.abs(value) >= 1_000_000 ? "compact" : "standard",
+    maximumFractionDigits: Math.abs(value) >= 1_000_000 ? 1 : 0,
+  }).format(value);
+}
+
+function formatPopupPct(value: number): string {
+  if (!Number.isFinite(value)) return "n/a";
+  return `${value.toFixed(1)}%`;
 }
 
 function prepareRouteOverlay(routes: GlobeArc[]): RouteOverlayData {
@@ -389,6 +447,11 @@ export function Cobe({
   }, [routeOverlayData]);
 
   const updatePointerRotation = (clientX: number, clientY: number, divisor: number) => {
+    // Hold globe still while a route-point Comtrade popup is open
+    if (isPopupHoldingGlobeRef.current) {
+      return;
+    }
+
     const interaction = pointerInteracting.current;
 
     if (interaction !== null) {
@@ -534,6 +597,173 @@ export function Cobe({
   }, []);
 
   const routePoints = routeOverlayData.points;
+  const [selectedPointKey, setSelectedPointKey] = useState<string | null>(null);
+  /** True when we paused auto-rotate only for a point popup (restore on close) */
+  const popupPausedRotateRef = useRef(false);
+  /** True while popup is open — freezes auto-rotate + drag so the view sticks */
+  const isPopupHoldingGlobeRef = useRef(false);
+  const popupRef = useRef<HTMLDivElement | null>(null);
+  const popupDragRef = useRef<{
+    mode: "move" | "resize";
+    startX: number;
+    startY: number;
+    originLeft: number;
+    originTop: number;
+    originW: number;
+    originH: number;
+  } | null>(null);
+  const [popupLayout, setPopupLayout] = useState({
+    left: 24,
+    top: 24,
+    width: 340,
+    height: 360,
+    /** User dragged the popup — stop auto re-snapping */
+    userMoved: false,
+    /** User resized — keep their size on next open */
+    userResized: false,
+  });
+  const selectedPoint =
+    routePoints.find((p) => p.key === selectedPointKey) ?? null;
+
+  const clampPopupLayout = (
+    left: number,
+    top: number,
+    width: number,
+    height: number,
+  ) => {
+    const minW = 260;
+    const minH = 200;
+    const maxW = Math.min(520, window.innerWidth - 16);
+    const maxH = Math.min(560, window.innerHeight - 16);
+    const w = Math.max(minW, Math.min(width, maxW));
+    const h = Math.max(minH, Math.min(height, maxH));
+    const l = Math.max(8, Math.min(left, window.innerWidth - w - 8));
+    const t = Math.max(8, Math.min(top, window.innerHeight - h - 8));
+    return { left: l, top: t, width: w, height: h };
+  };
+
+  /** Snap popup next to the selected globe point (viewport / fixed coordinates). */
+  const snapPopupToPoint = (pointKey: string) => {
+    const safe =
+      typeof CSS !== "undefined" && typeof CSS.escape === "function"
+        ? CSS.escape(pointKey)
+        : pointKey.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const pointEl = document.querySelector(
+      `[data-arc-point="${safe}"]`,
+    ) as HTMLElement | null;
+    if (!pointEl) return;
+
+    const pr = pointEl.getBoundingClientRect();
+    setPopupLayout((prev) => {
+      const width = prev.userResized ? prev.width : 340;
+      const height = prev.userResized ? prev.height : 360;
+      // Prefer right of point; flip left if it would overflow
+      let left = pr.right + 14;
+      let top = pr.top - 12;
+      if (left + width > window.innerWidth - 8) {
+        left = pr.left - width - 14;
+      }
+      if (top + height > window.innerHeight - 8) {
+        top = window.innerHeight - height - 8;
+      }
+      if (top < 8) top = 8;
+      if (left < 8) left = 8;
+      const clamped = clampPopupLayout(left, top, width, height);
+      return {
+        ...clamped,
+        userMoved: false,
+        userResized: prev.userResized,
+      };
+    });
+  };
+
+  const openRoutePointPopup = (key: string) => {
+    setSelectedPointKey(key);
+    isPopupHoldingGlobeRef.current = true;
+    // Pause spinning only if it was already moving (don't clobber user Off)
+    if (!isAutoRotatePausedRef.current) {
+      popupPausedRotateRef.current = true;
+      setAutoRotatePausedValue(true);
+    }
+    // Drop any active drag so the globe doesn't keep moving under the popup
+    pointerInteracting.current = null;
+    if (canvasRef.current) canvasRef.current.style.cursor = "grab";
+    // Snap after the point is painted in its frozen position
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => snapPopupToPoint(key));
+    });
+  };
+
+  const closeRoutePointPopup = () => {
+    setSelectedPointKey(null);
+    isPopupHoldingGlobeRef.current = false;
+    popupDragRef.current = null;
+    if (popupPausedRotateRef.current) {
+      popupPausedRotateRef.current = false;
+      setAutoRotatePausedValue(false);
+    }
+  };
+
+  // Clear popup when routes change / Trade Pulse closes; restore spin if we paused it
+  useEffect(() => {
+    if (
+      selectedPointKey &&
+      !routePoints.some((p) => p.key === selectedPointKey)
+    ) {
+      closeRoutePointPopup();
+    }
+  }, [routePoints, selectedPointKey]);
+
+  useEffect(() => {
+    const onPointerMove = (e: PointerEvent) => {
+      const drag = popupDragRef.current;
+      if (!drag) return;
+      e.preventDefault();
+      if (drag.mode === "move") {
+        const next = clampPopupLayout(
+          drag.originLeft + (e.clientX - drag.startX),
+          drag.originTop + (e.clientY - drag.startY),
+          drag.originW,
+          drag.originH,
+        );
+        setPopupLayout((prev) => ({
+          ...prev,
+          left: next.left,
+          top: next.top,
+          width: drag.originW,
+          height: drag.originH,
+          userMoved: true,
+        }));
+      } else {
+        const next = clampPopupLayout(
+          drag.originLeft,
+          drag.originTop,
+          drag.originW + (e.clientX - drag.startX),
+          drag.originH + (e.clientY - drag.startY),
+        );
+        setPopupLayout((prev) => ({
+          ...prev,
+          left: drag.originLeft,
+          top: drag.originTop,
+          width: next.width,
+          height: next.height,
+          userResized: true,
+        }));
+      }
+    };
+    const onPointerUp = () => {
+      popupDragRef.current = null;
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+    };
+  }, []);
+
   const [controlsSlot, setControlsSlot] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -683,7 +913,11 @@ export function Cobe({
           zIndex: 0,
         }}
       />
-      <div ref={routeOverlayRef} className="globe-arc-overlay" aria-hidden="true">
+      <div
+        ref={routeOverlayRef}
+        className="globe-arc-overlay"
+        aria-hidden={routePoints.length === 0}
+      >
         <svg className="globe-arc-svg" viewBox="0 0 400 400">
           <defs>
             <filter id="globe-arc-glow" x="-30%" y="-30%" width="160%" height="160%">
@@ -710,14 +944,46 @@ export function Cobe({
         </svg>
         {routePoints.map((point) => (
           <div
-            className={`globe-arc-point globe-arc-point-${point.severity} globe-arc-point-${point.role}`}
+            className={`globe-arc-point globe-arc-point-${point.severity} globe-arc-point-${point.role}${
+              selectedPointKey === point.key ? " globe-arc-point-open" : ""
+            }`}
             key={point.key}
+            data-arc-point={point.key}
             style={
               {
                 "--arc-color": point.color,
               } as React.CSSProperties
             }
           >
+            <button
+              type="button"
+              className="globe-arc-plus"
+              aria-label={
+                selectedPointKey === point.key
+                  ? `Close Comtrade data for ${point.countryName}`
+                  : `Show Comtrade data for ${point.countryName}`
+              }
+              title={
+                selectedPointKey === point.key
+                  ? "Close (resume globe)"
+                  : `${point.countryName} · Comtrade details (pauses globe)`
+              }
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                if (selectedPointKey === point.key) {
+                  closeRoutePointPopup();
+                } else {
+                  openRoutePointPopup(point.key);
+                }
+              }}
+            >
+              {selectedPointKey === point.key ? "×" : "+"}
+            </button>
             <span className="globe-arc-label">{point.label}</span>
           </div>
         ))}
@@ -728,6 +994,10 @@ export function Cobe({
         height={400}
         onPointerDown={(e) => {
           e.preventDefault();
+          // Don't start a drag while a point popup is holding the globe still
+          if (isPopupHoldingGlobeRef.current) {
+            return;
+          }
           pointerInteracting.current = {
             startX: e.clientX,
             startY: e.clientY,
@@ -801,6 +1071,208 @@ export function Cobe({
         )}
       </div>
       </div>
+
+      {selectedPoint?.comtrade &&
+        createPortal(
+          <div
+            ref={popupRef}
+            className="globe-arc-comtrade-popup"
+            role="dialog"
+            aria-label={`Comtrade data for ${selectedPoint.countryName}`}
+            style={
+              {
+                "--arc-color": selectedPoint.color,
+                left: popupLayout.left,
+                top: popupLayout.top,
+                width: popupLayout.width,
+                height: popupLayout.height,
+              } as React.CSSProperties
+            }
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div
+              className="globe-arc-comtrade-popup-header"
+              title="Drag to move"
+              onPointerDown={(e) => {
+                if ((e.target as HTMLElement).closest("button")) return;
+                e.preventDefault();
+                e.stopPropagation();
+                popupDragRef.current = {
+                  mode: "move",
+                  startX: e.clientX,
+                  startY: e.clientY,
+                  originLeft: popupLayout.left,
+                  originTop: popupLayout.top,
+                  originW: popupLayout.width,
+                  originH: popupLayout.height,
+                };
+                (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+              }}
+            >
+              <div>
+                <strong>{selectedPoint.countryName}</strong>
+                <span>
+                  {selectedPoint.role === "origin"
+                    ? "Origin"
+                    : selectedPoint.role === "relay"
+                      ? "Intermediary hub"
+                      : "Destination"}{" "}
+                  · {selectedPoint.comtrade.severity}
+                  <em className="globe-arc-comtrade-drag-hint"> · drag header to move</em>
+                </span>
+              </div>
+              <div className="globe-arc-comtrade-header-actions">
+                <button
+                  type="button"
+                  className="globe-arc-comtrade-snap"
+                  aria-label="Snap popup next to point"
+                  title="Snap next to point"
+                  onClick={() => {
+                    if (selectedPointKey) snapPopupToPoint(selectedPointKey);
+                  }}
+                >
+                  ⊡
+                </button>
+                <button
+                  type="button"
+                  className="globe-arc-comtrade-close"
+                  aria-label="Close Comtrade popup and resume globe"
+                  onClick={() => closeRoutePointPopup()}
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+            <div className="globe-arc-comtrade-popup-body">
+              <p className="globe-arc-comtrade-route">
+                {selectedPoint.comtrade.originIso3} →{" "}
+                {selectedPoint.comtrade.destIso3}
+                {selectedPoint.comtrade.hubIso3
+                  ? ` via ${selectedPoint.comtrade.hubIso3}`
+                  : ""}
+              </p>
+              <p className="globe-arc-comtrade-commodity">
+                <strong>{selectedPoint.comtrade.commodity}</strong>
+                <span>HS {selectedPoint.comtrade.commodityCode}</span>
+              </p>
+              <div className="globe-arc-comtrade-grid">
+                <div>
+                  <span>Period</span>
+                  <strong>{selectedPoint.comtrade.period}</strong>
+                </div>
+                <div>
+                  <span>Value</span>
+                  <strong>
+                    {formatPopupUsd(selectedPoint.comtrade.valueUsd)}
+                  </strong>
+                </div>
+                <div>
+                  <span>Quantity</span>
+                  <strong>{selectedPoint.comtrade.quantity || "n/a"}</strong>
+                </div>
+                <div>
+                  <span>Transport</span>
+                  <strong>{selectedPoint.comtrade.transportMode}</strong>
+                </div>
+                <div>
+                  <span>Supplier share</span>
+                  <strong>
+                    {formatPopupPct(selectedPoint.comtrade.supplierSharePct)}
+                  </strong>
+                </div>
+                <div>
+                  <span>Mirror gap</span>
+                  <strong>
+                    {formatPopupPct(selectedPoint.comtrade.asymmetryPct)}
+                  </strong>
+                </div>
+                <div>
+                  <span>Export</span>
+                  <strong>
+                    {formatPopupUsd(selectedPoint.comtrade.exportValueUsd)}
+                  </strong>
+                </div>
+                <div>
+                  <span>Import</span>
+                  <strong>
+                    {formatPopupUsd(selectedPoint.comtrade.importValueUsd)}
+                  </strong>
+                </div>
+                <div>
+                  <span>FOB</span>
+                  <strong>
+                    {formatPopupUsd(selectedPoint.comtrade.fobValueUsd)}
+                  </strong>
+                </div>
+                <div>
+                  <span>CIF</span>
+                  <strong>
+                    {formatPopupUsd(selectedPoint.comtrade.cifValueUsd)}
+                  </strong>
+                </div>
+                <div>
+                  <span>CIF/FOB friction</span>
+                  <strong>
+                    {formatPopupPct(selectedPoint.comtrade.frictionPct)}
+                  </strong>
+                </div>
+                <div>
+                  <span>Re-export</span>
+                  <strong>
+                    {formatPopupPct(selectedPoint.comtrade.reExportSharePct)}
+                  </strong>
+                </div>
+                <div>
+                  <span>Confidence</span>
+                  <strong>
+                    {formatPopupPct(selectedPoint.comtrade.confidencePct)}
+                  </strong>
+                </div>
+                <div>
+                  <span>Procedure</span>
+                  <strong>{selectedPoint.comtrade.customsProcedure}</strong>
+                </div>
+              </div>
+              {selectedPoint.comtrade.layers.length > 0 && (
+                <div className="globe-arc-comtrade-layers">
+                  {selectedPoint.comtrade.layers.map((layer) => (
+                    <span key={layer}>{layer}</span>
+                  ))}
+                </div>
+              )}
+              <p className="globe-arc-comtrade-insight">
+                {selectedPoint.comtrade.insight}
+              </p>
+              <p className="globe-arc-comtrade-disclaimer">
+                {selectedPoint.comtrade.period}
+                {selectedPoint.comtrade.dataMode === "free-subscription"
+                  ? " · UN Comtrade"
+                  : " · Preview"}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="globe-arc-comtrade-resize"
+              aria-label="Resize popup"
+              title="Drag to resize"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                popupDragRef.current = {
+                  mode: "resize",
+                  startX: e.clientX,
+                  startY: e.clientY,
+                  originLeft: popupLayout.left,
+                  originTop: popupLayout.top,
+                  originW: popupLayout.width,
+                  originH: popupLayout.height,
+                };
+                (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+              }}
+            />
+          </div>,
+          document.body,
+        )}
 
       {controlsSlot ? createPortal(globeControls, controlsSlot) : null}
     </div>

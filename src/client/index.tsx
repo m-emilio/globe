@@ -1,11 +1,16 @@
 import "./styles.css";
 
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, {
+  Suspense,
+  lazy,
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { Cobe, type GlobeArc } from "./CobeGlobe";
 import { FloatingChrome } from "./FloatingChrome";
-import { NearbyMap } from "./NearbyMap";
-import { TransitPanelContent } from "./TransitPanelContent";
 import {
   ActivityFeed,
   createActivityEvent,
@@ -32,9 +37,11 @@ import {
   containsPrivateKeyBlock,
   deleteDeviceKey,
   downloadPrivateKeyFile,
+  ensureOpenPgp,
   exportPrivateKeyToArmoredFile,
   formatFingerprint,
   generateAndKeepOnDevice,
+  requestPersistentDeviceStorage,
   getDeviceKey,
   getKeyGenProfile,
   getPreferredDeviceKey,
@@ -59,6 +66,58 @@ import {
   type S2kProtocolId,
   type SymmetricCipherId,
 } from "./pgpAuth";
+
+/** Heavy panels — loaded only when opened (keeps initial shell small). */
+const NearbyMap = lazy(() =>
+  import("./NearbyMap").then((m) => ({ default: m.NearbyMap })),
+);
+const TransitPanelContent = lazy(() =>
+  import("./TransitPanelContent").then((m) => ({
+    default: m.TransitPanelContent,
+  })),
+);
+
+/** ECDHE lab types/labels only — implementation loaded on demand via import("./ecdhe") */
+type EcdheCurveId = "P-256" | "P-384" | "P-521" | "X25519";
+type EcdheEphemeralPair = {
+  curve: EcdheCurveId;
+  privateKey: CryptoKey;
+  publicKey: CryptoKey;
+  publicKeyJwk: JsonWebKey;
+  publicKeySpkiB64: string;
+  createdAt: string;
+};
+const ECDHE_CURVE_META: Record<
+  EcdheCurveId,
+  { label: string; description: string; securityBits: number }
+> = {
+  "P-256": {
+    label: "ECDHE P-256 (secp256r1)",
+    description: "NIST P-256 ECDH — wide WebCrypto support.",
+    securityBits: 128,
+  },
+  "P-384": {
+    label: "ECDHE P-384",
+    description: "NIST P-384 ECDH — CNSA classical key-agreement curve.",
+    securityBits: 192,
+  },
+  "P-521": {
+    label: "ECDHE P-521",
+    description: "NIST P-521 ECDH — highest NIST prime curve here.",
+    securityBits: 256,
+  },
+  X25519: {
+    label: "X25519 (ECDH)",
+    description:
+      "Modern Montgomery ECDH. Requires a recent browser with WebCrypto X25519.",
+    securityBits: 128,
+  },
+};
+const ECDHE_CURVE_IDS = Object.keys(ECDHE_CURVE_META) as EcdheCurveId[];
+
+async function loadEcdhe() {
+  return import("./ecdhe");
+}
 type WeatherStatus = "idle" | "loading" | "ready" | "error";
 type NearbyStatus = "idle" | "loading" | "ready" | "error";
 type TransitStatus = "idle" | "loading" | "ready" | "error";
@@ -776,13 +835,15 @@ function App() {
   const [comtradeValueMode, setComtradeValueMode] =
     useState<ComtradeValueMode>("compact");
   const [showTradePulsePanel, setShowTradePulsePanel] = useState(isTradePulsePreview);
+  /** Start minimized so the globe (and point + popups) stay primary */
   const [isTradePulsePanelMinimized, setIsTradePulsePanelMinimized] =
-    useState(false);
+    useState(true);
   const [tradePulseStatus, setTradePulseStatus] = useState<TradePulseStatus>("idle");
   const [tradePulsePreview, setTradePulsePreview] = useState<TradePulsePreview | null>(
     null,
   );
   const [tradePulseError, setTradePulseError] = useState("");
+  const [tradePulsePeriod, setTradePulsePeriod] = useState("2023");
   const [tradePulseLayers, setTradePulseLayers] = useState(DEFAULT_TRADE_PULSE_LAYERS);
   const [showUnGlobalPanel, setShowUnGlobalPanel] = useState(false);
   const [isUnGlobalPanelMinimized, setIsUnGlobalPanelMinimized] = useState(false);
@@ -818,6 +879,13 @@ function App() {
   const [authError, setAuthError] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [showAuthPanel, setShowAuthPanel] = useState(false);
+  // Prefetch OpenPGP (~380KB) only when Auth is open — not on first paint
+  useEffect(() => {
+    if (!showAuthPanel) return;
+    void ensureOpenPgp().catch(() => {
+      // Loaded on demand when user signs in / generates; ignore idle prefetch errors
+    });
+  }, [showAuthPanel]);
   const [authUser, setAuthUser] = useState<{
     id: string;
     fingerprint: string;
@@ -825,6 +893,8 @@ function App() {
     transitPaid: boolean;
   } | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [adminAllowlistConfigured, setAdminAllowlistConfigured] =
+    useState(false);
   const [adminSecretRequired, setAdminSecretRequired] = useState(true);
   const [adminSecretConfigured, setAdminSecretConfigured] = useState(false);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
@@ -839,6 +909,13 @@ function App() {
   const [adminSessionId, setAdminSessionId] = useState("");
   /** Memory-only — never persisted; required for grant/revoke/claim. */
   const [adminActionSecret, setAdminActionSecret] = useState("");
+  /**
+   * One-time reveal after Generate/Rotate. Memory only; cleared when panel closes.
+   * Never written to localStorage / IndexedDB.
+   */
+  const [adminSecretRevealOnce, setAdminSecretRevealOnce] = useState<
+    string | null
+  >(null);
   /** Memory-only elevation after PGP step-up (10 min server TTL). */
   const [adminElevationToken, setAdminElevationToken] = useState<string | null>(
     null,
@@ -856,6 +933,19 @@ function App() {
       detail?: string;
     }[]
   >([]);
+  type AdminUserRow = {
+    id: string;
+    fingerprint: string;
+    primaryUserId: string | null;
+    transitPaid: boolean;
+    createdAt?: string;
+  };
+  const [adminUsers, setAdminUsers] = useState<AdminUserRow[]>([]);
+  const [adminUsersCursor, setAdminUsersCursor] = useState<string | null>(null);
+  const [adminUsersComplete, setAdminUsersComplete] = useState(true);
+  const [adminUsersFilter, setAdminUsersFilter] = useState<
+    "all" | "paid" | "locked"
+  >("all");
   const [adminBusy, setAdminBusy] = useState(false);
   const [adminMessage, setAdminMessage] = useState("");
   const [adminError, setAdminError] = useState("");
@@ -888,6 +978,16 @@ function App() {
   const [exportAllowUnencrypted, setExportAllowUnencrypted] = useState(false);
   const [showImportDevice, setShowImportDevice] = useState(false);
   const [importKeyText, setImportKeyText] = useState("");
+  // Experimental ECDHE (ephemeral WebCrypto) — memory only, not for OpenPGP login
+  const [showEcdheLab, setShowEcdheLab] = useState(false);
+  const [ecdheCurve, setEcdheCurve] = useState<EcdheCurveId>("P-256");
+  const [ecdheSupported, setEcdheSupported] = useState<EcdheCurveId[]>([]);
+  const [ecdhePair, setEcdhePair] = useState<EcdheEphemeralPair | null>(null);
+  const [ecdhePeerPub, setEcdhePeerPub] = useState("");
+  const [ecdheSharedFp, setEcdheSharedFp] = useState("");
+  const [ecdheBusy, setEcdheBusy] = useState(false);
+  const [ecdheMessage, setEcdheMessage] = useState("");
+  const [ecdheError, setEcdheError] = useState("");
   const navBarRef = useRef<HTMLElement | null>(null);
 
   type AuthUser = {
@@ -905,20 +1005,24 @@ function App() {
         user?: AuthUser | null;
         isAdmin?: boolean;
         adminActionSecretRequired?: boolean;
+        adminAllowlistConfigured?: boolean;
       };
       if (data.authenticated && data.user?.fingerprint) {
         setAuthUser(data.user);
         setIsAdmin(Boolean(data.isAdmin));
         setAdminSecretRequired(Boolean(data.adminActionSecretRequired));
+        setAdminAllowlistConfigured(Boolean(data.adminAllowlistConfigured));
         return data.user;
       }
       setAuthUser(null);
       setIsAdmin(false);
       setAdminSecretRequired(false);
+      setAdminAllowlistConfigured(false);
       return null;
     } catch {
       setAuthUser(null);
       setIsAdmin(false);
+      setAdminAllowlistConfigured(false);
       return null;
     }
   };
@@ -952,15 +1056,158 @@ function App() {
     }
   };
 
+  /**
+   * Elevated directory: requires unlock + action secret (same gate as mutations).
+   * Returns public fields only (no keys). Uses POST so admin headers are reliable.
+   */
+  const loadAdminUsers = async (opts?: {
+    append?: boolean;
+    cursor?: string | null;
+  }) => {
+    setAdminBusy(true);
+    setAdminError("");
+    try {
+      if (!adminElevationValid()) {
+        throw new Error("Unlock privileges first (PGP step-up).");
+      }
+      if (!adminActionSecret.trim()) {
+        throw new Error("Enter ADMIN_ACTION_SECRET to list all users.");
+      }
+      const res = await authFetch("/api/admin/users", {
+        method: "POST",
+        headers: adminHeaders(),
+        body: JSON.stringify({
+          limit: 100,
+          cursor: opts?.cursor ?? null,
+          paid: adminUsersFilter === "paid",
+          locked: adminUsersFilter === "locked",
+        }),
+      });
+      const data = (await res.json()) as {
+        users?: AdminUserRow[];
+        cursor?: string | null;
+        complete?: boolean;
+        count?: number;
+        message?: string;
+        error?: string;
+      };
+      if (!res.ok) {
+        const code = data.error || "";
+        if (code === "rate_limited") {
+          throw new Error(
+            "Too many admin list requests. Wait about a minute, then Load users again.",
+          );
+        }
+        if (code === "elevation_expired" || code === "elevation_required") {
+          throw new Error(
+            "Admin elevation expired. Unlock privileges (PGP step-up) again, then Load users.",
+          );
+        }
+        if (code === "admin_secret_required") {
+          throw new Error(
+            "Action secret rejected. Paste the current ADMIN_ACTION_SECRET Worker secret, then retry.",
+          );
+        }
+        throw new Error(data.message || data.error || "Could not list users");
+      }
+      const next = data.users || [];
+      setAdminUsers((prev) => {
+        const merged = opts?.append ? [...prev, ...next] : next;
+        // Dedupe by id (pagination / filter rescans can overlap)
+        const seen = new Set<string>();
+        const deduped = merged.filter((u) => {
+          if (!u?.id || seen.has(u.id)) return false;
+          seen.add(u.id);
+          return true;
+        });
+        setAdminMessage(
+          `Loaded ${deduped.length} user(s)${
+            data.complete === false ? " (more available)" : ""
+          }.`,
+        );
+        return deduped;
+      });
+      setAdminUsersCursor(data.cursor ?? null);
+      setAdminUsersComplete(Boolean(data.complete ?? true));
+      try {
+        await loadAdminAudit();
+      } catch {
+        // list still succeeds if audit refresh fails
+      }
+    } catch (error) {
+      setAdminError(
+        error instanceof Error ? error.message : "List users failed",
+      );
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  /** Permanently remove a user (elevated). Confirms in the browser first. */
+  const adminDeleteUser = async (target?: AdminUserRow | null) => {
+    const user = target || adminLookupUser;
+    if (!user) {
+      setAdminError("Select or lookup a user before removing.");
+      return;
+    }
+    const short = user.id.slice(0, 12);
+    const ok = window.confirm(
+      `Permanently DELETE user ${short}…?\n\nFingerprint: ${user.fingerprint}\nThis revokes sessions and removes the account from the app. Cannot be undone.`,
+    );
+    if (!ok) return;
+
+    setAdminBusy(true);
+    setAdminError("");
+    setAdminMessage("");
+    try {
+      if (!adminElevationValid()) {
+        throw new Error("Unlock privileges first (PGP step-up).");
+      }
+      if (!adminActionSecret.trim()) {
+        throw new Error("Enter ADMIN_ACTION_SECRET before deleting users.");
+      }
+      const res = await authFetch("/api/admin/delete-user", {
+        method: "POST",
+        headers: adminHeaders(),
+        body: JSON.stringify({
+          userId: user.id,
+          fingerprint: user.fingerprint,
+          confirm: "DELETE",
+        }),
+      });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        message?: string;
+        error?: string;
+      };
+      if (!res.ok) {
+        throw new Error(data.message || data.error || "Delete failed");
+      }
+      setAdminLookupUser(null);
+      setAdminUsers((prev) => prev.filter((u) => u.id !== user.id));
+      setAdminMessage(data.message || "User deleted.");
+      await loadAdminAudit();
+    } catch (error) {
+      setAdminError(
+        error instanceof Error ? error.message : "Delete user failed",
+      );
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
   const clearAdminElevation = () => {
     setAdminElevationToken(null);
     setAdminElevationExpiresAt(null);
+    setAdminUsers([]);
+    setAdminUsersCursor(null);
+    setAdminUsersComplete(true);
   };
 
   /**
    * PGP step-up: sign a server challenge with the device private key.
-   * Does NOT need ADMIN_ACTION_SECRET in the form — that is only checked
-   * on grant/revoke/claim. Private key never leaves the browser.
+   * Does NOT need the action secret — that is only checked on grant/revoke/claim
+   * and on rotate when a secret already exists. Private key never leaves the browser.
    */
   const unlockAdminPrivileges = async () => {
     setAdminBusy(true);
@@ -983,7 +1230,7 @@ function App() {
         throw new Error(
           chal.message ||
             chal.error ||
-            "Could not start admin elevation (is ADMIN_ACTION_SECRET set in .dev.vars?)",
+            "Could not start admin elevation. Sign in with an allowlisted admin key.",
         );
       }
 
@@ -1047,10 +1294,42 @@ function App() {
     }
   };
 
+  /**
+   * Generate a strong action-secret candidate in the browser only.
+   * Never sent to the server for storage. Operator must set it as a Cloudflare
+   * Worker secret (wrangler secret put ADMIN_ACTION_SECRET) for the server to accept it.
+   * Memory-only reveal for this panel — no localStorage / IndexedDB.
+   */
+  const generateAdminActionSecret = () => {
+    setAdminError("");
+    setAdminSecretRevealOnce(null);
+    try {
+      if (!isAdmin) {
+        throw new Error("Admin only.");
+      }
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      const secret = [...bytes]
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      // Memory only — never persisted client-side or uploaded for storage.
+      setAdminActionSecret(secret);
+      setAdminSecretRevealOnce(secret);
+      setAdminMessage(
+        "Generated in this browser only. Copy it, then set as a Worker secret: npx wrangler secret put ADMIN_ACTION_SECRET --name globe  (and the same for local .dev.vars). Server never stores this from the UI.",
+      );
+    } catch (error) {
+      setAdminError(
+        error instanceof Error ? error.message : "Generate secret failed",
+      );
+    }
+  };
+
   const openAdminPanel = async () => {
     setShowMenu(false);
     setAdminError("");
     setAdminMessage("");
+    setAdminSecretRevealOnce(null);
     clearAdminElevation();
     const user = await refreshAuth();
     if (!user) {
@@ -1061,32 +1340,61 @@ function App() {
     }
     try {
       const res = await authFetch("/api/auth/me");
-      const data = (await res.json()) as { isAdmin?: boolean };
+      const data = (await res.json()) as {
+        isAdmin?: boolean;
+        adminAllowlistConfigured?: boolean;
+        adminActionSecretRequired?: boolean;
+      };
+      setIsAdmin(Boolean(data.isAdmin));
+      setAdminAllowlistConfigured(Boolean(data.adminAllowlistConfigured));
+      setAdminSecretRequired(Boolean(data.adminActionSecretRequired));
       if (!data.isAdmin) {
-        setAuthError(
-          "This key is signed in but not on ADMIN_FINGERPRINTS. Add your full fingerprint to .dev.vars and restart.",
+        const fp = formatFingerprint(user.fingerprint);
+        const hex = user.fingerprint.replace(/[\s:]/g, "").toLowerCase();
+        setAdminError(
+          !data.adminAllowlistConfigured
+            ? `No admin allowlist on the server. Set Cloudflare secret ADMIN_FINGERPRINTS to your fingerprint (no spaces):\n${hex}`
+            : `This signed-in key is not on ADMIN_FINGERPRINTS.\n\nYour full fingerprint (copy into Cloudflare Worker secret ADMIN_FINGERPRINTS):\n${hex}\n\nFormatted:\n${fp}`,
         );
+        // Still open panel so the message + fingerprint are visible
+        setShowAdminPanel(true);
         return;
       }
-      setIsAdmin(true);
     } catch {
-      // fall through
+      setAdminError("Could not verify admin status. Try signing out and back in.");
+      setShowAdminPanel(true);
+      return;
     }
     try {
       const st = await authFetch("/api/admin/status");
       const stData = (await st.json()) as {
         actionSecretConfigured?: boolean;
         actionSecretRequired?: boolean;
+        error?: string;
+        message?: string;
       };
       if (st.ok) {
         setAdminSecretConfigured(Boolean(stData.actionSecretConfigured));
         setAdminSecretRequired(Boolean(stData.actionSecretRequired ?? true));
+      } else {
+        setAdminError(
+          stData.message ||
+            stData.error ||
+            "Admin status denied by server (allowlist or session).",
+        );
       }
     } catch {
       // ignore
     }
     setShowAdminPanel(true);
-    await loadAdminAudit();
+    if (isAdmin || true) {
+      // load audit only when server allows (fails closed otherwise)
+      try {
+        await loadAdminAudit();
+      } catch {
+        // ignore
+      }
+    }
   };
 
   const adminLookup = async () => {
@@ -1266,10 +1574,100 @@ function App() {
    * - OpenPGP layer unencrypted by default → login needs no password
    * - At rest: AES-GCM wrapped with non-extractable device-bound WebCrypto key
    */
+  const refreshEcdheSupport = async () => {
+    try {
+      const { listSupportedEcdheCurves } = await loadEcdhe();
+      const list = await listSupportedEcdheCurves();
+      const ids = list.map((c) => c.id);
+      setEcdheSupported(ids);
+      if (ids.length && !ids.includes(ecdheCurve)) {
+        setEcdheCurve(ids[0]!);
+      }
+    } catch {
+      setEcdheSupported([]);
+    }
+  };
+
+  const handleEcdheGenerate = async () => {
+    setEcdheBusy(true);
+    setEcdheError("");
+    setEcdheMessage("");
+    setEcdheSharedFp("");
+    try {
+      const { generateEcdheKeyPair } = await loadEcdhe();
+      const pair = await generateEcdheKeyPair(ecdheCurve);
+      setEcdhePair(pair);
+      setEcdheMessage(
+        `Ephemeral ${ECDHE_CURVE_META[ecdheCurve].label} key pair ready. Private key is non-extractable in memory only (not for OpenPGP login). Share the public SPKI/JWK with a peer, then derive.`,
+      );
+    } catch (error) {
+      setEcdhePair(null);
+      setEcdheError(
+        error instanceof Error ? error.message : "ECDHE generate failed",
+      );
+    } finally {
+      setEcdheBusy(false);
+    }
+  };
+
+  const handleEcdheDerive = async () => {
+    setEcdheBusy(true);
+    setEcdheError("");
+    setEcdheMessage("");
+    try {
+      if (!ecdhePair) {
+        throw new Error("Generate a local ephemeral key pair first.");
+      }
+      const { importEcdhePeerPublicKey, deriveEcdheSession } = await loadEcdhe();
+      const peer = await importEcdhePeerPublicKey(
+        ecdhePair.curve,
+        ecdhePeerPub,
+      );
+      const derived = await deriveEcdheSession(
+        ecdhePair.privateKey,
+        peer,
+        ecdhePair.curve,
+      );
+      setEcdheSharedFp(derived.sharedSecretSha256Hex);
+      setEcdheMessage(
+        `ECDHE shared secret agreed (${derived.sharedBitsLength}-bit field). Showing SHA-256 fingerprint only; AES-GCM session key is non-extractable in memory.`,
+      );
+    } catch (error) {
+      setEcdheSharedFp("");
+      setEcdheError(
+        error instanceof Error ? error.message : "ECDHE derive failed",
+      );
+    } finally {
+      setEcdheBusy(false);
+    }
+  };
+
+  const handleEcdheSelfTest = async () => {
+    setEcdheBusy(true);
+    setEcdheError("");
+    setEcdheMessage("");
+    try {
+      const { ecdheSelfTest } = await loadEcdhe();
+      const result = await ecdheSelfTest(ecdheCurve);
+      setEcdheSharedFp(result.sharedSecretSha256Hex);
+      setEcdheMessage(
+        `Self-test passed for ${result.curve}: both parties derived the same shared fingerprint.`,
+      );
+    } catch (error) {
+      setEcdheSharedFp("");
+      setEcdheError(
+        error instanceof Error ? error.message : "ECDHE self-test failed",
+      );
+    } finally {
+      setEcdheBusy(false);
+    }
+  };
+
   const handleGenerateKeypair = async () => {
     setAuthBusy(true);
     setAuthError("");
     try {
+      await requestPersistentDeviceStorage();
       const result = await generateAndKeepOnDevice({
         profile: keyGenProfile,
       });
@@ -1278,8 +1676,20 @@ function App() {
       setSelectedDeviceFp(result.deviceKey.fingerprint);
       setKeySavedAck(true); // device already holds the key
       await refreshDeviceKeys();
+      // Confirm vault can list the key (mobile storage races)
+      const listed = await listDeviceKeys();
+      const found = listed.some(
+        (k) =>
+          k.fingerprint.replace(/[\s:]/g, "").toLowerCase() ===
+          result.deviceKey.fingerprint.replace(/[\s:]/g, "").toLowerCase(),
+      );
+      if (!found) {
+        throw new Error(
+          "Key was generated but is not visible in this browser’s vault yet. Leave private mode, allow site data, and tap Generate again — or download a backup .asc.",
+        );
+      }
       setAuthMessage(
-        `Created ${result.profileLabel} on this device. Private key never leaves the browser; stored device-bound (AES-wrapped). Click Register to publish the public key only.`,
+        `Created ${result.profileLabel} on this device. Private key never leaves the browser; stored device-bound (AES-wrapped). Next: tap Register & stay signed in (public key only) — required before Sign in works.`,
       );
     } catch (error) {
       setAuthError(
@@ -1354,16 +1764,26 @@ function App() {
       }
       // Session is HttpOnly cookie from Set-Cookie — never store sessionToken in JS.
       clearSessionToken();
-      setAuthUser(data.user);
-      setIsAdmin(Boolean(data.isAdmin));
-      setAdminSecretRequired(Boolean(data.adminActionSecretRequired));
       setLastFingerprint(data.user.fingerprint);
       setSelectedDeviceFp(data.user.fingerprint);
       setGeneratedPublic(null);
       setRegPublicKey("");
+      // Re-fetch /me so cookie + admin/transit flags settle (mobile ITP / WebViews).
+      const me = await refreshAuth();
+      if (!me) {
+        setAuthUser(null);
+        setIsAdmin(false);
+        setAuthMessage(
+          "Public key registered, but this browser blocked the session cookie. Allow cookies for this site (not private mode / not an in-app browser), then use Sign in → Continue with device key.",
+        );
+        setAuthMode("login");
+        await refreshDeviceKeys();
+        return;
+      }
+      setAuthUser(me);
+      setIsAdmin(Boolean(data.isAdmin));
+      setAdminSecretRequired(Boolean(data.adminActionSecretRequired));
       setShowAuthPanel(false);
-      // Re-fetch /me so admin/transit flags stay in sync with server allowlists.
-      await refreshAuth();
       setAuthMessage(
         "Registered. You are signed in. Next visits: open Sign in → Continue with device key (no private key upload).",
       );
@@ -1422,6 +1842,7 @@ function App() {
     setAuthBusy(true);
     setAuthError("");
     try {
+      await requestPersistentDeviceStorage();
       let text = importKeyText.trim();
       if (file) {
         text = await readKeyFile(file);
@@ -1450,8 +1871,8 @@ function App() {
       await refreshDeviceKeys();
       setAuthMessage(
         encrypted
-          ? "Imported encrypted key onto this device. Sign-in asks for the key passphrase only."
-          : "Imported key onto this device. Sign-in needs no password.",
+          ? "Imported encrypted key onto this device. Sign-in asks for the key passphrase only. If the key is new to this site, Register the public key once first."
+          : "Imported key onto this device. Sign-in needs no password. If the key is new to this site, Register the public key once first.",
       );
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "Import failed");
@@ -1480,6 +1901,7 @@ function App() {
       setShowAdminPanel(false);
       clearAdminElevation();
       setAdminActionSecret("");
+      setAdminSecretRevealOnce(null);
       clearSessionToken();
       clearLastFingerprint(); // localStorage remember — not browser “cache”
       clearSensitiveAuthState();
@@ -2182,21 +2604,36 @@ function App() {
     });
   };
 
-  const loadTradePulsePreview = async (closeMenu = true) => {
+  const loadTradePulsePreview = async (
+    closeMenu = true,
+    periodOverride?: string,
+    options?: { keepExpanded?: boolean },
+  ) => {
     // Keep other popups open so multiple panels can be used side by side
     setShowTradePulsePanel(true);
+    if (!options?.keepExpanded) {
+      // Always open the Trade Pulse menu minimized (expand with header control)
+      setIsTradePulsePanelMinimized(true);
+    }
     if (closeMenu) {
       setShowMenu(false);
+    }
+    const period = periodOverride || tradePulsePeriod || "2023";
+    if (periodOverride) {
+      setTradePulsePeriod(periodOverride);
     }
     setTradePulseStatus("loading");
     setTradePulseError("");
 
     try {
-      const response = await fetch("/api/comtrade-pulse-preview", {
-        headers: {
-          accept: "application/json",
+      const response = await fetch(
+        `/api/comtrade-pulse-preview?period=${encodeURIComponent(period)}`,
+        {
+          headers: {
+            accept: "application/json",
+          },
         },
-      });
+      );
 
       if (!response.ok) {
         throw new Error("Trade Pulse preview request failed");
@@ -2209,11 +2646,38 @@ function App() {
       }
 
       setTradePulsePreview(data);
+      if (data.period) {
+        setTradePulsePeriod(data.period);
+      }
       setTradePulseStatus("ready");
+
+      // Client warm: hit other years so KV/memory fills (server also warms via waitUntil).
+      const years: string[] =
+        data.availablePeriods && data.availablePeriods.length > 0
+          ? data.availablePeriods
+          : ["2022", "2023", "2024", "2025"];
+      for (const year of years) {
+        if (year === data.period) continue;
+        void fetch(`/api/comtrade-pulse-preview?period=${encodeURIComponent(year)}`, {
+          headers: { accept: "application/json" },
+        }).catch(() => {});
+      }
     } catch {
-      setTradePulseError("Trade Pulse preview unavailable");
+      setTradePulseError("Trade Pulse unavailable");
       setTradePulseStatus("error");
     }
+  };
+
+  const tradePulseYearOptions =
+    tradePulsePreview?.availablePeriods?.length
+      ? tradePulsePreview.availablePeriods
+      : ["2022", "2023", "2024", "2025"];
+
+  const selectTradePulsePeriod = (period: string) => {
+    if (period === tradePulsePeriod && tradePulseStatus === "ready") {
+      return;
+    }
+    void loadTradePulsePreview(false, period, { keepExpanded: true });
   };
 
   useEffect(() => {
@@ -2412,17 +2876,20 @@ function App() {
   const comtradeMenuSource =
     comtradeStatus === "ready" && comtradePreview
       ? comtradePreview.stale
-        ? "Fallback snapshot"
-        : "Comtrade+ API"
+        ? "Fallback"
+        : comtradePreview.dataMode === "free-subscription" ||
+            comtradePreview.subscriptionBacked
+          ? "Live"
+          : "Preview"
       : comtradeStatus === "error"
-        ? "Preview unavailable"
-        : "Open preview to fetch";
+        ? "Unavailable"
+        : "Not loaded";
   const comtradeMenuQuery =
     comtradeStatus === "ready" && comtradePreview
-      ? `${comtradePreview.queryLabel} / ${comtradePreview.period}`
+      ? `${comtradePreview.reporter} · ${comtradePreview.period}`
       : comtradeStatus === "loading"
-        ? "Fetching Comtrade+ preview data"
-        : "Summary, records, coverage, references, and reporters";
+        ? "Loading…"
+        : "USA annual totals";
   const comtradeMenuUpdated =
     comtradeStatus === "ready" && comtradePreview
       ? formatPreviewDate(comtradePreview.updatedAt)
@@ -2542,6 +3009,37 @@ function App() {
               route.severity === "critical" ? 3.2 : route.severity === "high" ? 2.6 : 2,
             dash: TRADE_PULSE_TRANSPORT_DASHES[route.transportMode],
             severity: route.severity,
+            comtrade: {
+              routeId: route.id,
+              commodity: route.commodity,
+              commodityCode: route.commodityCode,
+              period: route.period,
+              originName: route.origin.name,
+              originIso3: route.origin.iso3,
+              destName: route.destination.name,
+              destIso3: route.destination.iso3,
+              hubName: route.intermediary?.name ?? null,
+              hubIso3: route.intermediary?.iso3 ?? null,
+              transportMode: route.transportMode,
+              customsProcedure: route.customsProcedure,
+              valueUsd: route.valueUsd,
+              quantity: route.quantity,
+              supplierSharePct: route.supplierSharePct,
+              exportValueUsd: route.exportValueUsd,
+              importValueUsd: route.importValueUsd,
+              asymmetryPct: route.asymmetryPct,
+              fobValueUsd: route.fobValueUsd,
+              cifValueUsd: route.cifValueUsd,
+              frictionPct: route.frictionPct,
+              reExportSharePct: route.reExportSharePct,
+              confidencePct: route.confidencePct,
+              severity: route.severity,
+              layers: route.layers.map(
+                (l) => TRADE_PULSE_LAYER_SHORT_LABELS[l] || l,
+              ),
+              insight: route.insight,
+              dataMode: tradePulsePreview?.dataMode,
+            },
           };
         })
       : [];
@@ -2611,9 +3109,13 @@ function App() {
               You do <strong>not</strong> upload a private key to log in. The
               browser keeps the private key on this device; the server only gets
               your public key + a one-time signature. No account password —
-              passphrase only if <em>you</em> encrypted the device key. (The
-              fingerprint in localStorage is public ID only — not browser
-              “cache”.)
+              passphrase only if <em>you</em> encrypted the device key.
+            </p>
+            <p className="auth-field-hint auth-mobile-hint">
+              <strong>Mobile:</strong> use Safari or Chrome in a normal tab (not
+              private, not Instagram/Facebook/TikTok in-app browsers). New keys
+              must be <strong>Registered</strong> once before Sign in works.
+              Allow cookies + site data for this domain.
             </p>
 
             {authMode === "register" ? (
@@ -2980,6 +3482,168 @@ function App() {
                     Already have a device key? Sign in
                   </button>
                 </div>
+
+                <div className="auth-section-title auth-ecdhe-title">
+                  Experimental · ECDHE key agreement
+                </div>
+                <p className="auth-field-hint">
+                  Ephemeral elliptic-curve Diffie–Hellman (WebCrypto). Not an
+                  OpenPGP login key — private material stays non-extractable in
+                  memory and is never uploaded. Use for lab / peer key agreement
+                  only.
+                </p>
+                <div className="auth-modal-actions auth-row">
+                  <button
+                    type="button"
+                    className="auth-switch"
+                    disabled={authBusy || ecdheBusy}
+                    onClick={() => {
+                      const next = !showEcdheLab;
+                      setShowEcdheLab(next);
+                      if (next) void refreshEcdheSupport();
+                    }}
+                  >
+                    {showEcdheLab ? "Hide ECDHE lab" : "Open ECDHE lab"}
+                  </button>
+                </div>
+                {showEcdheLab && (
+                  <div className="auth-ecdhe-lab">
+                    <label className="auth-field">
+                      <span>Curve</span>
+                      <select
+                        value={ecdheCurve}
+                        onChange={(e) => {
+                          setEcdheCurve(e.target.value as EcdheCurveId);
+                          setEcdhePair(null);
+                          setEcdheSharedFp("");
+                          setEcdheError("");
+                          setEcdheMessage("");
+                        }}
+                        disabled={ecdheBusy}
+                      >
+                        {ECDHE_CURVE_IDS.map((id) => (
+                          <option
+                            key={id}
+                            value={id}
+                            disabled={
+                              ecdheSupported.length > 0 &&
+                              !ecdheSupported.includes(id)
+                            }
+                          >
+                            {ECDHE_CURVE_META[id].label}
+                            {ecdheSupported.length > 0 &&
+                            !ecdheSupported.includes(id)
+                              ? " · unsupported here"
+                              : " · experimental"}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="auth-field-hint">
+                        {ECDHE_CURVE_META[ecdheCurve].description} ~
+                        {ECDHE_CURVE_META[ecdheCurve].securityBits}-bit
+                        classical.
+                      </span>
+                    </label>
+                    <div className="auth-modal-actions auth-row">
+                      <button
+                        type="button"
+                        disabled={ecdheBusy}
+                        onClick={() => void handleEcdheGenerate()}
+                      >
+                        {ecdheBusy ? "Working…" : "Generate ephemeral pair"}
+                      </button>
+                      <button
+                        type="button"
+                        className="auth-switch"
+                        disabled={ecdheBusy}
+                        onClick={() => void handleEcdheSelfTest()}
+                      >
+                        Self-test (A↔B)
+                      </button>
+                    </div>
+                    {ecdhePair && (
+                      <>
+                        <label className="auth-field">
+                          <span>Your public key (SPKI base64) — share this</span>
+                          <textarea
+                            readOnly
+                            rows={3}
+                            spellCheck={false}
+                            value={ecdhePair.publicKeySpkiB64}
+                            onFocus={(e) => e.currentTarget.select()}
+                          />
+                        </label>
+                        <label className="auth-field">
+                          <span>Your public key (JWK JSON)</span>
+                          <textarea
+                            readOnly
+                            rows={4}
+                            spellCheck={false}
+                            value={JSON.stringify(ecdhePair.publicKeyJwk)}
+                            onFocus={(e) => e.currentTarget.select()}
+                          />
+                        </label>
+                        <label className="auth-field">
+                          <span>Peer public key (JWK or SPKI base64)</span>
+                          <textarea
+                            rows={3}
+                            spellCheck={false}
+                            value={ecdhePeerPub}
+                            onChange={(e) => setEcdhePeerPub(e.target.value)}
+                            disabled={ecdheBusy}
+                            placeholder="Paste peer SPKI base64 or JWK JSON"
+                          />
+                        </label>
+                        <div className="auth-modal-actions auth-row">
+                          <button
+                            type="button"
+                            disabled={ecdheBusy || !ecdhePeerPub.trim()}
+                            onClick={() => void handleEcdheDerive()}
+                          >
+                            {ecdheBusy
+                              ? "Deriving…"
+                              : "Derive shared secret (HKDF)"}
+                          </button>
+                          <button
+                            type="button"
+                            className="auth-switch"
+                            disabled={ecdheBusy}
+                            onClick={() => {
+                              setEcdhePair(null);
+                              setEcdhePeerPub("");
+                              setEcdheSharedFp("");
+                              setEcdheMessage("Cleared ephemeral material.");
+                              setEcdheError("");
+                            }}
+                          >
+                            Clear ephemeral keys
+                          </button>
+                        </div>
+                      </>
+                    )}
+                    {ecdheSharedFp && (
+                      <div className="auth-fp-block">
+                        <div>
+                          <strong>Shared secret fingerprint (SHA-256)</strong>
+                        </div>
+                        <code className="admin-fp-hex" style={{ userSelect: "all" }}>
+                          {ecdheSharedFp}
+                        </code>
+                        <p className="auth-field-hint">
+                          Raw shared bits are not shown. Matching fingerprints on
+                          both peers means ECDHE agreed. Session AES key stays
+                          non-extractable in memory.
+                        </p>
+                      </div>
+                    )}
+                    {ecdheError && (
+                      <div className="auth-inline-error">{ecdheError}</div>
+                    )}
+                    {ecdheMessage && !ecdheError && (
+                      <div className="auth-inline-ok">{ecdheMessage}</div>
+                    )}
+                  </div>
+                )}
               </>
             ) : (
               <>
@@ -3112,7 +3776,7 @@ function App() {
         </div>
       )}
 
-      {showAdminPanel && isAdmin && (
+      {showAdminPanel && (
         <div
           className="auth-modal-backdrop"
           role="presentation"
@@ -3121,6 +3785,8 @@ function App() {
               setShowAdminPanel(false);
               clearAdminElevation();
               setAdminActionSecret("");
+              setAdminSecretRevealOnce(null);
+              setAdminUsers([]);
             }
           }}
         >
@@ -3138,6 +3804,8 @@ function App() {
                   setShowAdminPanel(false);
                   clearAdminElevation();
                   setAdminActionSecret("");
+                  setAdminSecretRevealOnce(null);
+                  setAdminUsers([]);
                 }}
                 aria-label="Close"
               >
@@ -3151,124 +3819,203 @@ function App() {
               revoke / claim need full elevation. Audited.
             </p>
 
-            {!adminSecretConfigured && (
-              <div className="auth-inline-error">
-                Server has no strong ADMIN_ACTION_SECRET. Set ≥16 random chars
-                in <code>.dev.vars</code> and restart — mutations stay locked
-                (fail closed).
+            {authUser && (
+              <div className="admin-identity-box">
+                <span>Signed-in fingerprint (must match ADMIN_FINGERPRINTS)</span>
+                <code className="auth-user-fingerprint">
+                  {formatFingerprint(authUser.fingerprint)}
+                </code>
+                <code className="admin-fp-hex">
+                  {authUser.fingerprint.replace(/[\s:]/g, "").toLowerCase()}
+                </code>
+                <span className="admin-identity-status">
+                  {isAdmin
+                    ? "Allowlist: matched — admin access granted"
+                    : adminAllowlistConfigured
+                      ? "Allowlist: configured, but this fingerprint is not on it"
+                      : "Allowlist: empty / not configured on this Worker"}
+                </span>
               </div>
             )}
 
-            <div className="auth-section-title">1 · Unlock with your key</div>
-            <p className="auth-modal-copy">
-              Signs a one-time server challenge with your <strong>device
-              private key</strong> (already on this browser). Does not use the
-              action secret. Elevation lasts ~10 minutes.
-            </p>
-            <div className="auth-modal-actions auth-row">
-              <button
-                type="button"
-                disabled={adminBusy || !adminSecretConfigured}
-                onClick={() => void unlockAdminPrivileges()}
-              >
-                {adminBusy
-                  ? "Working…"
-                  : adminElevationValid()
-                    ? "Re-unlock privileges"
-                    : "Unlock privileges (sign challenge)"}
-              </button>
-              {adminElevationValid() && (
-                <button
-                  type="button"
-                  className="auth-switch"
-                  disabled={adminBusy}
-                  onClick={() => {
-                    clearAdminElevation();
-                    setAdminMessage("Elevation cleared.");
-                  }}
-                >
-                  Lock again
-                </button>
-              )}
-            </div>
-            {adminElevationValid() && adminElevationExpiresAt && (
-              <div className="auth-inline-ok">
-                Elevated until{" "}
-                {new Date(adminElevationExpiresAt).toLocaleTimeString()}
+            {adminError && (
+              <div className="auth-error" style={{ whiteSpace: "pre-wrap" }}>
+                {adminError}
               </div>
             )}
 
-            <div className="auth-section-title">
-              2 · Action secret (for grant / revoke / claim only)
-            </div>
-            <p className="auth-modal-copy">
-              Paste the value of <code>ADMIN_ACTION_SECRET</code> from{" "}
-              <code>.dev.vars</code> here when you grant/revoke/claim. The
-              server already has it; this field is how you prove you know it.
-              Memory only — not saved in the browser.
-            </p>
-            <label className="auth-field">
-              <span>ADMIN_ACTION_SECRET</span>
-              <input
-                type="password"
-                value={adminActionSecret}
-                onChange={(e) => setAdminActionSecret(e.target.value)}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="paste from .dev.vars (needed only for mutations)"
-              />
-            </label>
+            {!isAdmin && (
+              <p className="auth-modal-copy">
+                To fix: Cloudflare Dashboard → Workers → <strong>globe</strong>{" "}
+                → Settings → Variables and Secrets → set{" "}
+                <code>ADMIN_FINGERPRINTS</code> to the hex fingerprint above
+                (no spaces), then sign out and sign in again. Or run:{" "}
+                <code>
+                  npx wrangler secret put ADMIN_FINGERPRINTS --name globe
+                </code>
+              </p>
+            )}
 
-            <div className="auth-section-title">Lookup customer</div>
-            <label className="auth-field">
-              <span>User id or fingerprint</span>
-              <input
-                type="text"
-                value={adminQuery}
-                onChange={(e) => setAdminQuery(e.target.value)}
-                placeholder="paste user id or fingerprint"
-                spellCheck={false}
-              />
-            </label>
-            <div className="auth-modal-actions auth-row">
-              <button
-                type="button"
-                disabled={adminBusy || adminQuery.trim().length < 6}
-                onClick={() => void adminLookup()}
-              >
-                {adminBusy ? "Working…" : "Lookup"}
-              </button>
-            </div>
-
-            {adminLookupUser && (
-              <div className="auth-fp-block">
-                <div>
-                  <strong>User</strong>{" "}
-                  <code>{adminLookupUser.id}</code>
+            {isAdmin && (
+              <>
+                <div className="auth-section-title">
+                  1 · Action secret (generate here)
                 </div>
-                <div>
-                  Fingerprint{" "}
-                  <code>{formatFingerprint(adminLookupUser.fingerprint)}</code>
-                </div>
-                {adminLookupUser.primaryUserId && (
-                  <div>UID: {adminLookupUser.primaryUserId}</div>
+                {!adminSecretConfigured && (
+                  <div className="auth-inline-error">
+                    Server has no strong{" "}
+                    <code>ADMIN_ACTION_SECRET</code> Worker secret yet.
+                    Generate below (browser only), then run{" "}
+                    <code>
+                      npx wrangler secret put ADMIN_ACTION_SECRET --name globe
+                    </code>
+                    . Never KV or git.
+                  </div>
                 )}
-                <div>
-                  Transit:{" "}
-                  <strong>
-                    {adminLookupUser.transitPaid ? "PAID / unlocked" : "LOCKED"}
-                  </strong>
+                <p className="auth-modal-copy">
+                  Creates a random value <strong>in this browser only</strong> —
+                  not saved on the server. You must set it as a Cloudflare Worker
+                  secret, then paste it here for grant/revoke/claim.
+                </p>
+                <div className="auth-modal-actions auth-row">
+                  <button
+                    type="button"
+                    className="admin-generate-secret-btn"
+                    disabled={adminBusy}
+                    title="Create a random secret in browser memory (not stored on server)"
+                    onClick={() => generateAdminActionSecret()}
+                  >
+                    Generate action secret
+                  </button>
                 </div>
-                <label className="auth-field" style={{ marginTop: 10 }}>
-                  <span>Note (audit log)</span>
+                {adminSecretRevealOnce && (
+                  <div className="auth-fp-block admin-secret-reveal">
+                    <strong>Copy now — browser memory only</strong>
+                    <p className="auth-modal-copy">
+                      Not stored on the server. Set it as a Worker secret, then
+                      use it in the field below.
+                    </p>
+                    <code className="admin-fp-hex" style={{ userSelect: "all" }}>
+                      {adminSecretRevealOnce}
+                    </code>
+                    <div className="auth-modal-actions auth-row">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void navigator.clipboard
+                            ?.writeText(adminSecretRevealOnce)
+                            .then(() =>
+                              setAdminMessage(
+                                "Copied. Next: wrangler secret put ADMIN_ACTION_SECRET --name globe — not git or chat.",
+                              ),
+                            )
+                            .catch(() =>
+                              setAdminError(
+                                "Clipboard blocked — select the secret above and copy manually.",
+                              ),
+                            );
+                        }}
+                      >
+                        Copy secret
+                      </button>
+                      <button
+                        type="button"
+                        className="auth-switch"
+                        onClick={() => setAdminSecretRevealOnce(null)}
+                      >
+                        Hide from screen
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <label className="auth-field">
+                  <span>Action secret (memory only)</span>
                   <input
-                    type="text"
-                    value={adminNote}
-                    onChange={(e) => setAdminNote(e.target.value)}
-                    placeholder="e.g. paid but webhook missed"
+                    type="password"
+                    value={adminActionSecret}
+                    onChange={(e) => setAdminActionSecret(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="paste Worker secret (needed only for mutations)"
                   />
                 </label>
+
+                <div className="auth-section-title">2 · Unlock with your key</div>
+                <p className="auth-modal-copy">
+                  Signs a one-time server challenge with your{" "}
+                  <strong>device private key</strong>. Elevation lasts ~10
+                  minutes. Requires{" "}
+                  <code>ADMIN_ACTION_SECRET</code> set on the Worker first.
+                </p>
                 <div className="auth-modal-actions auth-row">
+                  <button
+                    type="button"
+                    disabled={adminBusy || !adminSecretConfigured}
+                    onClick={() => void unlockAdminPrivileges()}
+                  >
+                    {adminBusy
+                      ? "Working…"
+                      : adminElevationValid()
+                        ? "Re-unlock privileges"
+                        : "Unlock privileges (sign challenge)"}
+                  </button>
+                  {adminElevationValid() && (
+                    <button
+                      type="button"
+                      className="auth-switch"
+                      disabled={adminBusy}
+                      onClick={() => {
+                        clearAdminElevation();
+                        setAdminMessage("Elevation cleared.");
+                      }}
+                    >
+                      Lock again
+                    </button>
+                  )}
+                </div>
+                {adminElevationValid() && adminElevationExpiresAt && (
+                  <div className="auth-inline-ok">
+                    Elevated until{" "}
+                    {new Date(adminElevationExpiresAt).toLocaleTimeString()}
+                  </div>
+                )}
+
+                <div className="auth-section-title">All users</div>
+                <p className="auth-modal-copy">
+                  Directory for elevated admins only (action secret + unlock).
+                  Public fields only — no private or public keys.
+                </p>
+                <div className="auth-modal-actions auth-row admin-users-filters">
+                  <button
+                    type="button"
+                    className={
+                      adminUsersFilter === "all" ? "" : "auth-switch"
+                    }
+                    disabled={adminBusy}
+                    onClick={() => setAdminUsersFilter("all")}
+                  >
+                    All
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      adminUsersFilter === "paid" ? "" : "auth-switch"
+                    }
+                    disabled={adminBusy}
+                    onClick={() => setAdminUsersFilter("paid")}
+                  >
+                    Paid
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      adminUsersFilter === "locked" ? "" : "auth-switch"
+                    }
+                    disabled={adminBusy}
+                    onClick={() => setAdminUsersFilter("locked")}
+                  >
+                    Locked
+                  </button>
                   <button
                     type="button"
                     disabled={
@@ -3277,85 +4024,257 @@ function App() {
                       !adminActionSecret.trim()
                     }
                     title={
-                      adminElevationValid()
-                        ? "Grant Transit (elevated)"
-                        : "Unlock privileges first"
+                      !adminElevationValid()
+                        ? "Unlock privileges first"
+                        : !adminActionSecret.trim()
+                          ? "Enter action secret first"
+                          : "Load user directory"
                     }
-                    onClick={() => void adminGrant(true)}
+                    onClick={() => void loadAdminUsers()}
                   >
-                    Grant Transit
+                    {adminBusy ? "Loading…" : "Load users"}
                   </button>
+                  {!adminUsersComplete && adminUsersCursor && (
+                    <button
+                      type="button"
+                      className="auth-switch"
+                      disabled={
+                        adminBusy ||
+                        !adminElevationValid() ||
+                        !adminActionSecret.trim()
+                      }
+                      onClick={() =>
+                        void loadAdminUsers({
+                          append: true,
+                          cursor: adminUsersCursor,
+                        })
+                      }
+                    >
+                      Load more
+                    </button>
+                  )}
+                </div>
+                {adminUsers.length > 0 && (
+                  <div className="admin-users-list">
+                    <div className="admin-users-meta">
+                      {adminUsers.length} shown
+                      {!adminUsersComplete ? " · more available" : ""}
+                    </div>
+                    {adminUsers.map((u) => (
+                      <div key={u.id} className="admin-user-row-wrap">
+                        <button
+                          type="button"
+                          className="admin-user-row"
+                          onClick={() => {
+                            setAdminLookupUser(u);
+                            setAdminQuery(u.id);
+                            setAdminMessage(
+                              `Selected user ${u.id.slice(0, 12)}… for grant/revoke/remove.`,
+                            );
+                          }}
+                          title="Select for grant / revoke / remove"
+                        >
+                          <span
+                            className={
+                              u.transitPaid
+                                ? "admin-user-badge paid"
+                                : "admin-user-badge locked"
+                            }
+                          >
+                            {u.transitPaid ? "PAID" : "LOCKED"}
+                          </span>
+                          <code className="admin-user-id">{u.id}</code>
+                          <code className="admin-user-fp">
+                            {formatFingerprint(u.fingerprint)}
+                          </code>
+                          {u.primaryUserId && (
+                            <span className="admin-user-uid">
+                              {u.primaryUserId}
+                            </span>
+                          )}
+                          {u.createdAt && (
+                            <span className="admin-user-created">
+                              {new Date(u.createdAt).toLocaleString()}
+                            </span>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          className="admin-user-remove"
+                          disabled={
+                            adminBusy ||
+                            !adminElevationValid() ||
+                            !adminActionSecret.trim()
+                          }
+                          title="Permanently delete this user"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void adminDeleteUser(u);
+                          }}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="auth-section-title">Lookup customer</div>
+                <label className="auth-field">
+                  <span>User id or fingerprint</span>
+                  <input
+                    type="text"
+                    value={adminQuery}
+                    onChange={(e) => setAdminQuery(e.target.value)}
+                    placeholder="paste user id or fingerprint"
+                    spellCheck={false}
+                  />
+                </label>
+                <div className="auth-modal-actions auth-row">
                   <button
                     type="button"
-                    className="auth-switch"
+                    disabled={adminBusy || adminQuery.trim().length < 6}
+                    onClick={() => void adminLookup()}
+                  >
+                    {adminBusy ? "Working…" : "Lookup"}
+                  </button>
+                </div>
+
+                {adminLookupUser && (
+                  <div className="auth-fp-block">
+                    <div>
+                      <strong>User</strong> <code>{adminLookupUser.id}</code>
+                    </div>
+                    <div>
+                      Fingerprint{" "}
+                      <code>
+                        {formatFingerprint(adminLookupUser.fingerprint)}
+                      </code>
+                    </div>
+                    {adminLookupUser.primaryUserId && (
+                      <div>UID: {adminLookupUser.primaryUserId}</div>
+                    )}
+                    <div>
+                      Transit:{" "}
+                      <strong>
+                        {adminLookupUser.transitPaid
+                          ? "PAID / unlocked"
+                          : "LOCKED"}
+                      </strong>
+                    </div>
+                    <label className="auth-field" style={{ marginTop: 10 }}>
+                      <span>Note (audit log)</span>
+                      <input
+                        type="text"
+                        value={adminNote}
+                        onChange={(e) => setAdminNote(e.target.value)}
+                        placeholder="e.g. paid but webhook missed"
+                      />
+                    </label>
+                    <div className="auth-modal-actions auth-row">
+                      <button
+                        type="button"
+                        disabled={
+                          adminBusy ||
+                          !adminElevationValid() ||
+                          !adminActionSecret.trim()
+                        }
+                        title={
+                          adminElevationValid()
+                            ? "Grant Transit (elevated)"
+                            : "Unlock privileges first"
+                        }
+                        onClick={() => void adminGrant(true)}
+                      >
+                        Grant Transit
+                      </button>
+                      <button
+                        type="button"
+                        className="auth-switch"
+                        disabled={
+                          adminBusy ||
+                          !adminElevationValid() ||
+                          !adminActionSecret.trim()
+                        }
+                        onClick={() => void adminGrant(false)}
+                      >
+                        Revoke Transit
+                      </button>
+                      <button
+                        type="button"
+                        className="admin-user-remove"
+                        disabled={
+                          adminBusy ||
+                          !adminElevationValid() ||
+                          !adminActionSecret.trim()
+                        }
+                        title="Permanently delete this user account"
+                        onClick={() => void adminDeleteUser(adminLookupUser)}
+                      >
+                        Remove user
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="auth-section-title">Recover Stripe session</div>
+                <label className="auth-field">
+                  <span>Checkout session id (cs_…)</span>
+                  <input
+                    type="text"
+                    value={adminSessionId}
+                    onChange={(e) => setAdminSessionId(e.target.value)}
+                    placeholder="cs_live_… or cs_test_…"
+                    spellCheck={false}
+                  />
+                </label>
+                <div className="auth-modal-actions auth-row">
+                  <button
+                    type="button"
                     disabled={
                       adminBusy ||
+                      !adminSessionId.trim() ||
                       !adminElevationValid() ||
                       !adminActionSecret.trim()
                     }
-                    onClick={() => void adminGrant(false)}
+                    title={
+                      adminElevationValid()
+                        ? "Claim paid Stripe session"
+                        : "Unlock privileges first"
+                    }
+                    onClick={() => void adminClaim()}
                   >
-                    Revoke Transit
+                    Claim session → unlock user
                   </button>
                 </div>
-              </div>
-            )}
 
-            <div className="auth-section-title">Recover Stripe session</div>
-            <label className="auth-field">
-              <span>Checkout session id (cs_…)</span>
-              <input
-                type="text"
-                value={adminSessionId}
-                onChange={(e) => setAdminSessionId(e.target.value)}
-                placeholder="cs_live_… or cs_test_…"
-                spellCheck={false}
-              />
-            </label>
-            <div className="auth-modal-actions auth-row">
-              <button
-                type="button"
-                disabled={
-                  adminBusy ||
-                  !adminSessionId.trim() ||
-                  !adminElevationValid() ||
-                  !adminActionSecret.trim()
-                }
-                title={
-                  adminElevationValid()
-                    ? "Claim paid Stripe session"
-                    : "Unlock privileges first"
-                }
-                onClick={() => void adminClaim()}
-              >
-                Claim session → unlock user
-              </button>
-            </div>
+                {adminMessage && (
+                  <div className="auth-fp-block">{adminMessage}</div>
+                )}
 
-            {adminError && (
-              <div className="auth-inline-error">{adminError}</div>
+                <div className="auth-section-title">Recent audit</div>
+                <div className="admin-audit-list">
+                  {adminAudit.length === 0 ? (
+                    <div className="auth-field-hint">No audit entries yet.</div>
+                  ) : (
+                    adminAudit.slice(0, 12).map((e, i) => (
+                      <div key={`${e.at}-${i}`} className="admin-audit-row">
+                        <span>{new Date(e.at).toLocaleString()}</span>
+                        <strong>{e.action}</strong>
+                        <code>
+                          {(
+                            e.targetFingerprint ||
+                            e.targetUserId ||
+                            ""
+                          ).slice(0, 16)}
+                        </code>
+                        {e.detail && <em>{e.detail}</em>}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </>
             )}
-            {adminMessage && (
-              <div className="auth-fp-block">{adminMessage}</div>
-            )}
-
-            <div className="auth-section-title">Recent audit</div>
-            <div className="admin-audit-list">
-              {adminAudit.length === 0 ? (
-                <div className="auth-field-hint">No audit entries yet.</div>
-              ) : (
-                adminAudit.slice(0, 12).map((e, i) => (
-                  <div key={`${e.at}-${i}`} className="admin-audit-row">
-                    <span>{new Date(e.at).toLocaleString()}</span>
-                    <strong>{e.action}</strong>
-                    <code>
-                      {(e.targetFingerprint || e.targetUserId || "").slice(0, 16)}
-                    </code>
-                    {e.detail && <em>{e.detail}</em>}
-                  </div>
-                ))
-              )}
-            </div>
           </div>
         </div>
       )}
@@ -3406,19 +4325,31 @@ function App() {
           >
             UN LAYER
           </button>
-          <button
-            className={`nav-btn transit-nav-btn ${showTransitPanel ? "active" : ""}`}
-            onClick={() => {
-              void loadLocalTransit();
-            }}
-            aria-pressed={showTransitPanel}
-            title="Local transit options"
-          >
-            TRANSIT
-          </button>
         </div>
 
         <div className="nav-right">
+          <button
+            type="button"
+            className={`weather-icon-btn transit-icon-btn ${
+              transitStatus === "loading" ? "weather-icon-loading" : ""
+            } ${showTransitPanel ? "transit-icon-btn-open" : ""}`}
+            onClick={() => {
+              void loadLocalTransit();
+            }}
+            aria-label="Local transit options"
+            title="Local transit"
+            aria-pressed={showTransitPanel}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="5" y="3.5" width="14" height="14" rx="2.5" />
+              <path d="M5 10.5h14" />
+              <path d="M9 17.5v2.5" />
+              <path d="M15 17.5v2.5" />
+              <path d="M8 20h8" />
+              <circle cx="9" cy="13.5" r="1" />
+              <circle cx="15" cy="13.5" r="1" />
+            </svg>
+          </button>
           <button
             type="button"
             className={`weather-icon-btn nearby-icon-btn ${
@@ -3546,17 +4477,25 @@ function App() {
           )}
 
           {transitStatus === "ready" && transitPreview && (
-            <TransitPanelContent
-              preview={transitPreview}
-              distanceM={transitDistanceM}
-              onRadius={(m) => {
-                void loadLocalTransit(false, m);
-              }}
-              onRefresh={() => {
-                void loadLocalTransit(false, transitDistanceM);
-              }}
-              fetchNearbyMap={fetchNearbyMapForTransit}
-            />
+            <Suspense
+              fallback={
+                <div className="auth-field-hint" style={{ padding: 12 }}>
+                  Loading transit map…
+                </div>
+              }
+            >
+              <TransitPanelContent
+                preview={transitPreview}
+                distanceM={transitDistanceM}
+                onRadius={(m) => {
+                  void loadLocalTransit(false, m);
+                }}
+                onRefresh={() => {
+                  void loadLocalTransit(false, transitDistanceM);
+                }}
+                fetchNearbyMap={fetchNearbyMapForTransit}
+              />
+            </Suspense>
           )}
         </FloatingChrome>
       )}
@@ -3653,7 +4592,15 @@ function App() {
                 pinned below so they are never clipped off-screen.
               */}
               <div className="nearby-panel-body">
-                <NearbyMap data={nearbyPreview} />
+                <Suspense
+                  fallback={
+                    <div className="auth-field-hint" style={{ padding: 12 }}>
+                      Loading map…
+                    </div>
+                  }
+                >
+                  <NearbyMap data={nearbyPreview} />
+                </Suspense>
               </div>
 
               <div className="nearby-panel-actions">
@@ -3926,11 +4873,20 @@ function App() {
       )}
 
       {showComtradePanel && (
-        <FloatingChrome className="un-panel" role="dialog" aria-label="UN COMTRADE API preview">
+        <FloatingChrome className="un-panel" role="dialog" aria-label="UN Comtrade">
           <div className="un-panel-header">
             <div>
-              <h3>UN COMTRADE API</h3>
-              <span>Official data preview</span>
+              <h3>Comtrade</h3>
+              <span>
+                {comtradeStatus === "ready" && comtradePreview
+                  ? `${comtradePreview.period} · ${
+                      comtradePreview.dataMode === "free-subscription" ||
+                      comtradePreview.subscriptionBacked
+                        ? "Live"
+                        : "Preview"
+                    }`
+                  : "Annual trade sample"}
+              </span>
             </div>
             <button
               type="button"
@@ -3941,14 +4897,14 @@ function App() {
                   setShowMenu(false);
                 })
               }
-              aria-label="Close UN COMTRADE preview"
+              aria-label="Close UN Comtrade preview"
             >
               x
             </button>
           </div>
 
           {comtradeStatus === "loading" && (
-            <div className="un-loading">Loading UN data...</div>
+            <div className="un-loading">Loading UN Comtrade public sample...</div>
           )}
 
           {comtradeStatus === "error" && (
@@ -3971,7 +4927,14 @@ function App() {
             <>
               <div className="un-status-row">
                 <span>{comtradePreview.source}</span>
-                {comtradePreview.stale && <strong>Fallback snapshot</strong>}
+                <strong>
+                  {comtradePreview.stale
+                    ? "Fallback"
+                    : comtradePreview.dataMode === "free-subscription" ||
+                        comtradePreview.subscriptionBacked
+                      ? "Live"
+                      : "Preview"}
+                </strong>
               </div>
               <div className="un-summary-grid">
                 <div className="un-metric">
@@ -4157,7 +5120,7 @@ function App() {
               </div>
 
               <div className="un-footer">
-                <span>Updated {formatPreviewDate(comtradePreview.updatedAt)}</span>
+                <span>{formatPreviewDate(comtradePreview.updatedAt)}</span>
                 <div className="un-footer-actions">
                   <a
                     href={comtradePreview.sourceUrl}
@@ -4165,13 +5128,6 @@ function App() {
                     rel="noopener noreferrer"
                   >
                     Source
-                  </a>
-                  <a
-                    href={comtradePreview.apiUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    API
                   </a>
                   <button
                     type="button"
@@ -4196,12 +5152,21 @@ function App() {
             isTradePulsePanelMinimized ? "un-panel-minimized" : ""
           }`}
           role="dialog"
-          aria-label="Trade Pulse dependency radar preview"
+          aria-label="Trade Pulse"
         >
           <div className="un-panel-header">
             <div>
               <h3>Trade Pulse</h3>
-              <span>Dependency radar preview</span>
+              <span>
+                {tradePulseStatus === "ready" && tradePulsePreview
+                  ? `${tradePulsePreview.period} · ${
+                      tradePulsePreview.dataMode === "free-subscription" ||
+                      tradePulsePreview.subscriptionBacked
+                        ? "Live"
+                        : "Preview"
+                    }`
+                  : "Dependency radar"}
+              </span>
             </div>
             <div className="un-panel-actions">
               <button
@@ -4238,8 +5203,36 @@ function App() {
           {!isTradePulsePanelMinimized && (
             <div className="trade-pulse-panel-scroll">
               <div className="trade-pulse-panel-inner">
+                <div
+                  className="trade-pulse-year-row"
+                  role="group"
+                  aria-label="Trade year"
+                >
+                  <span className="trade-pulse-year-label">Year</span>
+                  <div className="trade-pulse-year-buttons">
+                    {tradePulseYearOptions.map((year) => (
+                      <button
+                        type="button"
+                        key={year}
+                        className={`trade-pulse-year-btn ${
+                          tradePulsePeriod === year ? "active" : ""
+                        }`}
+                        aria-pressed={tradePulsePeriod === year}
+                        disabled={tradePulseStatus === "loading"}
+                        onClick={() =>
+                          runRateLimitedButtonAction(`trade-pulse-year-${year}`, () => {
+                            selectTradePulsePeriod(year);
+                          })
+                        }
+                      >
+                        {year}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 {tradePulseStatus === "loading" && (
-                  <div className="un-loading">Loading Trade Pulse layers...</div>
+                  <div className="un-loading">Loading {tradePulsePeriod}…</div>
                 )}
 
                 {tradePulseStatus === "error" && (
@@ -4249,7 +5242,9 @@ function App() {
                       type="button"
                       onClick={() =>
                         runRateLimitedButtonAction("trade-pulse-retry", () => {
-                          void loadTradePulsePreview();
+                          void loadTradePulsePreview(false, tradePulsePeriod, {
+                            keepExpanded: true,
+                          });
                         })
                       }
                     >
@@ -4262,7 +5257,12 @@ function App() {
                   <>
                     <div className="un-status-row trade-pulse-status-row">
                       <span>{tradePulsePreview.source}</span>
-                      <strong>Derived preview</strong>
+                      <strong>
+                        {tradePulsePreview.dataMode === "free-subscription" ||
+                        tradePulsePreview.subscriptionBacked
+                          ? `Live · ${tradePulsePreview.liveRouteCount ?? tradePulsePreview.routes.length} routes`
+                          : "Preview"}
+                      </strong>
                     </div>
 
                     <div className="un-summary-grid trade-pulse-summary-grid">
@@ -4275,8 +5275,8 @@ function App() {
                     </div>
 
                     <div className="un-update-row">
-                      <span>{tradePulsePreview.period} Comtrade-shaped scenario</span>
-                      <strong>{visibleTradePulseRoutes.length} active routes</strong>
+                      <span>HS annual · {tradePulsePreview.period}</span>
+                      <strong>{visibleTradePulseRoutes.length} routes</strong>
                     </div>
 
                     <div
@@ -4378,15 +5378,8 @@ function App() {
                       })}
                     </div>
 
-                    <div className="trade-pulse-notes">
-                      <strong>Preview notes</strong>
-                      {tradePulsePreview.notes.map((note) => (
-                        <span key={note}>{note}</span>
-                      ))}
-                    </div>
-
                     <div className="un-footer">
-                      <span>Updated {formatPreviewDate(tradePulsePreview.updatedAt)}</span>
+                      <span>{formatPreviewDate(tradePulsePreview.updatedAt)}</span>
                       <div className="un-footer-actions">
                         <a
                           href={tradePulsePreview.sourceUrl}
@@ -4395,18 +5388,13 @@ function App() {
                         >
                           Source
                         </a>
-                        <a
-                          href={tradePulsePreview.apiUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          API
-                        </a>
                         <button
                           type="button"
                           onClick={() =>
                             runRateLimitedButtonAction("trade-pulse-refresh", () => {
-                              void loadTradePulsePreview();
+                              void loadTradePulsePreview(false, tradePulsePeriod, {
+                                keepExpanded: true,
+                              });
                             })
                           }
                         >
@@ -4793,7 +5781,7 @@ function App() {
           <div className="menu-dropdown-scroll">
           <div className="menu-dropdown-inner">
           <div className="menu-section">
-            <div className="menu-section-title">Comtrade Controls</div>
+            <div className="menu-section-title">Comtrade</div>
             <div className="menu-comtrade-summary" aria-label="Comtrade snapshot summary">
               <div className="menu-comtrade-summary-head">
                 <span>{comtradeMenuStatus}</span>
@@ -4855,8 +5843,8 @@ function App() {
               }
             >
               <div className="menu-toggle-copy">
-                <span>Preview panel</span>
-                <small>open or close the detailed Comtrade+ drawer</small>
+                <span>Panel</span>
+                <small>Trade totals and records</small>
               </div>
               <strong>{showComtradePanel ? "Open" : "Closed"}</strong>
             </button>
@@ -4892,17 +5880,13 @@ function App() {
               }
             >
               <div className="menu-toggle-copy">
-                <span>USD values</span>
-                <small>
-                  {isFullUsdMode
-                    ? "full dollar figures for precise comparisons"
-                    : "compact notation for faster scanning"}
-                </small>
+                <span>USD format</span>
+                <small>{isFullUsdMode ? "Full figures" : "Compact"}</small>
               </div>
               <strong>{isFullUsdMode ? "Full" : "Compact"}</strong>
             </button>
             <div className="menu-section-meta">
-              {enabledComtradeSectionCount}/4 data sections visible
+              {enabledComtradeSectionCount}/4 sections
             </div>
           </div>
           <div className="menu-section menu-section-trade-pulse">
@@ -4922,8 +5906,8 @@ function App() {
               }
             >
               <div className="menu-toggle-copy">
-                <span>Panel view</span>
-                <small>open, minimize, or close the dependency radar drawer</small>
+                <span>Panel</span>
+                <small>Globe dependency radar</small>
               </div>
               <strong>
                 {showTradePulsePanel
@@ -4933,6 +5917,29 @@ function App() {
                   : "Closed"}
               </strong>
             </button>
+            <div className="menu-trade-pulse-years" role="group" aria-label="Trade year">
+              {tradePulseYearOptions.map((year) => (
+                <button
+                  type="button"
+                  key={year}
+                  className={`menu-toggle-item menu-trade-pulse-year ${
+                    tradePulsePeriod === year ? "active" : ""
+                  }`}
+                  aria-pressed={tradePulsePeriod === year}
+                  onClick={() =>
+                    runRateLimitedButtonAction(`menu-trade-pulse-year-${year}`, () => {
+                      selectTradePulsePeriod(year);
+                    })
+                  }
+                >
+                  <div className="menu-toggle-copy">
+                    <span>{year}</span>
+                    <small>Annual period</small>
+                  </div>
+                  <strong>{tradePulsePeriod === year ? "On" : "Off"}</strong>
+                </button>
+              ))}
+            </div>
             <button
               type="button"
               className={`menu-toggle-item ${allTradePulseLayersEnabled ? "active" : ""}`}
@@ -4945,8 +5952,8 @@ function App() {
               }
             >
               <div className="menu-toggle-copy">
-                <span>All pulse layers</span>
-                <small>toggle every dependency radar layer at once</small>
+                <span>All layers</span>
+                <small>Show every radar layer</small>
               </div>
               <strong>{allTradePulseLayersEnabled ? "On" : "Mixed"}</strong>
             </button>
@@ -5101,13 +6108,21 @@ function App() {
             {authUser ? (
               <>
                 <div className="menu-section-meta auth-user-meta">
-                  Signed in · {shortFingerprint(authUser.fingerprint)}
-                  {authUser.primaryUserId
-                    ? ` · ${authUser.primaryUserId}`
-                    : ""}
-                  {authUser.transitPaid
-                    ? " · Transit + Live Feed paid"
-                    : ""}
+                  <div className="auth-user-meta-status">
+                    Signed in
+                    {authUser.transitPaid
+                      ? " · Transit + Live Feed paid"
+                      : ""}
+                    {authUser.primaryUserId
+                      ? ` · ${authUser.primaryUserId}`
+                      : ""}
+                  </div>
+                  <div
+                    className="auth-user-fingerprint"
+                    title="Full OpenPGP fingerprint"
+                  >
+                    {formatFingerprint(authUser.fingerprint)}
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -5147,24 +6162,22 @@ function App() {
                 Sign in
               </button>
             )}
-            {authUser && isAdmin ? (
+            {authUser ? (
               <button
                 type="button"
-                className="menu-item menu-item-button admin-menu-item"
+                className={`menu-item menu-item-button admin-menu-item ${
+                  isAdmin ? "" : "admin-menu-item-locked"
+                }`}
                 onClick={() => {
                   void openAdminPanel();
                 }}
+                title={
+                  isAdmin
+                    ? "Open admin portal"
+                    : "Open admin status (this key may not be allowlisted)"
+                }
               >
-                Admin
-              </button>
-            ) : authUser ? (
-              <button
-                type="button"
-                className="menu-item menu-item-button"
-                disabled
-                title="Settings is only available to allowlisted admin keys (ADMIN_FINGERPRINTS)"
-              >
-                Settings
+                {isAdmin ? "Admin" : "Admin (locked)"}
               </button>
             ) : null}
             <a

@@ -62,6 +62,11 @@ type ChallengeRecord = {
   message: string;
   createdAt: string;
   expiresAt: string;
+  /**
+   * Issued for unregistered fingerprints so challenge responses stay uniform
+   * (anti-enumeration). Login always fails for decoy challenges.
+   */
+  decoy?: boolean;
 };
 
 export type PublicUser = {
@@ -84,9 +89,10 @@ function parseCsvList(raw?: string): string[] {
  */
 function parseFingerprintAllowlist(raw?: string): string[] {
   return (raw || "")
-    .split(",")
-    .map((s) => s.replace(/[\s:]/g, "").toLowerCase())
-    .filter(Boolean);
+    .replace(/^\uFEFF/, "")
+    .split(/[,\n;]+/)
+    .map((s) => s.replace(/[\s:"']/g, "").toLowerCase())
+    .filter((s) => s.length >= 16 && /^[a-f0-9]+$/.test(s));
 }
 
 /**
@@ -99,14 +105,23 @@ export function isAdminUser(user: UserRecord, env: AuthEnv): boolean {
   const fps = parseFingerprintAllowlist(env.ADMIN_FINGERPRINTS);
   const ids = parseCsvList(env.ADMIN_USER_IDS);
   if (fps.length === 0 && ids.length === 0) return false;
-  const fp = user.fingerprint.replace(/[\s:]/g, "").toLowerCase();
-  return fps.includes(fp) || ids.includes(user.id.toLowerCase());
+  const fp = (user.fingerprint || "").replace(/[\s:]/g, "").toLowerCase();
+  if (fp && fps.includes(fp)) return true;
+  // Also accept allowlist entry that matches ignoring length edge cases
+  // (exact hex equality only — never partial/prefix guess for security).
+  if (fp && fps.some((a) => a === fp)) return true;
+  const uid = (user.id || "").toLowerCase();
+  return Boolean(uid && ids.includes(uid));
 }
 
 function adminFlags(user: UserRecord, env: AuthEnv) {
+  const fps = parseFingerprintAllowlist(env.ADMIN_FINGERPRINTS);
+  const ids = parseCsvList(env.ADMIN_USER_IDS);
   return {
     isAdmin: isAdminUser(user, env),
     adminActionSecretRequired: Boolean(env.ADMIN_ACTION_SECRET?.trim()),
+    /** True if server has any admin allowlist configured (does not leak entries). */
+    adminAllowlistConfigured: fps.length > 0 || ids.length > 0,
   };
 }
 
@@ -208,8 +223,26 @@ export function clientIp(request: Request): string {
   );
 }
 
+function rateLimitedResponse(
+  windowMs: number,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Response {
+  return json(
+    {
+      error: "rate_limited",
+      message: "Too many requests. Try again shortly.",
+    },
+    {
+      status: 429,
+      headers: { "retry-after": String(Math.ceil(windowMs / 1000)) },
+    },
+    applySecurityHeaders,
+  );
+}
+
 /**
- * Sliding-window rate limit. Returns a 429 Response when exceeded, else null.
+ * In-isolate sliding-window rate limit (best-effort only).
+ * Prefer rateLimitDurable for auth/admin — Workers isolates do not share memory.
  */
 export function rateLimitOrNull(
   key: string,
@@ -230,17 +263,49 @@ export function rateLimitOrNull(
   }
   bucket.count += 1;
   if (bucket.count > limit) {
-    return json(
-      {
-        error: "rate_limited",
-        message: "Too many requests. Try again shortly.",
-      },
-      {
-        status: 429,
-        headers: { "retry-after": String(Math.ceil(windowMs / 1000)) },
-      },
-      applySecurityHeaders,
-    );
+    return rateLimitedResponse(windowMs, applySecurityHeaders);
+  }
+  return null;
+}
+
+/**
+ * Durable rate limit for auth/admin:
+ * 1) In-isolate memory (strong when requests stick to one isolate)
+ * 2) BILLING_KV fixed window (soft global across isolates; KV is eventually
+ *    consistent so slight overshoot is possible, still blocks multi-isolate spam)
+ */
+export async function rateLimitDurable(
+  env: { BILLING_KV?: KVNamespace },
+  key: string,
+  limit: number,
+  windowMs: number,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response | null> {
+  // Always enforce isolate-local first (deterministic for sticky colos).
+  const local = rateLimitOrNull(key, limit, windowMs, applySecurityHeaders);
+  if (local) return local;
+
+  if (!env.BILLING_KV) return null;
+
+  const windowId = Math.floor(Date.now() / Math.max(1, windowMs));
+  const safeKey = key.replace(/[^a-zA-Z0-9:_./-]/g, "_").slice(0, 180);
+  const kvKey = `rate:${safeKey}:${windowId}`;
+  const ttlSec = Math.max(2, Math.ceil(windowMs / 1000) + 2);
+
+  try {
+    const raw = await env.BILLING_KV.get(kvKey);
+    const parsed = raw ? Number.parseInt(raw, 10) : 0;
+    const count = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    if (count >= limit) {
+      return rateLimitedResponse(windowMs, applySecurityHeaders);
+    }
+    // Best-effort cross-isolate counter (eventual consistency).
+    await env.BILLING_KV.put(kvKey, String(count + 1), {
+      expirationTtl: ttlSec,
+    });
+  } catch {
+    // Local limit already applied above.
+    return null;
   }
   return null;
 }
@@ -385,21 +450,26 @@ async function parseAndValidatePublicKey(armored: string): Promise<{
     throw new Error("key_not_usable");
   }
 
-  // Extra strength guard (RSA bit length / algorithm family)
+  // Extra strength guard (RSA bit length / algorithm family).
+  // Never use alg.includes("dsa") — it false-positives on "ecdsa" and "eddsa"
+  // and rejected valid NIST P-256/P-384 and some mobile/new OpenPGP keys.
   try {
     const algo = key.getAlgorithmInfo() as {
       algorithm?: string;
       bits?: number;
     };
+    const alg = (algo.algorithm || "").toLowerCase();
+    const isRsa = alg.includes("rsa");
     if (
+      isRsa &&
       typeof algo.bits === "number" &&
       algo.bits > 0 &&
       algo.bits < 2048
     ) {
       throw new Error("weak_key");
     }
-    const alg = (algo.algorithm || "").toLowerCase();
-    if (alg.includes("dsa") || alg === "elgamal") {
+    // Classical DSA / ElGamal only (not ecdsa / eddsa / ed25519).
+    if (alg === "dsa" || alg === "elgamal") {
       throw new Error("weak_key");
     }
   } catch (error) {
@@ -569,7 +639,8 @@ export async function registerUser(
   env: AuthEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const limited = rateLimitOrNull(
+  const limited = await rateLimitDurable(
+    env,
     `auth:register:${clientIp(request)}`,
     5,
     60_000,
@@ -701,7 +772,8 @@ export async function createAuthChallenge(
   env: AuthEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const limited = rateLimitOrNull(
+  const limited = await rateLimitDurable(
+    env,
     `auth:challenge:${clientIp(request)}`,
     10,
     60_000,
@@ -778,19 +850,11 @@ export async function createAuthChallenge(
     );
   }
 
+  // Look up registration but NEVER branch response shape on the result
+  // (anti-enumeration). Unregistered fingerprints get a decoy challenge;
+  // login always fails with the same auth_failed path as a bad signature.
   const userId = await env.BILLING_KV.get(fingerprintKey(fingerprint));
-  if (!userId) {
-    // Generic response — do not confirm whether fingerprint exists after challenge
-    // For challenge we still need known identity; return generic auth failure style
-    return json(
-      {
-        error: "unknown_identity",
-        message: "No account for that fingerprint. Register the public key first.",
-      },
-      { status: 404 },
-      applySecurityHeaders,
-    );
-  }
+  const registered = Boolean(userId);
 
   const origin = new URL(request.url).origin;
   const challengeId = randomId(16);
@@ -810,12 +874,15 @@ export async function createAuthChallenge(
     message,
     createdAt: new Date().toISOString(),
     expiresAt,
+    decoy: !registered,
   };
 
   await env.BILLING_KV.put(challengeKey(challengeId), JSON.stringify(record), {
     expirationTtl: CHALLENGE_TTL_SECONDS,
   });
 
+  // Identical response whether or not the fingerprint is registered.
+  // (No existence signal in status code, error code, or body fields.)
   return json(
     {
       challengeId,
@@ -833,7 +900,8 @@ export async function loginUser(
   env: AuthEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const limited = rateLimitOrNull(
+  const limited = await rateLimitDurable(
+    env,
     `auth:login:${clientIp(request)}`,
     10,
     60_000,
@@ -967,6 +1035,19 @@ export async function loginUser(
     );
   }
 
+  // Decoy challenges (unregistered fingerprints) fail with the same message as
+  // a bad signature so existence is not confirmed at login either.
+  if (challenge.decoy) {
+    return json(
+      {
+        error: "auth_failed",
+        message: "Could not verify signature.",
+      },
+      { status: 401 },
+      applySecurityHeaders,
+    );
+  }
+
   const userId = await env.BILLING_KV.get(fingerprintKey(fingerprint));
   if (!userId) {
     return json(
@@ -1059,7 +1140,8 @@ export async function adoptSessionToken(
   env: AuthEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const limited = rateLimitOrNull(
+  const limited = await rateLimitDurable(
+    env,
     `auth:adopt:${clientIp(request)}`,
     20,
     60_000,
@@ -1229,6 +1311,100 @@ export async function setUserTransitPaid(
   user.transitPaid = paid;
   await env.BILLING_KV.put(userKey(userId), JSON.stringify(user));
   return user;
+}
+
+/**
+ * Permanently remove a user account and related session/entitlement keys.
+ * Does not delete Stripe-side customers; only app KV records.
+ * Keeps payment:claimed:* ledger entries so a paid Checkout session cannot be
+ * re-bound to a new account after deletion (anti-replay).
+ * Returns public summary of what was removed, or null if user missing.
+ */
+export async function deleteUserAccount(
+  env: AuthEnv,
+  userId: string,
+): Promise<{
+  id: string;
+  fingerprint: string;
+  sessionsRevoked: number;
+} | null> {
+  if (!env.BILLING_KV || !userId) return null;
+  const id = userId.trim().toLowerCase();
+  if (!/^[a-f0-9]{16,64}$/.test(id)) return null;
+
+  // Prefer exact key; also try original casing if caller passed mixed case
+  let raw = await env.BILLING_KV.get(userKey(id));
+  if (!raw && userId.trim() !== id) {
+    raw = await env.BILLING_KV.get(userKey(userId.trim()));
+  }
+  if (!raw) return null;
+
+  let user: UserRecord;
+  try {
+    user = JSON.parse(raw) as UserRecord;
+  } catch {
+    return null;
+  }
+
+  const storedId = (user.id || id).trim().toLowerCase() || id;
+  const fp = (user.fingerprint || "").replace(/[\s:]/g, "").toLowerCase();
+
+  // Revoke all tracked sessions for this user
+  const sessions = await listUserSessions(env, storedId);
+  // Also try non-normalized id if different
+  const sessionsAlt =
+    storedId !== userId.trim()
+      ? await listUserSessions(env, userId.trim())
+      : [];
+  const allSessions = [...new Set([...sessions, ...sessionsAlt])];
+  for (const sid of allSessions) {
+    if (/^[a-f0-9]{32,128}$/i.test(sid)) {
+      await env.BILLING_KV.delete(sessionKey(sid));
+    }
+  }
+  await env.BILLING_KV.delete(userSessionsKey(storedId));
+  if (user.id && user.id !== storedId) {
+    await env.BILLING_KV.delete(userSessionsKey(user.id));
+  }
+
+  // Identity maps — only drop fingerprint if it points at this user (or empty)
+  if (fp && /^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(fp)) {
+    const mapped = await env.BILLING_KV.get(fingerprintKey(fp));
+    if (!mapped || mapped === storedId || mapped === user.id || mapped === id) {
+      await env.BILLING_KV.delete(fingerprintKey(fp));
+    }
+  }
+
+  await env.BILLING_KV.delete(userKey(storedId));
+  if (user.id && user.id !== storedId) {
+    await env.BILLING_KV.delete(userKey(user.id));
+  }
+
+  // Entitlement record + linked payment:session mirror (not claim ledger)
+  const entKey = `entitlement:user:${storedId}`;
+  const entRaw = await env.BILLING_KV.get(entKey);
+  if (entRaw) {
+    try {
+      const ent = JSON.parse(entRaw) as { sessionId?: string | null };
+      const sid =
+        typeof ent.sessionId === "string" ? ent.sessionId.trim() : "";
+      if (sid && /^cs_[a-zA-Z0-9_]+$/.test(sid)) {
+        await env.BILLING_KV.delete(`payment:session:${sid}`);
+      }
+    } catch {
+      // ignore corrupt entitlement
+    }
+    await env.BILLING_KV.delete(entKey);
+  }
+  if (user.id && user.id !== storedId) {
+    await env.BILLING_KV.delete(`entitlement:user:${user.id}`);
+  }
+
+  return {
+    id: storedId,
+    fingerprint: fp || user.fingerprint || "",
+    sessionsRevoked: allSessions.length,
+  };
 }
 
 /**

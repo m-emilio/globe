@@ -13,10 +13,12 @@ import {
 } from "./auth";
 import {
   adminClaimSession,
+  adminDeleteUser,
   adminElevate,
   adminElevateChallenge,
   adminGrantTransit,
   adminListAudit,
+  adminListUsers,
   adminLookupUser,
   adminRevokeTransit,
   adminStatus,
@@ -74,27 +76,165 @@ const COMTRADE_PERIOD = "2023";
 const COMTRADE_CACHE_SECONDS = 6 * 60 * 60;
 const COMTRADE_PREVIEW_QUERY =
   "C/A/HS annual merchandise trade, USA, World, all commodities";
-const COMTRADE_EXPORT_URL =
+/** Unauthenticated public sample (no subscription key). */
+const COMTRADE_PUBLIC_EXPORT_URL =
   `${COMTRADE_API_BASE}/public/v1/preview/C/A/HS?reporterCode=${COMTRADE_REPORTER_CODE}` +
   `&period=${COMTRADE_PERIOD}&cmdCode=TOTAL&flowCode=X&partnerCode=0` +
   "&maxRecords=10&format=JSON&includeDesc=true";
-const COMTRADE_IMPORT_URL =
+const COMTRADE_PUBLIC_IMPORT_URL =
   `${COMTRADE_API_BASE}/public/v1/preview/C/A/HS?reporterCode=${COMTRADE_REPORTER_CODE}` +
   `&period=${COMTRADE_PERIOD}&cmdCode=TOTAL&flowCode=M&partnerCode=0` +
   "&maxRecords=10&format=JSON&includeDesc=true";
-const COMTRADE_AVAILABILITY_URL =
+const COMTRADE_PUBLIC_AVAILABILITY_URL =
   `${COMTRADE_API_BASE}/public/v1/getDa/C/A/HS?reporterCode=${COMTRADE_REPORTER_CODE}` +
   `&period=${COMTRADE_PERIOD}`;
+/** Free APIs (comtrade - v1) — requires Ocp-Apim-Subscription-Key server-side only. */
+const COMTRADE_FREE_EXPORT_URL =
+  `${COMTRADE_API_BASE}/data/v1/get/C/A/HS?reporterCode=${COMTRADE_REPORTER_CODE}` +
+  `&period=${COMTRADE_PERIOD}&cmdCode=TOTAL&flowCode=X&partnerCode=0` +
+  "&maxRecords=10&format=JSON&includeDesc=true";
+const COMTRADE_FREE_IMPORT_URL =
+  `${COMTRADE_API_BASE}/data/v1/get/C/A/HS?reporterCode=${COMTRADE_REPORTER_CODE}` +
+  `&period=${COMTRADE_PERIOD}&cmdCode=TOTAL&flowCode=M&partnerCode=0` +
+  "&maxRecords=10&format=JSON&includeDesc=true";
+const COMTRADE_FREE_AVAILABILITY_URL =
+  `${COMTRADE_API_BASE}/data/v1/getDa/C/A/HS?reporterCode=${COMTRADE_REPORTER_CODE}` +
+  `&period=${COMTRADE_PERIOD}`;
+/** @deprecated alias — public preview export (kept for response.apiUrl fallbacks) */
+const COMTRADE_EXPORT_URL = COMTRADE_PUBLIC_EXPORT_URL;
+const COMTRADE_IMPORT_URL = COMTRADE_PUBLIC_IMPORT_URL;
+const COMTRADE_AVAILABILITY_URL = COMTRADE_PUBLIC_AVAILABILITY_URL;
 const COMTRADE_REFERENCES_URL =
   `${COMTRADE_API_BASE}/files/v1/app/reference/ListofReferences.json`;
 const COMTRADE_REPORTERS_URL =
   `${COMTRADE_API_BASE}/files/v1/app/reference/Reporters.json`;
 const COMTRADE_RETRY_DELAY_MS = 1_250;
 const COMTRADE_PREVIEW_LIMIT = 5;
-const TRADE_PULSE_SOURCE = "UN Comtrade Plus derived preview";
-const TRADE_PULSE_API_URL = `${COMTRADE_API_BASE}/public/v1/preview/C/A/HS`;
-const TRADE_PULSE_QUERY =
-  "Derived global dependency radar using Comtrade reporter, partner, flow, value, CIF/FOB, mode of transport, second partner, and customs procedure fields";
+const TRADE_PULSE_SOURCE_DERIVED = "FederalKey derived dependency scenario";
+const TRADE_PULSE_SOURCE_LIVE = "UN Comtrade Free API · dependency radar";
+const TRADE_PULSE_API_URL = `${COMTRADE_API_BASE}/data/v1/get/C/A/HS`;
+const TRADE_PULSE_QUERY_DERIVED =
+  "Derived global dependency radar (scenario UI). Uses Comtrade-shaped fields; not a live official UN extract.";
+const TRADE_PULSE_QUERY_LIVE =
+  "Live Free API values for radar routes (HS annual). Indicators computed server-side; limited sample not bulk extract.";
+const TRADE_PULSE_PERIODS = ["2022", "2023", "2024", "2025"] as const;
+type TradePulsePeriod = (typeof TRADE_PULSE_PERIODS)[number];
+const TRADE_PULSE_DEFAULT_PERIOD: TradePulsePeriod = "2023";
+const TRADE_PULSE_PERIOD = TRADE_PULSE_DEFAULT_PERIOD;
+/** Path A product policy: Comtrade surfaces stay free/public; never resell API keys. */
+const COMTRADE_ACCESS_TIER = "free-public" as const;
+const COMTRADE_COMPLIANCE_NOTES = [
+  "Limited public preview sample from the UN Comtrade public API — not a bulk download or premium extract.",
+  "Free on FederalKey. Transit maps and Live Feed are the paid product; this drawer is not sold as UN Comtrade access.",
+  "Attribution: UN Comtrade Plus. FederalKey does not resell UN API keys or re-host bulk original datasets.",
+] as const;
+const COMTRADE_FREE_COMPLIANCE_NOTES = [
+  "Limited sample via UN Comtrade Free APIs (comtrade - v1), fetched server-side only — not a bulk extract or premium product.",
+  "Free on FederalKey. Subscription key stays in the Worker; never exposed to browsers or resold.",
+  "Transit maps and Live Feed are the paid product; this drawer is not sold as UN Comtrade access.",
+] as const;
+const TRADE_PULSE_COMPLIANCE_NOTES = [
+  "Derived dependency scenario / preview — not official live UN Comtrade statistics.",
+  "Routes and indicators are FederalKey scenario data for UI and risk framing, not a literal shipment tracker.",
+  "Free public surface (Path A). Paid Transit/Live Feed do not unlock or resell Comtrade raw data or API keys.",
+] as const;
+const TRADE_PULSE_LIVE_COMPLIANCE_NOTES = [
+  "Route values hydrated from UN Comtrade Free APIs (server-side key only) for a small fixed route set.",
+  "Radar indicators (share, asymmetry, friction) are FederalKey transforms — not a bulk original dump or key resale.",
+  "Free on FederalKey; not unlocked by Transit payment.",
+] as const;
+/** iso3 → Comtrade reporter/partner numeric code */
+const TRADE_PULSE_REPORTER_CODES: Record<string, string> = {
+  BRA: "76",
+  CHN: "156",
+  COL: "170",
+  DEU: "276",
+  EGY: "818",
+  IND: "699",
+  IDN: "360",
+  KAZ: "398",
+  KEN: "404",
+  MEX: "484",
+  MYS: "458",
+  NLD: "528",
+  NOR: "579",
+  PAN: "591",
+  RUS: "643",
+  SGP: "702",
+  USA: "842",
+  VNM: "704",
+  ZAF: "710",
+};
+const TRADE_PULSE_LIVE_CACHE_TTL_MS = 60 * 60 * 1000;
+/** Serve last good live payload a bit longer if Free API is rate-limited. */
+const TRADE_PULSE_LIVE_STALE_TTL_MS = 24 * 60 * 60 * 1000;
+const TRADE_PULSE_KV_CACHE_PREFIX = "comtrade:trade-pulse:live:v3:";
+const tradePulseLiveCacheByPeriod = new Map<
+  string,
+  {
+    at: number;
+    preview: TradePulsePreview;
+  }
+>();
+
+type TradePulseKvCache = {
+  at: number;
+  preview: TradePulsePreview;
+};
+
+function tradePulseKvCacheKey(period: string) {
+  return `${TRADE_PULSE_KV_CACHE_PREFIX}${period}`;
+}
+
+function parseTradePulsePeriod(raw: string | null | undefined): TradePulsePeriod {
+  const value = (raw || "").trim();
+  if ((TRADE_PULSE_PERIODS as readonly string[]).includes(value)) {
+    return value as TradePulsePeriod;
+  }
+  return TRADE_PULSE_DEFAULT_PERIOD;
+}
+
+async function readTradePulseKvCache(
+  env: Env,
+  period: string,
+): Promise<TradePulseKvCache | null> {
+  try {
+    const raw = await env.BILLING_KV.get(tradePulseKvCacheKey(period), "json");
+    if (!raw || typeof raw !== "object") return null;
+    const parsed = raw as TradePulseKvCache;
+    if (
+      !parsed.preview ||
+      parsed.preview.dataMode !== "free-subscription" ||
+      !Array.isArray(parsed.preview.routes) ||
+      parsed.preview.period !== period
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function writeTradePulseKvCache(
+  env: Env,
+  period: string,
+  entry: TradePulseKvCache,
+  secrets: string[] = [],
+): Promise<void> {
+  try {
+    // Never persist raw secrets in KV — scrub before write.
+    const scrubbed: TradePulseKvCache = {
+      at: entry.at,
+      preview: scrubComtradeClientPayload(entry.preview, secrets),
+    };
+    await env.BILLING_KV.put(tradePulseKvCacheKey(period), JSON.stringify(scrubbed), {
+      expirationTtl: Math.ceil(TRADE_PULSE_LIVE_STALE_TTL_MS / 1000),
+    });
+  } catch (error) {
+    safeWarn("Trade Pulse KV cache write failed", error, secrets);
+  }
+}
 const UN_GLOBAL_SOURCE = "UN Peace & Security Data Hub / UNSD SDG API";
 const UN_GLOBAL_SOURCE_URL = "https://psdata.un.org/dataset/DPPADPOSS-PKO";
 const UN_GLOBAL_API_BASE = "https://api.psdata.un.org/public";
@@ -1328,6 +1468,8 @@ function buildComtradePreview({
   referenceTablesTotal,
   reportersTotal,
   stale = false,
+  dataMode = "public-preview",
+  apiUrl = COMTRADE_PUBLIC_EXPORT_URL,
 }: {
   tradeRecords: ComtradeTradeRecordPreview[];
   availability: ComtradeAvailabilityPreview[];
@@ -1336,14 +1478,18 @@ function buildComtradePreview({
   referenceTablesTotal: number;
   reportersTotal: number;
   stale?: boolean;
+  dataMode?: ComtradePreview["dataMode"];
+  apiUrl?: string;
 }): ComtradePreview {
   const exportsUsd = getTradeValue(tradeRecords, "export");
   const importsUsd = getTradeValue(tradeRecords, "import");
+  const subscriptionBacked = dataMode === "free-subscription";
 
   return {
     source: COMTRADE_SOURCE,
     sourceUrl: COMTRADE_SOURCE_URL,
-    apiUrl: COMTRADE_EXPORT_URL,
+    // Public catalog URL only — never a key-bearing URL
+    apiUrl,
     updatedAt: new Date().toISOString(),
     queryLabel: COMTRADE_PREVIEW_QUERY,
     reporter: COMTRADE_REPORTER_LABEL,
@@ -1362,8 +1508,205 @@ function buildComtradePreview({
     availability: availability.slice(0, COMTRADE_PREVIEW_LIMIT),
     references: references.slice(0, COMTRADE_PREVIEW_LIMIT),
     reporters: reporters.slice(0, COMTRADE_PREVIEW_LIMIT),
+    dataMode,
+    accessTier: COMTRADE_ACCESS_TIER,
+    sampleLimit: COMTRADE_PREVIEW_LIMIT,
+    complianceNotes: subscriptionBacked
+      ? [...COMTRADE_FREE_COMPLIANCE_NOTES]
+      : [...COMTRADE_COMPLIANCE_NOTES],
+    subscriptionBacked,
     stale,
   };
+}
+
+/** Worker secret only; never log or return this value. */
+function resolveComtradeSubscriptionKey(env: Env): string | null {
+  const raw = env.COMTRADE_SUBSCRIPTION_KEY?.trim();
+  if (!raw || raw.length < 16) {
+    return null;
+  }
+  return raw;
+}
+
+/** Collect all Worker secrets that must never appear in logs or client JSON. */
+function collectWorkerSecrets(env: Env): string[] {
+  const candidates = [
+    env.COMTRADE_SUBSCRIPTION_KEY,
+    env.STRIPE_SECRET_KEY,
+    env.STRIPE_WEBHOOK_SECRET,
+    env.ADMIN_ACTION_SECRET,
+    env.TRANSIT_PUBLICAPI_V4,
+  ];
+  const out: string[] = [];
+  for (const raw of candidates) {
+    const value = raw?.trim();
+    if (value && value.length >= 8 && !out.includes(value)) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+/** Property names that must never appear on Comtrade client payloads. */
+const COMTRADE_SECRET_PROPERTY_RE =
+  /^(ocp-?apim-?subscription-?key|subscription[-_]?key|api[-_]?key|apikey|comtrade[-_]?subscription[-_]?key|primary[-_]?key|secondary[-_]?key|access[-_]?token|bearer|authorization|stripe[-_]?secret|webhook[-_]?secret|admin[-_]?action[-_]?secret)$/i;
+
+const COMTRADE_REDACTED = "[redacted]";
+
+/** Redact secrets and credential-shaped substrings from log/response text. */
+function redactSensitiveText(text: string, secrets: string[] = []): string {
+  let out = text;
+  for (const secret of secrets) {
+    if (secret.length >= 8 && out.includes(secret)) {
+      out = out.split(secret).join(COMTRADE_REDACTED);
+    }
+  }
+  return out
+    .replace(/([?&](?:subscription-?key|api-?key|access_token)=)[^&\s]+/gi, `$1${COMTRADE_REDACTED}`)
+    .replace(/(Ocp-Apim-Subscription-Key\s*[:=]\s*)\S+/gi, `$1${COMTRADE_REDACTED}`)
+    .replace(/\b(sk_(?:live|test)_[A-Za-z0-9]+)\b/g, COMTRADE_REDACTED)
+    .replace(/\b(pk_(?:live|test)_[A-Za-z0-9]+)\b/g, COMTRADE_REDACTED)
+    .replace(/\b(whsec_[A-Za-z0-9]+)\b/g, COMTRADE_REDACTED)
+    .replace(/\b(rk_live_[A-Za-z0-9]+)\b/g, COMTRADE_REDACTED)
+    .slice(0, 400);
+}
+
+/**
+ * Strip secret-shaped keys and redact known secret substrings from any value
+ * before it is serialized to the browser. Defense-in-depth for Free API path.
+ */
+function scrubComtradeClientPayload<T>(payload: T, secrets: string[] = []): T {
+  const scrub = (value: unknown, depth: number): unknown => {
+    if (depth > 12 || value === null || value === undefined) {
+      return value;
+    }
+
+    if (typeof value === "string") {
+      return redactSensitiveText(value, secrets);
+    }
+
+    if (typeof value === "number" || typeof value === "boolean") {
+      return value;
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((item) => scrub(item, depth + 1));
+    }
+
+    if (typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        if (COMTRADE_SECRET_PROPERTY_RE.test(key)) {
+          // Drop entirely — do not even send redacted secret field names to clients.
+          continue;
+        }
+        out[key] = scrub(child, depth + 1);
+      }
+      return out;
+    }
+
+    return value;
+  };
+
+  return scrub(payload, 0) as T;
+}
+
+/** Safe log text: never includes secrets even if Error.message was poisoned. */
+function safeComtradeLogMessage(
+  error: unknown,
+  knownSecret?: string | null,
+  extraSecrets: string[] = [],
+): string {
+  const secrets = [
+    ...extraSecrets,
+    ...(knownSecret?.trim() ? [knownSecret.trim()] : []),
+  ];
+  const text =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "unknown_error";
+  return redactSensitiveText(text, secrets).slice(0, 240);
+}
+
+/** Never log raw Error objects (stack/message may contain request headers/URLs). */
+function safeWarn(message: string, error?: unknown, secrets: string[] = []) {
+  if (error === undefined) {
+    console.warn(redactSensitiveText(message, secrets));
+    return;
+  }
+  console.warn(
+    `${redactSensitiveText(message, secrets)}: ${safeComtradeLogMessage(error, null, secrets)}`,
+  );
+}
+
+function responseBodyContainsSecret(serialized: string, secrets: string[]): boolean {
+  for (const secret of secrets) {
+    if (secret.length >= 8 && serialized.includes(secret)) {
+      return true;
+    }
+  }
+  // Credential-shaped tokens that must never ship to browsers.
+  if (
+    /\bsk_(?:live|test)_[A-Za-z0-9]{10,}\b/.test(serialized) ||
+    /\bwhsec_[A-Za-z0-9]{10,}\b/.test(serialized) ||
+    /Ocp-Apim-Subscription-Key/i.test(serialized)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Build a Comtrade JSON response that cannot carry Worker secrets.
+ * Scrubs body + forbids secret-bearing response headers + hard block if still present.
+ */
+function comtradeJsonResponse(
+  data: unknown,
+  knownSecret: string | null | undefined,
+  init?: ResponseInit,
+  allSecrets: string[] = [],
+) {
+  const secrets = [
+    ...allSecrets,
+    ...(knownSecret?.trim() ? [knownSecret.trim()] : []),
+  ];
+  const scrubbed = scrubComtradeClientPayload(data, secrets);
+  const serialized = JSON.stringify(scrubbed);
+
+  if (responseBodyContainsSecret(serialized, secrets)) {
+    safeWarn("Comtrade response blocked: secret would have leaked in JSON body", undefined, secrets);
+    return jsonResponse(
+      {
+        error: "comtrade_response_blocked",
+        message: "Preview unavailable (safety filter).",
+      },
+      {
+        status: 500,
+        headers: {
+          "cache-control": "no-store",
+          "x-comtrade-mode": "blocked",
+        },
+      },
+    );
+  }
+
+  const headers = new Headers(init?.headers);
+  // Never forward APIM / key headers to browsers.
+  for (const name of [
+    "ocp-apim-subscription-key",
+    "Ocp-Apim-Subscription-Key",
+    "subscription-key",
+    "x-api-key",
+    "authorization",
+    "cookie",
+    "set-cookie",
+  ]) {
+    headers.delete(name);
+  }
+
+  return jsonResponse(scrubbed, { ...init, headers });
 }
 
 function buildUnGlobalPreview({
@@ -1445,30 +1788,371 @@ function buildTradePulseMetrics(routes: TradePulseRoutePreview[]): TradePulseMet
   ];
 }
 
-function buildTradePulsePreview(): TradePulsePreview {
+function buildTradePulseDerivedPreview(period: TradePulsePeriod): TradePulsePreview {
+  const routes = TRADE_PULSE_ROUTES.map((route) => ({ ...route, period }));
   return {
-    source: TRADE_PULSE_SOURCE,
+    source: "Trade Pulse",
     sourceUrl: COMTRADE_SOURCE_URL,
-    apiUrl: TRADE_PULSE_API_URL,
+    apiUrl: `${COMTRADE_API_BASE}/public/v1/preview/C/A/HS`,
     updatedAt: new Date().toISOString(),
-    queryLabel: TRADE_PULSE_QUERY,
-    period: "2023",
+    queryLabel: `Annual HS radar · ${period}`,
+    period,
     dataMode: "derived-preview",
-    routes: TRADE_PULSE_ROUTES,
-    metrics: buildTradePulseMetrics(TRADE_PULSE_ROUTES),
-    notes: [
-      "This preview is a derived scenario layer for UI testing, not literal vessel or shipment tracking.",
-      "Single Supplier Dependency measures supplier concentration; Bilateral Asymmetry compares mirrored reporter and partner values.",
-      "A live build would hydrate these records from Comtrade Plus fields including flow, partner, second partner, transport mode, customs procedure, CIF, FOB, quantity, and gross weight.",
-    ],
+    accessTier: COMTRADE_ACCESS_TIER,
+    isOfficialLiveStats: false,
+    subscriptionBacked: false,
+    liveRouteCount: 0,
+    availablePeriods: [...TRADE_PULSE_PERIODS],
+    routes,
+    metrics: buildTradePulseMetrics(routes),
+    notes: [],
+    complianceNotes: [],
   };
 }
 
-function getTradePulsePreview() {
-  return jsonResponse(buildTradePulsePreview(), {
-    headers: {
-      "cache-control": "public, max-age=600, s-maxage=21600",
+function pickPrimaryComtradeValue(payload: unknown): {
+  primary: number;
+  cif: number | null;
+  fob: number | null;
+  qty: string;
+  commodity: string;
+  period: string;
+} | null {
+  const records = getComtradeResults(payload, "data");
+  for (const item of records) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as ComtradeApiRecord;
+    const primary = getApiNumber(record.primaryValue);
+    if (!(primary > 0)) continue;
+    const qty = getApiNumber(record.qty);
+    const unit = limitApiText(record.qtyUnitAbbr, 12);
+    return {
+      primary,
+      cif: getNullableApiNumber(record.cifvalue),
+      fob: getNullableApiNumber(record.fobvalue),
+      qty: qty > 0 ? `${formatCompactNumber(qty)}${unit ? ` ${unit}` : ""}` : "",
+      commodity: limitApiText(record.cmdDesc, 160) || "",
+      period: limitApiText(record.period, 12) || "",
+    };
+  }
+  return null;
+}
+
+function formatCompactNumber(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+function pctDelta(a: number, b: number): number {
+  const base = Math.max(a, b, 1);
+  return Math.round((Math.abs(a - b) / base) * 1000) / 10;
+}
+
+function frictionPct(cif: number | null, fob: number | null, fallback: number): number {
+  if (cif != null && fob != null && fob > 0 && cif >= fob) {
+    return Math.round(((cif - fob) / fob) * 1000) / 10;
+  }
+  return fallback;
+}
+
+function freeTradeUrl(params: {
+  reporterCode: string;
+  partnerCode: string;
+  flowCode: "X" | "M";
+  cmdCode: string;
+  period: string;
+}): string {
+  return (
+    `${COMTRADE_API_BASE}/data/v1/get/C/A/HS` +
+    `?reporterCode=${encodeURIComponent(params.reporterCode)}` +
+    `&period=${encodeURIComponent(params.period)}` +
+    `&partnerCode=${encodeURIComponent(params.partnerCode)}` +
+    `&cmdCode=${encodeURIComponent(params.cmdCode)}` +
+    `&flowCode=${params.flowCode}` +
+    // Single row is enough for radar metrics — faster Free API responses.
+    "&maxRecords=1&format=JSON&includeDesc=true"
+  );
+}
+
+/** Fast Free API fetch: no retry sleep (fail soft for pulse hydrate). */
+async function fetchComtradeJsonFast(
+  url: string,
+  subscriptionKey: string,
+): Promise<unknown | null> {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        accept: "application/json",
+        "Ocp-Apim-Subscription-Key": subscriptionKey,
+      },
+    });
+    if (!response.ok) {
+      return null;
+    }
+    return response.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Hydrate template routes with Free /data/v1 bilateral values.
+ * Returns null if key missing or too few routes hydrate (caller falls back to derived).
+ */
+async function hydrateOneTradePulseRoute(
+  template: TradePulseRoutePreview,
+  subscriptionKey: string,
+  period: TradePulsePeriod,
+): Promise<{ route: TradePulseRoutePreview; live: boolean }> {
+  const originCode = TRADE_PULSE_REPORTER_CODES[template.origin.iso3];
+  const destCode = TRADE_PULSE_REPORTER_CODES[template.destination.iso3];
+  if (!originCode || !destCode) {
+    return { route: { ...template, period }, live: false };
+  }
+
+  // Single import call per route (parallelized across routes) — main speed win.
+  const importPayload = await fetchComtradeJsonFast(
+    freeTradeUrl({
+      reporterCode: destCode,
+      partnerCode: originCode,
+      flowCode: "M",
+      cmdCode: template.commodityCode,
+      period,
+    }),
+    subscriptionKey,
+  );
+  const importRow = pickPrimaryComtradeValue(importPayload);
+
+  if (!importRow) {
+    return { route: { ...template, period }, live: false };
+  }
+
+  const importValueUsd = importRow.primary;
+  const exportValueUsd = importRow.primary;
+  const valueUsd = importValueUsd;
+  const cifValueUsd = importRow.cif ?? importValueUsd;
+  const fobValueUsd = importRow.fob ?? exportValueUsd;
+  const asymmetry = pctDelta(exportValueUsd, importValueUsd);
+  const friction = frictionPct(
+    typeof cifValueUsd === "number" ? cifValueUsd : null,
+    typeof fobValueUsd === "number" ? fobValueUsd : null,
+    template.frictionPct,
+  );
+
+  let severity = template.severity;
+  if (asymmetry >= 30 || friction >= 40) severity = "critical";
+  else if (asymmetry >= 18 || friction >= 25) severity = "high";
+  else if (asymmetry >= 10 || friction >= 12) severity = "elevated";
+
+  const resolvedPeriod = importRow.period || period;
+
+  return {
+    live: true,
+    route: {
+      ...template,
+      commodity: importRow.commodity || template.commodity,
+      period: resolvedPeriod,
+      valueUsd,
+      quantity: importRow.qty || template.quantity,
+      exportValueUsd,
+      importValueUsd,
+      asymmetryPct: asymmetry,
+      fobValueUsd: typeof fobValueUsd === "number" ? fobValueUsd : template.fobValueUsd,
+      cifValueUsd: typeof cifValueUsd === "number" ? cifValueUsd : template.cifValueUsd,
+      frictionPct: friction,
+      severity,
+      insight: `${resolvedPeriod} · ${template.origin.iso3}->${template.destination.iso3} · HS ${template.commodityCode} · friction ${friction}%`,
     },
+  };
+}
+
+async function hydrateTradePulseRoutesFromFreeApi(
+  subscriptionKey: string,
+  period: TradePulsePeriod,
+): Promise<{ routes: TradePulseRoutePreview[]; liveCount: number } | null> {
+  // Parallel with a small concurrency cap — full fan-out trips Free API rate limits.
+  const batchSize = 4;
+  const results: { route: TradePulseRoutePreview; live: boolean }[] = [];
+  for (let i = 0; i < TRADE_PULSE_ROUTES.length; i += batchSize) {
+    const batch = TRADE_PULSE_ROUTES.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map((template) =>
+        hydrateOneTradePulseRoute(template, subscriptionKey, period),
+      ),
+    );
+    results.push(...batchResults);
+  }
+
+  const liveCount = results.filter((r) => r.live).length;
+  if (liveCount < 1) {
+    return null;
+  }
+
+  return {
+    routes: results.map((r) => r.route),
+    liveCount,
+  };
+}
+
+/** Background-warm neighboring years so year buttons feel instant. */
+async function warmTradePulsePeriods(
+  env: Env,
+  subscriptionKey: string,
+  skipPeriod: TradePulsePeriod,
+) {
+  const secrets = collectWorkerSecrets(env);
+  for (const period of TRADE_PULSE_PERIODS) {
+    if (period === skipPeriod) continue;
+    const memory = tradePulseLiveCacheByPeriod.get(period);
+    if (memory && Date.now() - memory.at < TRADE_PULSE_LIVE_CACHE_TTL_MS) {
+      continue;
+    }
+    const kv = await readTradePulseKvCache(env, period);
+    if (kv && Date.now() - kv.at < TRADE_PULSE_LIVE_CACHE_TTL_MS) {
+      tradePulseLiveCacheByPeriod.set(period, kv);
+      continue;
+    }
+    try {
+      const live = await hydrateTradePulseRoutesFromFreeApi(subscriptionKey, period);
+      if (!live) continue;
+      const preview = buildTradePulseLivePreview(live.routes, live.liveCount, period);
+      const entry = { at: Date.now(), preview };
+      tradePulseLiveCacheByPeriod.set(period, entry);
+      await writeTradePulseKvCache(env, period, entry, secrets);
+    } catch {
+      // Best-effort warm only — never log raw errors (may hold headers).
+    }
+  }
+}
+
+function buildTradePulseLivePreview(
+  routes: TradePulseRoutePreview[],
+  liveCount: number,
+  period: TradePulsePeriod,
+): TradePulsePreview {
+  return {
+    source: "UN Comtrade",
+    sourceUrl: COMTRADE_SOURCE_URL,
+    apiUrl: TRADE_PULSE_API_URL,
+    updatedAt: new Date().toISOString(),
+    queryLabel: `Annual HS radar · ${period}`,
+    period,
+    dataMode: "free-subscription",
+    accessTier: COMTRADE_ACCESS_TIER,
+    isOfficialLiveStats: true,
+    subscriptionBacked: true,
+    liveRouteCount: liveCount,
+    availablePeriods: [...TRADE_PULSE_PERIODS],
+    routes,
+    metrics: buildTradePulseMetrics(routes),
+    notes: [],
+    complianceNotes: [],
+  };
+}
+
+async function getTradePulsePreview(
+  env: Env,
+  period: TradePulsePeriod,
+  ctx?: ExecutionContext,
+) {
+  const subscriptionKey = resolveComtradeSubscriptionKey(env);
+  const secrets = collectWorkerSecrets(env);
+  const pulseJson = (
+    preview: TradePulsePreview,
+    headers: Record<string, string>,
+  ) => comtradeJsonResponse(preview, subscriptionKey, { headers }, secrets);
+
+  if (subscriptionKey) {
+    const now = Date.now();
+    const memory = tradePulseLiveCacheByPeriod.get(period);
+    if (
+      memory &&
+      now - memory.at < TRADE_PULSE_LIVE_CACHE_TTL_MS &&
+      memory.preview.dataMode === "free-subscription" &&
+      memory.preview.period === period
+    ) {
+      ctx?.waitUntil(warmTradePulsePeriods(env, subscriptionKey, period));
+      return pulseJson(memory.preview, {
+        "cache-control": "private, max-age=300",
+        "x-comtrade-mode": "free-subscription",
+        "x-trade-pulse-cache": "memory",
+        "x-trade-pulse-period": period,
+      });
+    }
+
+    const kvFresh = await readTradePulseKvCache(env, period);
+    if (kvFresh && now - kvFresh.at < TRADE_PULSE_LIVE_CACHE_TTL_MS) {
+      tradePulseLiveCacheByPeriod.set(period, kvFresh);
+      ctx?.waitUntil(warmTradePulsePeriods(env, subscriptionKey, period));
+      return pulseJson(kvFresh.preview, {
+        "cache-control": "private, max-age=300",
+        "x-comtrade-mode": "free-subscription",
+        "x-trade-pulse-cache": "kv",
+        "x-trade-pulse-period": period,
+      });
+    }
+
+    try {
+      const live = await hydrateTradePulseRoutesFromFreeApi(subscriptionKey, period);
+      if (live) {
+        const preview = buildTradePulseLivePreview(live.routes, live.liveCount, period);
+        const entry = { at: now, preview };
+        tradePulseLiveCacheByPeriod.set(period, entry);
+        void writeTradePulseKvCache(env, period, entry, secrets);
+        // Prefetch other years after response so year buttons are cache hits.
+        ctx?.waitUntil(warmTradePulsePeriods(env, subscriptionKey, period));
+        return pulseJson(preview, {
+          "cache-control": "private, max-age=600",
+          "x-comtrade-mode": "free-subscription",
+          "x-trade-pulse-cache": "miss",
+          "x-trade-pulse-period": period,
+        });
+      }
+      safeWarn(
+        `Trade Pulse Free API hydrate incomplete for ${period}; trying stale cache or derived`,
+        undefined,
+        secrets,
+      );
+    } catch (error) {
+      safeWarn("Trade Pulse Free API hydrate failed", error, secrets);
+    }
+
+    if (
+      memory &&
+      now - memory.at < TRADE_PULSE_LIVE_STALE_TTL_MS &&
+      memory.preview.dataMode === "free-subscription"
+    ) {
+      return pulseJson(memory.preview, {
+        "cache-control": "private, max-age=120",
+        "x-comtrade-mode": "free-subscription",
+        "x-trade-pulse-cache": "stale-memory",
+        "x-trade-pulse-period": period,
+      });
+    }
+
+    const kvStale = kvFresh ?? (await readTradePulseKvCache(env, period));
+    if (
+      kvStale &&
+      now - kvStale.at < TRADE_PULSE_LIVE_STALE_TTL_MS &&
+      kvStale.preview.dataMode === "free-subscription"
+    ) {
+      tradePulseLiveCacheByPeriod.set(period, kvStale);
+      return pulseJson(kvStale.preview, {
+        "cache-control": "private, max-age=120",
+        "x-comtrade-mode": "free-subscription",
+        "x-trade-pulse-cache": "stale-kv",
+        "x-trade-pulse-period": period,
+      });
+    }
+  }
+
+  const derived = buildTradePulseDerivedPreview(period);
+  return pulseJson(derived, {
+    "cache-control": "private, max-age=60",
+    "x-comtrade-mode": "derived-preview",
+    "x-trade-pulse-period": period,
   });
 }
 
@@ -2726,15 +3410,26 @@ function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchComtradeJson(url: string) {
+async function fetchComtradeJson(
+  url: string,
+  options?: { subscriptionKey?: string | null },
+) {
+  const subscriptionKey = options?.subscriptionKey?.trim() || null;
+  const headers: Record<string, string> = {
+    accept: "application/json",
+  };
+  // Free /data/v1 APIs require Azure APIM subscription key (server-side only).
+  if (subscriptionKey) {
+    headers["Ocp-Apim-Subscription-Key"] = subscriptionKey;
+  }
+
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const response = await fetch(url, {
-      headers: {
-        accept: "application/json",
-      },
+      headers,
       cf: {
-        cacheEverything: true,
-        cacheTtl: COMTRADE_CACHE_SECONDS,
+        // Do not put authenticated Free API responses in shared edge cache.
+        cacheEverything: !subscriptionKey,
+        cacheTtl: subscriptionKey ? 0 : COMTRADE_CACHE_SECONDS,
       },
     });
 
@@ -2752,29 +3447,102 @@ async function fetchComtradeJson(url: string) {
   throw new Error(`Comtrade API request failed for ${url}`);
 }
 
-async function fetchOptionalComtradeJson(label: string, url: string) {
+async function fetchOptionalComtradeJson(
+  label: string,
+  url: string,
+  options?: { subscriptionKey?: string | null; secrets?: string[] },
+) {
   try {
-    return await fetchComtradeJson(url);
+    return await fetchComtradeJson(url, options);
   } catch (error) {
-    console.warn(`Comtrade ${label} request failed`, error);
+    // Never log subscription keys or raw Error objects.
+    const secrets = [
+      ...(options?.secrets ?? []),
+      ...(options?.subscriptionKey?.trim() ? [options.subscriptionKey.trim()] : []),
+    ];
+    safeWarn(`Comtrade ${label} request failed`, error, secrets);
     return null;
   }
 }
 
-async function getComtradePreview() {
-  const exportPayload = await fetchOptionalComtradeJson("exports", COMTRADE_EXPORT_URL);
-  const importPayload = await fetchOptionalComtradeJson("imports", COMTRADE_IMPORT_URL);
-  const availabilityPayload = await fetchOptionalComtradeJson(
-    "availability",
-    COMTRADE_AVAILABILITY_URL,
-  );
+/**
+ * Prefer Free /data/v1 when COMTRADE_SUBSCRIPTION_KEY is set.
+ * On missing key or Free API failure, fall back to public /public/v1 preview.
+ * The subscription key is never returned to the client.
+ */
+async function getComtradePreview(env: Env) {
+  const subscriptionKey = resolveComtradeSubscriptionKey(env);
+  const secrets = collectWorkerSecrets(env);
+  let dataMode: ComtradePreview["dataMode"] = "public-preview";
+  let apiUrl = COMTRADE_PUBLIC_EXPORT_URL;
+  let usedFreeApi = false;
+
+  let exportPayload: unknown = null;
+  let importPayload: unknown = null;
+  let availabilityPayload: unknown = null;
+
+  if (subscriptionKey) {
+    exportPayload = await fetchOptionalComtradeJson("exports-free", COMTRADE_FREE_EXPORT_URL, {
+      subscriptionKey,
+      secrets,
+    });
+    importPayload = await fetchOptionalComtradeJson("imports-free", COMTRADE_FREE_IMPORT_URL, {
+      subscriptionKey,
+      secrets,
+    });
+    availabilityPayload = await fetchOptionalComtradeJson(
+      "availability-free",
+      COMTRADE_FREE_AVAILABILITY_URL,
+      { subscriptionKey, secrets },
+    );
+
+    const freeTradeRows =
+      normalizeComtradeTradeRecords(exportPayload).length +
+      normalizeComtradeTradeRecords(importPayload).length;
+
+    if (freeTradeRows > 0) {
+      usedFreeApi = true;
+      dataMode = "free-subscription";
+      apiUrl = COMTRADE_FREE_EXPORT_URL;
+    } else {
+      // Free path failed (401/429/empty) — public preview fallback.
+      safeWarn(
+        "Comtrade Free /data/v1 returned no trade rows; falling back to public preview",
+        undefined,
+        secrets,
+      );
+      exportPayload = null;
+      importPayload = null;
+      availabilityPayload = null;
+    }
+  }
+
+  if (!usedFreeApi) {
+    exportPayload = await fetchOptionalComtradeJson("exports", COMTRADE_PUBLIC_EXPORT_URL, {
+      secrets,
+    });
+    importPayload = await fetchOptionalComtradeJson("imports", COMTRADE_PUBLIC_IMPORT_URL, {
+      secrets,
+    });
+    availabilityPayload = await fetchOptionalComtradeJson(
+      "availability",
+      COMTRADE_PUBLIC_AVAILABILITY_URL,
+      { secrets },
+    );
+    dataMode = "public-preview";
+    apiUrl = COMTRADE_PUBLIC_EXPORT_URL;
+  }
+
+  // Reference metadata is public (no subscription key).
   const referencesPayload = await fetchOptionalComtradeJson(
     "references",
     COMTRADE_REFERENCES_URL,
+    { secrets },
   );
   const reportersPayload = await fetchOptionalComtradeJson(
     "reporters",
     COMTRADE_REPORTERS_URL,
+    { secrets },
   );
 
   let stale = false;
@@ -2810,24 +3578,34 @@ async function getComtradePreview() {
     reportersTotal = reporters.length;
   }
 
-  return jsonResponse(
-    buildComtradePreview({
-      tradeRecords,
-      availability,
-      references,
-      reporters,
-      referenceTablesTotal,
-      reportersTotal,
-      stale,
-    }),
+  const preview = buildComtradePreview({
+    tradeRecords,
+    availability,
+    references,
+    reporters,
+    referenceTablesTotal,
+    reportersTotal,
+    stale,
+    dataMode,
+    apiUrl,
+  });
+
+  return comtradeJsonResponse(
+    preview,
+    subscriptionKey,
     {
       headers: {
+        // Keep edge TTL short so COMTRADE_SUBSCRIPTION_KEY put/rotate is visible quickly.
         "cache-control": stale
           ? "no-store"
-          : "public, max-age=600, s-maxage=21600",
+          : usedFreeApi
+            ? "private, max-age=300"
+            : "public, max-age=120, s-maxage=300",
+        "x-comtrade-mode": dataMode,
         ...(stale ? { "x-comtrade-preview": "partial-fallback" } : {}),
       },
     },
+    secrets,
   );
 }
 
@@ -2853,7 +3631,8 @@ async function fetchOptionalUnGlobalJson(label: string, url: string) {
   try {
     return await fetchUnGlobalJson(url);
   } catch (error) {
-    console.warn(`UN global ${label} request failed`, error);
+    // Message only — never raw Error (may include headers/stack).
+    safeWarn(`UN global ${label} request failed`, error);
     return null;
   }
 }
@@ -2881,7 +3660,7 @@ async function fetchOptionalUnGlobalText(label: string, url: string) {
   try {
     return await fetchUnGlobalText(url);
   } catch (error) {
-    console.warn(`UN global ${label} request failed`, error);
+    safeWarn(`UN global ${label} request failed`, error);
     return null;
   }
 }
@@ -3182,9 +3961,15 @@ export class Globe extends Server<Env> {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
 
+    // Path A: Comtrade + Trade Pulse stay free/public (not Stripe-gated).
+    // Monetization is Transit / Live Feed only. Do not expose or resell UN API keys.
     if (url.pathname === "/api/comtrade-preview") {
       if (!isReadApiMethod(request)) {
         return methodNotAllowedResponse();
@@ -3197,7 +3982,7 @@ export default {
       );
       if (limited) return limited;
 
-      return withoutResponseBodyForHead(request, await getComtradePreview());
+      return withoutResponseBodyForHead(request, await getComtradePreview(env));
     }
 
     if (url.pathname === "/api/comtrade-pulse-preview") {
@@ -3212,7 +3997,11 @@ export default {
       );
       if (limited) return limited;
 
-      return withoutResponseBodyForHead(request, getTradePulsePreview());
+      const pulsePeriod = parseTradePulsePeriod(url.searchParams.get("period"));
+      return withoutResponseBodyForHead(
+        request,
+        await getTradePulsePreview(env, pulsePeriod, ctx),
+      );
     }
 
     if (url.pathname === "/api/un-global-preview") {
@@ -3355,6 +4144,25 @@ export default {
         request,
         await adminListAudit(request, env, applySecurityHeaders),
       );
+    }
+    if (url.pathname === "/api/admin/users") {
+      // GET for simple clients; POST preferred (elevated list with headers/body)
+      if (request.method === "POST") {
+        return adminListUsers(request, env, applySecurityHeaders);
+      }
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminListUsers(request, env, applySecurityHeaders),
+      );
+    }
+    if (url.pathname === "/api/admin/delete-user") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adminDeleteUser(request, env, applySecurityHeaders);
     }
 
     // --- Stripe Payment Link + webhook entitlement ---

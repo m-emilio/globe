@@ -10,7 +10,25 @@
  * - Session: **HttpOnly cookie only** (no session token in sessionStorage / JS)
  */
 
-import * as openpgp from "openpgp";
+/**
+ * Lazy-load OpenPGP (~380KB) only when crypto is actually used (auth/sign).
+ * Keeps the initial globe shell fast without removing any security checks.
+ */
+type OpenPgpModule = typeof import("openpgp");
+let openpgpModule: OpenPgpModule | null = null;
+let openpgpLoadPromise: Promise<OpenPgpModule> | null = null;
+
+/** Prefetch or load the OpenPGP library (safe to call early when opening Auth). */
+export async function ensureOpenPgp(): Promise<OpenPgpModule> {
+  if (openpgpModule) return openpgpModule;
+  if (!openpgpLoadPromise) {
+    openpgpLoadPromise = import("openpgp").then((mod) => {
+      openpgpModule = mod;
+      return mod;
+    });
+  }
+  return openpgpLoadPromise;
+}
 
 /** Public fingerprint only (not secret). Prefer device vault over this. */
 const LAST_FP_KEY = "globe_pgp_last_fp";
@@ -579,12 +597,22 @@ type StoredDeviceKey = {
 function openDeviceDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
-      reject(new Error("This browser has no IndexedDB for device keys."));
+      reject(
+        new Error(
+          "This browser has no IndexedDB for device keys. Private/incognito mode or some in-app browsers block it — try Safari/Chrome with a normal (non-private) tab.",
+        ),
+      );
       return;
     }
     const req = indexedDB.open(IDB_NAME, IDB_VERSION);
     req.onerror = () =>
       reject(req.error || new Error("Could not open device key store"));
+    req.onblocked = () =>
+      reject(
+        new Error(
+          "Device key store is blocked (another tab may have an older version open). Close other tabs for this site and try again.",
+        ),
+      );
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(IDB_STORE)) {
@@ -606,6 +634,75 @@ function idbReq<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
+/**
+ * Wait for the full transaction to commit before closing the DB.
+ * Mobile Safari often drops writes if the connection closes early.
+ */
+function idbTxDone(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onabort = () =>
+      reject(tx.error || new Error("IndexedDB transaction aborted"));
+    tx.onerror = () =>
+      reject(tx.error || new Error("IndexedDB transaction failed"));
+  });
+}
+
+async function idbPut(
+  storeName: string,
+  value: unknown,
+  key?: IDBValidKey,
+): Promise<void> {
+  const db = await openDeviceDb();
+  try {
+    const tx = db.transaction(storeName, "readwrite");
+    const store = tx.objectStore(storeName);
+    const req =
+      key === undefined ? store.put(value) : store.put(value, key);
+    await idbReq(req);
+    await idbTxDone(tx);
+  } finally {
+    try {
+      db.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function idbGet<T>(
+  storeName: string,
+  key: IDBValidKey,
+): Promise<T | undefined> {
+  const db = await openDeviceDb();
+  try {
+    const tx = db.transaction(storeName, "readonly");
+    const result = await idbReq(
+      tx.objectStore(storeName).get(key) as IDBRequest<T | undefined>,
+    );
+    // readonly still waits so mobile doesn't tear down mid-read
+    await idbTxDone(tx).catch(() => undefined);
+    return result;
+  } finally {
+    try {
+      db.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/** Ask the browser to keep device keys (helps mobile Safari / Chrome eviction). */
+export async function requestPersistentDeviceStorage(): Promise<boolean> {
+  try {
+    if (!navigator.storage?.persist) return false;
+    if (await navigator.storage.persisted?.()) return true;
+    return await navigator.storage.persist();
+  } catch {
+    return false;
+  }
+}
+
 function bytesToB64(bytes: ArrayBuffer | Uint8Array): string {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let s = "";
@@ -620,45 +717,116 @@ function b64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
+const DEVICE_WRAP_RAW_ID = "aes-gcm-device-wrap-raw-v1";
+
+type StoredWrapBlob =
+  | CryptoKey
+  | { v: 1; kind: "raw-aes-gcm-256"; keyB64: string };
+
 /**
- * Device-bound AES-GCM key (non-extractable).
- * Not a hardware serial (browsers do not expose secret HW IDs) — this key is
- * generated on first use and held by the browser's WebCrypto backend, often
- * backed by platform security where available. Cannot be exported to JS.
+ * Import AES-GCM key from raw bytes (used when CryptoKey structured-clone
+ * fails on some mobile browsers — still origin-bound IndexedDB only).
+ */
+async function importWrapKeyFromRaw(raw: Uint8Array): Promise<CryptoKey> {
+  // Ensure we pass a pure ArrayBuffer (not SharedArrayBuffer) for TS/DOM.
+  const copy = new Uint8Array(raw.byteLength);
+  copy.set(raw);
+  return crypto.subtle.importKey(
+    "raw",
+    copy.buffer,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/**
+ * Device-bound AES-GCM key.
+ * Prefer non-extractable CryptoKey in IndexedDB. Some mobile browsers fail to
+ * persist CryptoKey objects — fall back to raw key bytes in the same store
+ * (still never sent to the network).
  */
 async function getOrCreateDeviceWrapKey(): Promise<CryptoKey> {
   if (!globalThis.crypto?.subtle) {
     throw new Error(
-      "WebCrypto is required to protect device keys. Use a modern browser (HTTPS or localhost).",
+      "WebCrypto is required to protect device keys. Use a modern browser on HTTPS (not plain HTTP).",
     );
-  }
-  const db = await openDeviceDb();
-  try {
-    const tx = db.transaction(IDB_WRAP_STORE, "readonly");
-    const existing = await idbReq(
-      tx.objectStore(IDB_WRAP_STORE).get(DEVICE_WRAP_KEY_ID) as IDBRequest<
-        CryptoKey | undefined
-      >,
-    );
-    if (existing) return existing;
-  } finally {
-    db.close();
   }
 
-  const key = await crypto.subtle.generateKey(
-    { name: "AES-GCM", length: 256 },
-    false, // non-extractable — cannot dump raw key bytes to JS / network
-    ["encrypt", "decrypt"],
+  // 1) Non-extractable CryptoKey (preferred)
+  try {
+    const existing = await idbGet<CryptoKey>(
+      IDB_WRAP_STORE,
+      DEVICE_WRAP_KEY_ID,
+    );
+    if (existing && typeof existing === "object") {
+      // Basic shape check — CryptoKey has algorithm/type
+      if ("type" in existing && (existing as CryptoKey).type === "secret") {
+        return existing as CryptoKey;
+      }
+    }
+  } catch {
+    // fall through to raw / create
+  }
+
+  // 2) Raw key material fallback (mobile Safari / some WebViews)
+  try {
+    const rawBlob = await idbGet<StoredWrapBlob>(
+      IDB_WRAP_STORE,
+      DEVICE_WRAP_RAW_ID,
+    );
+    if (
+      rawBlob &&
+      typeof rawBlob === "object" &&
+      "kind" in rawBlob &&
+      rawBlob.kind === "raw-aes-gcm-256" &&
+      typeof rawBlob.keyB64 === "string"
+    ) {
+      return importWrapKeyFromRaw(b64ToBytes(rawBlob.keyB64));
+    }
+  } catch {
+    // create new
+  }
+
+  // 3) Create new wrap key — try non-extractable store, then raw fallback
+  try {
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"],
+    );
+    await idbPut(IDB_WRAP_STORE, key, DEVICE_WRAP_KEY_ID);
+    // Verify round-trip (critical on mobile)
+    const check = await idbGet<CryptoKey>(IDB_WRAP_STORE, DEVICE_WRAP_KEY_ID);
+    if (check && "type" in check && check.type === "secret") {
+      return key;
+    }
+  } catch {
+    // CryptoKey persistence failed — use raw fallback
+  }
+
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  const rawRecord: StoredWrapBlob = {
+    v: 1,
+    kind: "raw-aes-gcm-256",
+    keyB64: bytesToB64(raw),
+  };
+  await idbPut(IDB_WRAP_STORE, rawRecord, DEVICE_WRAP_RAW_ID);
+  const verify = await idbGet<StoredWrapBlob>(
+    IDB_WRAP_STORE,
+    DEVICE_WRAP_RAW_ID,
   );
-
-  const db2 = await openDeviceDb();
-  try {
-    const tx = db2.transaction(IDB_WRAP_STORE, "readwrite");
-    await idbReq(tx.objectStore(IDB_WRAP_STORE).put(key, DEVICE_WRAP_KEY_ID));
-  } finally {
-    db2.close();
+  if (
+    !verify ||
+    typeof verify !== "object" ||
+    !("keyB64" in verify) ||
+    !verify.keyB64
+  ) {
+    throw new Error(
+      "Could not save device key protection material. On mobile: leave private/incognito mode, allow site data, and avoid in-app browsers (open in Safari or Chrome).",
+    );
   }
-  return key;
+  return importWrapKeyFromRaw(raw);
 }
 
 async function wrapPrivateKeyForDevice(
@@ -751,6 +919,9 @@ async function persistWrappedKey(
 ): Promise<DeviceKeyRecord> {
   const fp =
     normalizeFingerprint(record.fingerprint) || record.fingerprint;
+  if (!fp) {
+    throw new Error("Invalid fingerprint — cannot store device key.");
+  }
   const createdAt = record.createdAt || new Date().toISOString();
   const wrap = await wrapPrivateKeyForDevice(record.privateKeyArmored);
   const stored: StoredDeviceKey = {
@@ -766,13 +937,30 @@ async function persistWrappedKey(
     profileLabel: record.profileLabel,
     createdAt,
   };
-  const db = await openDeviceDb();
-  try {
-    const tx = db.transaction(IDB_STORE, "readwrite");
-    await idbReq(tx.objectStore(IDB_STORE).put(stored));
-  } finally {
-    db.close();
+  await idbPut(IDB_STORE, stored);
+
+  // Verify we can read + unwrap immediately (catches mobile silent write failures)
+  const row = await idbGet<StoredDeviceKey>(IDB_STORE, fp);
+  if (!row?.wrappedPrivateKeyB64 || !row.wrapIvB64) {
+    throw new Error(
+      "Device key did not save correctly. On mobile: use a normal (non-private) tab in Safari or Chrome — not Instagram/Facebook/TikTok in-app browsers — and allow site data/cookies.",
+    );
   }
+  try {
+    const check = await unwrapPrivateKeyFromDevice(
+      row.wrappedPrivateKeyB64,
+      row.wrapIvB64,
+    );
+    if (!check.includes("BEGIN PGP PRIVATE KEY")) {
+      throw new Error("unwrap produced invalid key material");
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Device key saved but could not be unlocked for sign-in (${detail}). Try again, or export a backup .asc and re-import.`,
+    );
+  }
+
   setLastFingerprint(fp);
   return {
     fingerprint: fp,
@@ -799,18 +987,7 @@ export async function getDeviceKey(
 ): Promise<DeviceKeyRecord | null> {
   const fp = normalizeFingerprint(fingerprint);
   if (!fp) return null;
-  const db = await openDeviceDb();
-  let row: StoredDeviceKey | undefined;
-  try {
-    const tx = db.transaction(IDB_STORE, "readonly");
-    row = await idbReq(
-      tx.objectStore(IDB_STORE).get(fp) as IDBRequest<
-        StoredDeviceKey | undefined
-      >,
-    );
-  } finally {
-    db.close();
-  }
+  const row = await idbGet<StoredDeviceKey>(IDB_STORE, fp);
   if (!row) return null;
   return hydrateStoredKey(row);
 }
@@ -824,12 +1001,24 @@ export async function listDeviceKeys(): Promise<DeviceKeyRecord[]> {
       (await idbReq(
         tx.objectStore(IDB_STORE).getAll() as IDBRequest<StoredDeviceKey[]>,
       )) || [];
+    await idbTxDone(tx).catch(() => undefined);
   } finally {
-    db.close();
+    try {
+      db.close();
+    } catch {
+      // ignore
+    }
   }
   const out: DeviceKeyRecord[] = [];
   for (const row of rows) {
     try {
+      // Normalize legacy rows that may have stored mixed-case fingerprints
+      if (row.fingerprint) {
+        const n = normalizeFingerprint(row.fingerprint);
+        if (n && n !== row.fingerprint) {
+          row.fingerprint = n;
+        }
+      }
       const hydrated = await hydrateStoredKey(row);
       if (hydrated) out.push(hydrated);
     } catch {
@@ -846,8 +1035,13 @@ export async function deleteDeviceKey(fingerprint: string): Promise<void> {
   try {
     const tx = db.transaction(IDB_STORE, "readwrite");
     await idbReq(tx.objectStore(IDB_STORE).delete(fp));
+    await idbTxDone(tx);
   } finally {
-    db.close();
+    try {
+      db.close();
+    } catch {
+      // ignore
+    }
   }
   if (getLastFingerprint() === fp) {
     const rest = await listDeviceKeys();
@@ -868,6 +1062,7 @@ export async function getPreferredDeviceKey(): Promise<DeviceKeyRecord | null> {
 export async function privateKeyIsEncrypted(
   privateKeyArmored: string,
 ): Promise<boolean> {
+  const openpgp = await ensureOpenPgp();
   const key = await openpgp.readPrivateKey({
     armoredKey: privateKeyArmored.trim(),
   });
@@ -928,7 +1123,24 @@ export async function signInWithDeviceKey(options: {
   };
   // Session is established via Set-Cookie (HttpOnly). Do not store sessionToken in JS.
   if (!loginRes.ok || !data.user) {
-    throw new Error(data.message || data.error || "Device sign-in failed");
+    const code = data.error || "";
+    const base = data.message || data.error || "Device sign-in failed";
+    // New keys that were never registered produce the same auth_failed as a bad signature
+    // (anti-enumeration). Guide mobile users who often skip Register.
+    if (
+      code === "auth_failed" ||
+      /could not verify signature/i.test(base)
+    ) {
+      throw new Error(
+        `${base} If this is a newly generated key, open Create identity → Register & stay signed in first (public key only). Also use a normal browser tab (not private/in-app), then try Sign in again.`,
+      );
+    }
+    if (code === "rate_limited") {
+      throw new Error(
+        "Too many sign-in attempts. Wait about a minute and try again.",
+      );
+    }
+    throw new Error(base);
   }
   clearSessionToken();
   setLastFingerprint(data.user.fingerprint);
@@ -955,28 +1167,45 @@ export async function generateAndKeepOnDevice(options?: {
   deviceKey: DeviceKeyRecord;
   profileLabel: string;
 }> {
-  const pair = await generateKeypair({
-    name: options?.name,
-    email: options?.email,
-    profile: options?.profile,
-    // No OpenPGP passphrase at generate → login needs no password
-  });
+  // Best-effort: reduce mobile Safari/Chrome auto-eviction of IndexedDB
+  await requestPersistentDeviceStorage();
+
+  let pair: GeneratedKeypair;
+  try {
+    pair = await generateKeypair({
+      name: options?.name,
+      email: options?.email,
+      profile: options?.profile,
+      // No OpenPGP passphrase at generate → login needs no password
+    });
+  } catch (error) {
+    throw new Error(formatCryptoError(error, "Generate key on this device"));
+  }
   const encrypted = await privateKeyIsEncrypted(pair.privateKeyArmored);
-  const deviceKey = await saveDeviceKey({
-    fingerprint: pair.fingerprint,
-    publicKeyArmored: pair.publicKeyArmored,
-    privateKeyArmored: pair.privateKeyArmored,
-    encrypted,
-    profileLabel: pair.profileLabel,
-  });
-  return {
-    public: {
+  try {
+    const deviceKey = await saveDeviceKey({
       fingerprint: pair.fingerprint,
       publicKeyArmored: pair.publicKeyArmored,
-    },
-    deviceKey,
-    profileLabel: pair.profileLabel,
-  };
+      privateKeyArmored: pair.privateKeyArmored,
+      encrypted,
+      profileLabel: pair.profileLabel,
+    });
+    return {
+      public: {
+        fingerprint: pair.fingerprint,
+        publicKeyArmored: pair.publicKeyArmored,
+      },
+      deviceKey,
+      profileLabel: pair.profileLabel,
+    };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      msg.includes("Device key") || msg.includes("IndexedDB")
+        ? msg
+        : `Could not store the new key on this device: ${msg}`,
+    );
+  }
 }
 
 /**
@@ -1093,10 +1322,13 @@ export function preferredExportS2k(): S2kProtocolId {
   return hasWebAssemblyApi() ? "argon2" : "iterated";
 }
 
-function buildEncryptConfig(
+async function buildEncryptConfig(
+  openpgp: OpenPgpModule,
   enc: PrivateKeyExportEncryption,
-): openpgp.PartialConfig {
-  const config: openpgp.PartialConfig = {
+): Promise<NonNullable<Parameters<OpenPgpModule["encryptKey"]>[0]["config"]>> {
+  const config: NonNullable<
+    Parameters<OpenPgpModule["encryptKey"]>[0]["config"]
+  > = {
     preferredSymmetricAlgorithm: openpgp.enums.symmetric[enc.cipher],
     s2kType:
       enc.s2k === "argon2"
@@ -1133,18 +1365,19 @@ function buildEncryptConfig(
 }
 
 async function encryptPrivateKeyWithFallback(
-  privateKey: Awaited<ReturnType<typeof openpgp.readPrivateKey>>,
+  privateKey: Awaited<ReturnType<OpenPgpModule["readPrivateKey"]>>,
   enc: PrivateKeyExportEncryption,
 ): Promise<{
-  key: Awaited<ReturnType<typeof openpgp.encryptKey>>;
+  key: Awaited<ReturnType<OpenPgpModule["encryptKey"]>>;
   usedS2k: S2kProtocolId;
   notice?: string;
 }> {
+  const openpgp = await ensureOpenPgp();
   const tryEncrypt = async (settings: PrivateKeyExportEncryption) =>
     openpgp.encryptKey({
       privateKey,
       passphrase: settings.passphrase,
-      config: buildEncryptConfig(settings),
+      config: await buildEncryptConfig(openpgp, settings),
     });
 
   if (enc.s2k !== "argon2") {
@@ -1193,6 +1426,7 @@ export async function generateKeypair(options?: {
   passphrase?: string;
   profile?: KeyGenProfileId;
 }): Promise<GeneratedKeypair> {
+  const openpgp = await ensureOpenPgp();
   const name = options?.name?.trim() || "Globe User";
   const email = options?.email?.trim() || "globe-user@localhost";
   const profile = options?.profile || "curve25519";
@@ -1444,7 +1678,8 @@ export async function exportPrivateKeyToArmoredFile(options: {
   filename: string;
   notice?: string;
 }> {
-  let key: Awaited<ReturnType<typeof openpgp.readPrivateKey>>;
+  const openpgp = await ensureOpenPgp();
+  let key: Awaited<ReturnType<OpenPgpModule["readPrivateKey"]>>;
   try {
     key = await openpgp.readPrivateKey({
       armoredKey: options.privateKeyArmored.trim(),
@@ -1515,6 +1750,7 @@ export function downloadPrivateKeyFile(
 export async function fingerprintFromPrivateKey(
   privateKeyArmored: string,
 ): Promise<string> {
+  const openpgp = await ensureOpenPgp();
   const key = await openpgp.readPrivateKey({
     armoredKey: privateKeyArmored.trim(),
   });
@@ -1529,6 +1765,7 @@ export async function signChallenge(
   passphrase?: string,
 ): Promise<string> {
   try {
+    const openpgp = await ensureOpenPgp();
     let privateKey = await openpgp.readPrivateKey({
       armoredKey: privateKeyArmored.trim(),
     });

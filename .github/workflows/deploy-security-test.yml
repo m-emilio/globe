@@ -35,6 +35,8 @@ jobs:
       ADMIN_ACTION_SECRET: ${{ secrets.ADMIN_ACTION_SECRET }}
       ADMIN_FINGERPRINTS: ${{ secrets.ADMIN_FINGERPRINTS }}
       ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+      # COMTRADE_SUBSCRIPTION_KEY is set manually (wrangler secret put) so CI never
+      # overwrites a real Free API key with an empty GitHub secret.
     steps:
       - name: Guard - refuse main / production worker name by default
         run: |
