@@ -31,7 +31,7 @@
     "@types/topojson-client": "^3.1.5",
     "esbuild": "0.25.2",
     "typescript": "5.8.3",
-    "wrangler": "^4.113.0"
+    "wrangler": "4.107.0"
   },
   "scripts": {
     "build:client": "esbuild ./src/client/index.tsx --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger",
