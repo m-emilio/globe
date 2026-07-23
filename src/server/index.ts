@@ -6,6 +6,7 @@ import {
   getSessionUser,
   loginUser,
   logoutUser,
+  rateLimitDurable,
   rateLimitOrNull,
   registerUser,
   requireTransitAccess,
@@ -31,6 +32,10 @@ import {
   getPaymentStatus,
   handleStripeWebhook,
 } from "./billing";
+import {
+  getUnodcHotspotsPreview,
+  UNODC_EDGE_CACHE_VERSION,
+} from "./unodcHotspots";
 
 import type {
   ComtradeAvailabilityPreview,
@@ -2075,7 +2080,9 @@ async function getTradePulsePreview(
     ) {
       ctx?.waitUntil(warmTradePulsePeriods(env, subscriptionKey, period));
       return pulseJson(memory.preview, {
-        "cache-control": "private, max-age=300",
+        // Public: body is scrubbed; key never leaves the Worker. Edge/browser must cache.
+        "cache-control":
+          "public, max-age=600, s-maxage=3600, stale-while-revalidate=86400",
         "x-comtrade-mode": "free-subscription",
         "x-trade-pulse-cache": "memory",
         "x-trade-pulse-period": period,
@@ -2087,7 +2094,8 @@ async function getTradePulsePreview(
       tradePulseLiveCacheByPeriod.set(period, kvFresh);
       ctx?.waitUntil(warmTradePulsePeriods(env, subscriptionKey, period));
       return pulseJson(kvFresh.preview, {
-        "cache-control": "private, max-age=300",
+        "cache-control":
+          "public, max-age=600, s-maxage=3600, stale-while-revalidate=86400",
         "x-comtrade-mode": "free-subscription",
         "x-trade-pulse-cache": "kv",
         "x-trade-pulse-period": period,
@@ -2104,7 +2112,8 @@ async function getTradePulsePreview(
         // Prefetch other years after response so year buttons are cache hits.
         ctx?.waitUntil(warmTradePulsePeriods(env, subscriptionKey, period));
         return pulseJson(preview, {
-          "cache-control": "private, max-age=600",
+          "cache-control":
+            "public, max-age=900, s-maxage=3600, stale-while-revalidate=86400",
           "x-comtrade-mode": "free-subscription",
           "x-trade-pulse-cache": "miss",
           "x-trade-pulse-period": period,
@@ -2125,7 +2134,8 @@ async function getTradePulsePreview(
       memory.preview.dataMode === "free-subscription"
     ) {
       return pulseJson(memory.preview, {
-        "cache-control": "private, max-age=120",
+        "cache-control":
+          "public, max-age=300, s-maxage=900, stale-while-revalidate=86400",
         "x-comtrade-mode": "free-subscription",
         "x-trade-pulse-cache": "stale-memory",
         "x-trade-pulse-period": period,
@@ -2140,7 +2150,8 @@ async function getTradePulsePreview(
     ) {
       tradePulseLiveCacheByPeriod.set(period, kvStale);
       return pulseJson(kvStale.preview, {
-        "cache-control": "private, max-age=120",
+        "cache-control":
+          "public, max-age=300, s-maxage=900, stale-while-revalidate=86400",
         "x-comtrade-mode": "free-subscription",
         "x-trade-pulse-cache": "stale-kv",
         "x-trade-pulse-period": period,
@@ -2150,7 +2161,8 @@ async function getTradePulsePreview(
 
   const derived = buildTradePulseDerivedPreview(period);
   return pulseJson(derived, {
-    "cache-control": "private, max-age=60",
+    "cache-control":
+      "public, max-age=120, s-maxage=600, stale-while-revalidate=3600",
     "x-comtrade-mode": "derived-preview",
     "x-trade-pulse-period": period,
   });
@@ -3402,6 +3414,90 @@ function withSecurityHeaders(response: Response, request?: Request) {
   });
 }
 
+/**
+ * Serve public GET previews from the Cloudflare Cache API when possible.
+ * Hits skip Durable rate limits and origin hydrate (main source of globe lag).
+ * Only caches responses that are public and not no-store.
+ */
+async function withPublicEdgeCache(
+  request: Request,
+  ctx: ExecutionContext,
+  generate: () => Promise<Response>,
+  options?: { cacheVersion?: string },
+): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return generate();
+  }
+
+  const cacheUrl = new URL(request.url);
+  cacheUrl.searchParams.delete("_t");
+  if (options?.cacheVersion) {
+    cacheUrl.searchParams.set("_cv", options.cacheVersion);
+  }
+  // Stable key: method GET, no cookies (public data only).
+  const cacheKey = new Request(cacheUrl.toString(), {
+    method: "GET",
+    headers: { accept: "application/json" },
+  });
+
+  try {
+    const hit = await caches.default.match(cacheKey);
+    if (hit) {
+      const headers = new Headers(hit.headers);
+      headers.set("x-edge-cache", "HIT");
+      if (request.method === "HEAD") {
+        return new Response(null, { status: hit.status, headers });
+      }
+      return new Response(hit.body, {
+        status: hit.status,
+        statusText: hit.statusText,
+        headers,
+      });
+    }
+  } catch {
+    // Cache API unavailable — generate normally
+  }
+
+  const response = await generate();
+  const cacheControl = response.headers.get("cache-control") || "";
+  const canCache =
+    response.ok &&
+    response.status === 200 &&
+    /public/i.test(cacheControl) &&
+    !/no-store/i.test(cacheControl);
+
+  if (canCache) {
+    // Build a clean Response for Cache API (no transfer-encoding quirks).
+    try {
+      const body = await response.clone().arrayBuffer();
+      const storeHeaders = new Headers(response.headers);
+      storeHeaders.delete("set-cookie");
+      // Prefer s-maxage for edge retention; keep body Cache-Control as-is.
+      const storeResponse = new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: storeHeaders,
+      });
+      ctx.waitUntil(
+        caches.default.put(cacheKey, storeResponse).catch(() => {}),
+      );
+    } catch {
+      // non-fatal — origin/KV still serve
+    }
+  }
+
+  const headers = new Headers(response.headers);
+  headers.set("x-edge-cache", canCache ? "MISS" : "BYPASS");
+  if (request.method === "HEAD") {
+    return new Response(null, { status: response.status, headers });
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 function isWebSocketRequest(request: Request) {
   return request.headers.get("upgrade")?.toLowerCase() === "websocket";
 }
@@ -3465,12 +3561,33 @@ async function fetchOptionalComtradeJson(
   }
 }
 
+/** Isolate memory for Comtrade preview — Free API hydrate is multi-second without this. */
+let comtradePreviewMemory: {
+  at: number;
+  responseBody: string;
+  headers: Record<string, string>;
+} | null = null;
+const COMTRADE_PREVIEW_MEMORY_TTL_MS = 30 * 60 * 1000;
+
 /**
  * Prefer Free /data/v1 when COMTRADE_SUBSCRIPTION_KEY is set.
  * On missing key or Free API failure, fall back to public /public/v1 preview.
  * The subscription key is never returned to the client.
  */
 async function getComtradePreview(env: Env) {
+  const now = Date.now();
+  if (
+    comtradePreviewMemory &&
+    now - comtradePreviewMemory.at < COMTRADE_PREVIEW_MEMORY_TTL_MS
+  ) {
+    const headers = new Headers(comtradePreviewMemory.headers);
+    headers.set("x-comtrade-preview-cache", "memory");
+    return new Response(comtradePreviewMemory.responseBody, {
+      status: 200,
+      headers,
+    });
+  }
+
   const subscriptionKey = resolveComtradeSubscriptionKey(env);
   const secrets = collectWorkerSecrets(env);
   let dataMode: ComtradePreview["dataMode"] = "public-preview";
@@ -3590,23 +3707,40 @@ async function getComtradePreview(env: Env) {
     apiUrl,
   });
 
-  return comtradeJsonResponse(
+  const response = comtradeJsonResponse(
     preview,
     subscriptionKey,
     {
       headers: {
-        // Keep edge TTL short so COMTRADE_SUBSCRIPTION_KEY put/rotate is visible quickly.
+        // Public + edge-cacheable: body is scrubbed; key never in response.
         "cache-control": stale
           ? "no-store"
           : usedFreeApi
-            ? "private, max-age=300"
-            : "public, max-age=120, s-maxage=300",
+            ? "public, max-age=600, s-maxage=3600, stale-while-revalidate=86400"
+            : "public, max-age=300, s-maxage=1800, stale-while-revalidate=86400",
         "x-comtrade-mode": dataMode,
+        "x-comtrade-preview-cache": "miss",
         ...(stale ? { "x-comtrade-preview": "partial-fallback" } : {}),
       },
     },
     secrets,
   );
+
+  // Cache successful public bodies in isolate memory (edge Cache API is L1).
+  if (response.ok && !stale) {
+    try {
+      const body = await response.clone().text();
+      const headerObj: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        headerObj[key] = value;
+      });
+      comtradePreviewMemory = { at: Date.now(), responseBody: body, headers: headerObj };
+    } catch {
+      // non-fatal
+    }
+  }
+
+  return response;
 }
 
 async function fetchUnGlobalJson(url: string) {
@@ -3730,7 +3864,7 @@ async function getUnGlobalPreview() {
       headers: {
         "cache-control": stale
           ? "no-store"
-          : "public, max-age=600, s-maxage=21600",
+          : "public, max-age=3600, s-maxage=21600, stale-while-revalidate=86400",
         ...(stale ? { "x-un-global-preview": "partial-fallback" } : {}),
       },
     },
@@ -3970,37 +4104,47 @@ export default {
 
     // Path A: Comtrade + Trade Pulse stay free/public (not Stripe-gated).
     // Monetization is Transit / Live Feed only. Do not expose or resell UN API keys.
+    // Edge Cache API first — rate-limit + hydrate only on miss (major lag fix).
     if (url.pathname === "/api/comtrade-preview") {
       if (!isReadApiMethod(request)) {
         return methodNotAllowedResponse();
       }
-      const limited = rateLimitOrNull(
-        `preview:comtrade:${clientIpFromRequest(request)}`,
-        30,
-        60_000,
-        applySecurityHeaders,
+      return withoutResponseBodyForHead(
+        request,
+        await withPublicEdgeCache(request, ctx, async () => {
+          const limited = await rateLimitDurable(
+            env,
+            `preview:comtrade:${clientIpFromRequest(request)}`,
+            40,
+            60_000,
+            applySecurityHeaders,
+          );
+          if (limited) return limited;
+          return await getComtradePreview(env);
+        }),
       );
-      if (limited) return limited;
-
-      return withoutResponseBodyForHead(request, await getComtradePreview(env));
     }
 
     if (url.pathname === "/api/comtrade-pulse-preview") {
       if (!isReadApiMethod(request)) {
         return methodNotAllowedResponse();
       }
-      const limited = rateLimitOrNull(
-        `preview:pulse:${clientIpFromRequest(request)}`,
-        40,
-        60_000,
-        applySecurityHeaders,
-      );
-      if (limited) return limited;
-
-      const pulsePeriod = parseTradePulsePeriod(url.searchParams.get("period"));
       return withoutResponseBodyForHead(
         request,
-        await getTradePulsePreview(env, pulsePeriod, ctx),
+        await withPublicEdgeCache(request, ctx, async () => {
+          const limited = await rateLimitDurable(
+            env,
+            `preview:pulse:${clientIpFromRequest(request)}`,
+            40,
+            60_000,
+            applySecurityHeaders,
+          );
+          if (limited) return limited;
+          const pulsePeriod = parseTradePulsePeriod(
+            url.searchParams.get("period"),
+          );
+          return await getTradePulsePreview(env, pulsePeriod, ctx);
+        }),
       );
     }
 
@@ -4008,15 +4152,48 @@ export default {
       if (!isReadApiMethod(request)) {
         return methodNotAllowedResponse();
       }
-      const limited = rateLimitOrNull(
-        `preview:un:${clientIpFromRequest(request)}`,
-        30,
-        60_000,
-        applySecurityHeaders,
+      return withoutResponseBodyForHead(
+        request,
+        await withPublicEdgeCache(request, ctx, async () => {
+          const limited = rateLimitOrNull(
+            `preview:un:${clientIpFromRequest(request)}`,
+            30,
+            60_000,
+            applySecurityHeaders,
+          );
+          if (limited) return limited;
+          return await getUnGlobalPreview();
+        }),
       );
-      if (limited) return limited;
+    }
 
-      return withoutResponseBodyForHead(request, await getUnGlobalPreview());
+    if (url.pathname === "/api/unodc-hotspots-preview") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      // Edge cache HIT → no DO rate limit, no OWID hydrate.
+      return withoutResponseBodyForHead(
+        request,
+        await withPublicEdgeCache(
+          request,
+          ctx,
+          async () => {
+            const limited = await rateLimitDurable(
+              env,
+              `preview:unodc:${clientIpFromRequest(request)}`,
+              30,
+              60_000,
+              applySecurityHeaders,
+            );
+            if (limited) return limited;
+            return withSecurityHeaders(
+              await getUnodcHotspotsPreview(env),
+              request,
+            );
+          },
+          { cacheVersion: UNODC_EDGE_CACHE_VERSION },
+        ),
+      );
     }
 
     if (url.pathname === "/api/nearby-paths") {

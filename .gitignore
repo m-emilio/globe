@@ -179,6 +179,9 @@ dist
 .wrangler/
 build/
 
+# Accidental wrangler dry-run / mis-output folder (not source)
+/null/
+
 # Turbo output
 .turbo/
 

@@ -2487,6 +2487,142 @@ b {
   cursor: wait;
 }
 
+.unodc-panel .un-status-row strong {
+  color: #ff8a70;
+}
+
+.unodc-theme-card.is-unavailable {
+  opacity: 0.72;
+}
+
+.unodc-legend-item.disabled,
+.unodc-legend-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.unodc-live-count {
+  margin-top: 0.35rem;
+}
+
+.unodc-theme-card.active {
+  border-left: 2px solid var(--unodc-theme-color, rgba(255, 90, 70, 0.7));
+}
+
+.unodc-hotspot-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 6px;
+  font-size: 9px;
+  color: #9aa4ae;
+}
+
+.unodc-hotspot-list small {
+  color: #6d7680;
+}
+
+.unodc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.unodc-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.25);
+  color: #8f99a2;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.unodc-legend-item.active {
+  color: #e8eef4;
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.unodc-legend-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: 0 0 8px currentColor;
+  flex-shrink: 0;
+}
+
+.globe-choropleth-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* Clip to the sphere disc without hard-cutting path fragments at the limb. */
+  border-radius: 50%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+  /* paint isolation only — avoid layout contain that can clip projected paths */
+  contain: paint;
+  will-change: contents;
+}
+
+.globe-choropleth-path {
+  fill-rule: evenodd;
+  stroke-width: 0.45;
+  vector-effect: non-scaling-stroke;
+  /* Screen blend helps multi-theme stacks read as distinct hues. */
+  mix-blend-mode: screen;
+}
+
+.globe-heat-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.globe-heat-zone {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(
+    circle,
+    var(--heat-color) 0%,
+    transparent 78%
+  );
+  box-shadow: 0 0 10px 2px var(--heat-color);
+  filter: blur(2.5px);
+  mix-blend-mode: soft-light;
+  will-change: left, top, opacity, transform, width, height;
+  transition: opacity 80ms linear;
+}
+
+.globe-heat-zone-cluster {
+  filter: blur(3px);
+  box-shadow: 0 0 14px 3px var(--heat-color);
+  background: radial-gradient(
+    circle,
+    var(--heat-color) 0%,
+    transparent 80%
+  );
+}
+
+.unodc-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 14px 0;
+}
+
 .menu-trade-pulse-years {
   display: grid;
   gap: 0;

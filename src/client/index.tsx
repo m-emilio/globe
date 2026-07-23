@@ -1,5 +1,6 @@
 import "./styles.css";
 
+
 import React, {
   Suspense,
   lazy,
@@ -7,9 +8,15 @@ import React, {
   useRef,
   useEffect,
   useCallback,
+  useMemo,
 } from "react";
 import { createRoot } from "react-dom/client";
-import { Cobe, type GlobeArc } from "./CobeGlobe";
+import {
+  Cobe,
+  type GlobeArc,
+  type GlobeChoroplethRegion,
+  type GlobeHeatZone,
+} from "./CobeGlobe";
 import { FloatingChrome } from "./FloatingChrome";
 import {
   ActivityFeed,
@@ -20,6 +27,12 @@ import {
   type LiveFeedAccess,
 } from "./ActivityFeed";
 import usePartySocket from "partysocket/react";
+import {
+  clearPreviewCache,
+  fetchPreviewJson,
+  getPreviewCache,
+  warmPreviewUrl,
+} from "./previewCache";
 import type {
   OutgoingMessage,
   ComtradePreview,
@@ -29,6 +42,8 @@ import type {
   TradePulseRoutePreview,
   TransitNearbyPreview,
   UnGlobalPreview,
+  UnodcHotspotsPreview,
+  UnodcThemeId,
 } from "../shared";
 import {
   authFetch,
@@ -181,6 +196,191 @@ const UN_GLOBAL_SECTION_LABELS: Record<UnGlobalSection, string> = {
   affiliates: "Affiliates",
   embassies: "Embassies",
 };
+
+type UnodcStatus = "idle" | "loading" | "ready" | "error";
+
+const UNODC_THEME_IDS /*sec-pass*/: UnodcThemeId[] = [
+  "homicide",
+  "firearms",
+  "trafficking-persons",
+  "wildlife",
+  "violent-crime",
+  "prisons",
+  "justice",
+  "drug-trafficking",
+  "drug-use",
+  "drug-seizure",
+  "corruption",
+  "covid",
+];
+
+/** Default ON: high-signal themes only (less globe clutter). */
+const DEFAULT_UNODC_THEMES: Record<UnodcThemeId, boolean> = {
+  homicide: true,
+  firearms: true,
+  "trafficking-persons": true,
+  wildlife: false,
+  "violent-crime": false,
+  prisons: false,
+  justice: false,
+  "drug-trafficking": false,
+  "drug-use": false,
+  "drug-seizure": false,
+  corruption: false,
+  covid: false,
+};
+
+/** Themes auto-enabled after data load if they have live hotspots. */
+const UNODC_FOCUS_THEMES: UnodcThemeId[] = [
+  "homicide",
+  "firearms",
+  "trafficking-persons",
+];
+
+/** Versioned URL busts browser HTTP cache when server theme sources change. */
+const UNODC_PREVIEW_URL = "/api/unodc-hotspots-preview?v=3";
+
+function countLiveUnodcThemes(data: UnodcHotspotsPreview | null | undefined) {
+  if (!data?.themes?.length) return 0;
+  return data.themes.filter(
+    (t) => t.dataMode === "live" && t.hotspotCount > 0,
+  ).length;
+}
+
+/** Reject stale session/HTTP payloads that still only have the old 7 live themes. */
+function isCompleteUnodcPreview(data: UnodcHotspotsPreview | null | undefined) {
+  return Boolean(
+    data &&
+      Array.isArray(data.themes) &&
+      data.themes.length >= UNODC_THEME_IDS.length &&
+      countLiveUnodcThemes(data) >= UNODC_THEME_IDS.length,
+  );
+}
+
+/** Vivid theme fills for choropleth (no heat glow; opacity scaled by intensity). */
+const UNODC_THEME_CSS: Record<UnodcThemeId, string> = {
+  homicide: "#ff3b30",
+  firearms: "#ff9500",
+  "trafficking-persons": "#ff2d95",
+  wildlife: "#34c759",
+  "violent-crime": "#ff453a",
+  prisons: "#bf5af2",
+  justice: "#0a84ff",
+  "drug-trafficking": "#ffd60a",
+  "drug-use": "#a8e10c",
+  "drug-seizure": "#64d2ff",
+  corruption: "#ff9f0a",
+  covid: "#8e8e93",
+};
+
+/** Approx distance between two lat/lng points (km). */
+function haversineKm(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number,
+): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+type UnodcHotspotLike = {
+  id: string;
+  iso3: string;
+  name: string;
+  lat: number;
+  lng: number;
+  value: number;
+  year: number;
+  intensity: number;
+};
+
+/**
+ * Greedy geographic clustering: nearby high-intensity countries collapse into
+ * larger regional heat zones (clearer than many small dots).
+ */
+function clusterUnodcHotspots(
+  spots: UnodcHotspotLike[],
+  radiusKm = 1400,
+): Array<{
+  members: UnodcHotspotLike[];
+  lat: number;
+  lng: number;
+  intensity: number;
+  valuePeak: number;
+}> {
+  const ordered = [...spots].sort((a, b) => b.intensity - a.intensity);
+  const used = new Set<string>();
+  const clusters: Array<{
+    members: UnodcHotspotLike[];
+    lat: number;
+    lng: number;
+    intensity: number;
+    valuePeak: number;
+  }> = [];
+
+  for (const seed of ordered) {
+    if (used.has(seed.iso3)) continue;
+    const members = [seed];
+    used.add(seed.iso3);
+    for (const candidate of ordered) {
+      if (used.has(candidate.iso3)) continue;
+      if (haversineKm(seed.lat, seed.lng, candidate.lat, candidate.lng) <= radiusKm) {
+        members.push(candidate);
+        used.add(candidate.iso3);
+      }
+    }
+    const weightSum = members.reduce((s, m) => s + m.intensity + 0.15, 0);
+    const lat =
+      members.reduce((s, m) => s + m.lat * (m.intensity + 0.15), 0) / weightSum;
+    const lng =
+      members.reduce((s, m) => s + m.lng * (m.intensity + 0.15), 0) / weightSum;
+    const valuePeak = Math.max(...members.map((m) => m.value));
+    const intensity = Math.min(
+      1,
+      Math.max(...members.map((m) => m.intensity)) +
+        Math.min(0.35, (members.length - 1) * 0.08),
+    );
+    clusters.push({ members, lat, lng, intensity, valuePeak });
+  }
+
+  return clusters;
+}
+
+function buildUnodcThemeHeatZones(
+  theme: { id: UnodcThemeId; label: string; hotspots: UnodcHotspotLike[] },
+  color: string,
+): GlobeHeatZone[] {
+  const clusters = clusterUnodcHotspots(theme.hotspots);
+  return clusters.map((cluster, index) => {
+    const isCluster = cluster.members.length >= 2;
+    const names = cluster.members
+      .slice(0, 4)
+      .map((m) => m.iso3)
+      .join(", ");
+    const more =
+      cluster.members.length > 4 ? ` +${cluster.members.length - 4}` : "";
+    return {
+      id: `unodc-${theme.id}-c${index}`,
+      location: [cluster.lat, cluster.lng] as [number, number],
+      intensity: cluster.intensity,
+      color,
+      themeId: theme.id,
+      kind: isCluster ? "cluster" : "point",
+      radiusScale: isCluster
+        ? 1.15 + Math.min(0.9, (cluster.members.length - 1) * 0.14)
+        : 1,
+      label: isCluster
+        ? `${theme.label} region (${cluster.members.length}): ${names}${more} · peak ${cluster.valuePeak}`
+        : `${theme.label}: ${cluster.members[0].name} · ${cluster.members[0].value} (${cluster.members[0].year})`,
+    };
+  });
+}
 
 const TRADE_PULSE_LAYERS: TradePulseLayer[] = [
   "dependency",
@@ -851,6 +1051,15 @@ function App() {
   const [unGlobalPreview, setUnGlobalPreview] = useState<UnGlobalPreview | null>(null);
   const [unGlobalError, setUnGlobalError] = useState("");
   const [unGlobalSections, setUnGlobalSections] = useState(DEFAULT_UN_GLOBAL_SECTIONS);
+  const [showUnodcPanel, setShowUnodcPanel] = useState(false);
+  const [isUnodcPanelMinimized, setIsUnodcPanelMinimized] = useState(true);
+  const [unodcStatus, setUnodcStatus] = useState<UnodcStatus>("idle");
+  const [unodcPreview, setUnodcPreview] = useState<UnodcHotspotsPreview | null>(null);
+  const [unodcError, setUnodcError] = useState("");
+  const [unodcThemes, setUnodcThemes] = useState(DEFAULT_UNODC_THEMES);
+  const [unodcCountryPolygons, setUnodcCountryPolygons] = useState<
+    Map<string, { iso3: string; name: string; rings: [number, number][][] }> | null
+  >(null);
   const [showActivityMenu, setShowActivityMenu] = useState(false);
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
   const [isDisconnected, setIsDisconnected] = useState(false);
@@ -2552,31 +2761,35 @@ function App() {
     if (closeMenu) {
       setShowMenu(false);
     }
-    setComtradeStatus("loading");
     setComtradeError("");
 
+    const url = "/api/comtrade-preview";
+    const cached = getPreviewCache<ComtradePreview>(url);
+    if (cached?.data && Array.isArray(cached.data.tradeRecords)) {
+      setComtradePreview(cached.data);
+      setComtradeStatus("ready");
+      if (cached.fresh) return;
+    } else {
+      setComtradeStatus("loading");
+    }
+
     try {
-      const response = await fetch("/api/comtrade-preview", {
-        headers: {
-          accept: "application/json",
-        },
+      const data = await fetchPreviewJson<ComtradePreview>(url, {
+        validate: (v): v is ComtradePreview =>
+          Boolean(
+            v &&
+              typeof v === "object" &&
+              Array.isArray((v as ComtradePreview).tradeRecords),
+          ),
+        forceNetwork: Boolean(cached?.stale),
       });
-
-      if (!response.ok) {
-        throw new Error("UN COMTRADE preview request failed");
-      }
-
-      const data = (await response.json()) as ComtradePreview;
-
-      if (!data || !Array.isArray(data.tradeRecords)) {
-        throw new Error("UN COMTRADE preview response incomplete");
-      }
-
       setComtradePreview(data);
       setComtradeStatus("ready");
     } catch {
-      setComtradeError("UN COMTRADE preview unavailable");
-      setComtradeStatus("error");
+      if (!cached) {
+        setComtradeError("UN COMTRADE preview unavailable");
+        setComtradeStatus("error");
+      }
     }
   };
 
@@ -2622,49 +2835,41 @@ function App() {
     if (periodOverride) {
       setTradePulsePeriod(periodOverride);
     }
-    setTradePulseStatus("loading");
     setTradePulseError("");
 
+    const url = `/api/comtrade-pulse-preview?period=${encodeURIComponent(period)}`;
+    const cached = getPreviewCache<TradePulsePreview>(url);
+    if (cached?.data && Array.isArray(cached.data.routes)) {
+      setTradePulsePreview(cached.data);
+      if (cached.data.period) setTradePulsePeriod(cached.data.period);
+      setTradePulseStatus("ready");
+      if (cached.fresh) return;
+    } else {
+      setTradePulseStatus("loading");
+    }
+
     try {
-      const response = await fetch(
-        `/api/comtrade-pulse-preview?period=${encodeURIComponent(period)}`,
-        {
-          headers: {
-            accept: "application/json",
-          },
-        },
-      );
-
-      if (!response.ok) {
-        throw new Error("Trade Pulse preview request failed");
-      }
-
-      const data = (await response.json()) as TradePulsePreview;
-
-      if (!data || !Array.isArray(data.routes)) {
-        throw new Error("Trade Pulse preview response incomplete");
-      }
-
+      const data = await fetchPreviewJson<TradePulsePreview>(url, {
+        validate: (v): v is TradePulsePreview =>
+          Boolean(
+            v &&
+              typeof v === "object" &&
+              Array.isArray((v as TradePulsePreview).routes),
+          ),
+        forceNetwork: Boolean(cached?.stale),
+      });
       setTradePulsePreview(data);
       if (data.period) {
         setTradePulsePeriod(data.period);
       }
       setTradePulseStatus("ready");
-
-      // Client warm: hit other years so KV/memory fills (server also warms via waitUntil).
-      const years: string[] =
-        data.availablePeriods && data.availablePeriods.length > 0
-          ? data.availablePeriods
-          : ["2022", "2023", "2024", "2025"];
-      for (const year of years) {
-        if (year === data.period) continue;
-        void fetch(`/api/comtrade-pulse-preview?period=${encodeURIComponent(year)}`, {
-          headers: { accept: "application/json" },
-        }).catch(() => {});
-      }
+      // Do not prefetch all years here — parallel heavy responses stall the main thread
+      // and compete with the globe. Server waitUntil still warms KV/edge in the background.
     } catch {
-      setTradePulseError("Trade Pulse unavailable");
-      setTradePulseStatus("error");
+      if (!cached) {
+        setTradePulseError("Trade Pulse unavailable");
+        setTradePulseStatus("error");
+      }
     }
   };
 
@@ -2717,6 +2922,125 @@ function App() {
     void loadUnGlobalPreview(false);
   };
 
+  const toggleUnodcTheme = (themeId: UnodcThemeId) => {
+    setUnodcThemes((current) => ({
+      ...current,
+      [themeId]: !current[themeId],
+    }));
+  };
+
+  const applyUnodcPreview = (
+    data: UnodcHotspotsPreview,
+    options?: { keepThemeSelection?: boolean },
+  ) => {
+    setUnodcPreview(data);
+    if (!options?.keepThemeSelection) {
+      // Focus mode: only a few high-signal themes on by default (less clutter).
+      // All 12 remain toggleable via cards / "All live".
+      const nextThemes = { ...DEFAULT_UNODC_THEMES };
+      for (const id of UNODC_THEME_IDS) {
+        const theme = data.themes.find((t) => t.id === id);
+        const hasLive = Boolean(
+          theme && theme.dataMode === "live" && theme.hotspotCount > 0,
+        );
+        nextThemes[id] = hasLive && UNODC_FOCUS_THEMES.includes(id);
+      }
+      setUnodcThemes(nextThemes);
+    }
+    setUnodcStatus("ready");
+
+    // Load country polygons after panel is usable — heavy parse must not block first paint.
+    const loadGeo = () => {
+      void import("./worldCountries")
+        .then((m) => m.loadCountryPolygons())
+        .then((polygons) => {
+          if (polygons) setUnodcCountryPolygons(polygons);
+        })
+        .catch(() => {});
+    };
+    if (typeof requestIdleCallback === "function") {
+      requestIdleCallback(() => loadGeo(), { timeout: 2000 });
+    } else {
+      window.setTimeout(loadGeo, 0);
+    }
+  };
+
+  const loadUnodcHotspots = async (
+    closeMenu = true,
+    options?: { forceRefresh?: boolean },
+  ) => {
+    setShowUnodcPanel(true);
+    setIsUnodcPanelMinimized(true);
+    if (closeMenu) {
+      setShowMenu(false);
+    }
+    setUnodcError("");
+
+    const url = UNODC_PREVIEW_URL;
+    // Capture before async setState so refresh keeps the user's theme toggles.
+    const keepSelection =
+      unodcStatus === "ready" && isCompleteUnodcPreview(unodcPreview);
+
+    if (options?.forceRefresh) {
+      clearPreviewCache(url);
+    }
+
+    const cached = options?.forceRefresh
+      ? null
+      : getPreviewCache<UnodcHotspotsPreview>(url);
+    const cachedComplete = isCompleteUnodcPreview(cached?.data);
+    // Never trust a “fresh” cache that still only has 7 live themes.
+    if (cached?.data && Array.isArray(cached.data.themes) && cachedComplete) {
+      applyUnodcPreview(cached.data, { keepThemeSelection: keepSelection });
+      if (cached.fresh) return;
+    } else if (cached?.data && !cachedComplete) {
+      clearPreviewCache(url);
+      setUnodcStatus("loading");
+    } else if (!cached) {
+      setUnodcStatus("loading");
+    }
+
+    try {
+      const data = await fetchPreviewJson<UnodcHotspotsPreview>(url, {
+        validate: (v): v is UnodcHotspotsPreview =>
+          Boolean(
+            v &&
+              typeof v === "object" &&
+              Array.isArray((v as UnodcHotspotsPreview).themes),
+          ),
+        // Bust HTTP cache when incomplete or user hit Refresh.
+        forceNetwork:
+          Boolean(options?.forceRefresh) ||
+          !cachedComplete ||
+          Boolean(cached?.stale),
+      });
+      applyUnodcPreview(data, {
+        keepThemeSelection: keepSelection && isCompleteUnodcPreview(data),
+      });
+    } catch {
+      if (!cachedComplete) {
+        setUnodcError("UNODC hotspots unavailable");
+        setUnodcStatus("error");
+      }
+    }
+  };
+
+  const setUnodcFocusMode = (mode: "focus" | "all-live" | "none") => {
+    if (!unodcPreview) return;
+    const next = { ...DEFAULT_UNODC_THEMES };
+    for (const theme of unodcPreview.themes) {
+      const hasLive = theme.dataMode === "live" && theme.hotspotCount > 0;
+      if (mode === "none") {
+        next[theme.id] = false;
+      } else if (mode === "all-live") {
+        next[theme.id] = hasLive;
+      } else {
+        next[theme.id] = hasLive && UNODC_FOCUS_THEMES.includes(theme.id);
+      }
+    }
+    setUnodcThemes(next);
+  };
+
   const loadUnGlobalPreview = async (closeMenu = true) => {
     // Keep other popups open so multiple panels can be used side by side
     setShowUnGlobalPanel(true);
@@ -2724,33 +3048,63 @@ function App() {
     if (closeMenu) {
       setShowMenu(false);
     }
-    setUnGlobalStatus("loading");
     setUnGlobalError("");
 
+    const url = "/api/un-global-preview";
+    const cached = getPreviewCache<UnGlobalPreview>(url);
+    if (cached?.data && Array.isArray(cached.data.missionLocations)) {
+      setUnGlobalPreview(cached.data);
+      setUnGlobalStatus("ready");
+      if (cached.fresh) return;
+    } else {
+      setUnGlobalStatus("loading");
+    }
+
     try {
-      const response = await fetch("/api/un-global-preview", {
-        headers: {
-          accept: "application/json",
-        },
+      const data = await fetchPreviewJson<UnGlobalPreview>(url, {
+        validate: (v): v is UnGlobalPreview =>
+          Boolean(
+            v &&
+              typeof v === "object" &&
+              Array.isArray((v as UnGlobalPreview).missionLocations),
+          ),
+        forceNetwork: Boolean(cached?.stale),
       });
-
-      if (!response.ok) {
-        throw new Error("UN global preview request failed");
-      }
-
-      const data = (await response.json()) as UnGlobalPreview;
-
-      if (!data || !Array.isArray(data.missionLocations)) {
-        throw new Error("UN global preview response incomplete");
-      }
-
       setUnGlobalPreview(data);
       setUnGlobalStatus("ready");
     } catch {
-      setUnGlobalError("UN global preview unavailable");
-      setUnGlobalStatus("error");
+      if (!cached) {
+        setUnGlobalError("UN global preview unavailable");
+        setUnGlobalStatus("error");
+      }
     }
   };
+
+  // After globe first paint: warm edge/browser caches so panel opens are free.
+  // Staggered so we never compete with WebGL init.
+  useEffect(() => {
+    const warm = () => {
+      warmPreviewUrl(UNODC_PREVIEW_URL);
+      warmPreviewUrl("/api/comtrade-pulse-preview?period=2023");
+      // Geo atlas for choropleth — force-cache immutable asset
+      void import("./worldCountries")
+        .then((m) => m.loadCountryPolygons())
+        .catch(() => {});
+    };
+    let idleId = 0;
+    let timeoutId = 0;
+    if (typeof requestIdleCallback === "function") {
+      idleId = requestIdleCallback(warm, { timeout: 8000 });
+    } else {
+      timeoutId = window.setTimeout(warm, 4000);
+    }
+    return () => {
+      if (idleId && typeof cancelIdleCallback === "function") {
+        cancelIdleCallback(idleId);
+      }
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+  }, []);
 
   const disableUnGlobalLayer = () => {
     setShowUnGlobalPanel(false);
@@ -2971,6 +3325,103 @@ function App() {
             : []),
         ]
       : [];
+  /**
+   * Multi-theme choropleth: one fill per (theme, country) so several themes
+   * stack with semi-transparent colors instead of a single winner-takes-all.
+   */
+  const unodcChoroplethRegions: GlobeChoroplethRegion[] = useMemo(() => {
+    if (
+      !showUnodcPanel ||
+      unodcStatus !== "ready" ||
+      !unodcPreview ||
+      !unodcCountryPolygons
+    ) {
+      return [];
+    }
+    type Entry = {
+      id: string;
+      iso3: string;
+      intensity: number;
+      color: string;
+      themeId: UnodcThemeId;
+      label: string;
+      rings: [number, number][][];
+    };
+    const entries: Entry[] = [];
+    // Per-theme cap keeps “All live” usable; total cap protects frame budget.
+    const PER_THEME = 40;
+    const MAX_TOTAL = 140;
+
+    for (const theme of unodcPreview.themes) {
+      if (!unodcThemes[theme.id] || theme.hotspots.length === 0) continue;
+      const color = UNODC_THEME_CSS[theme.id];
+      const ranked = [...theme.hotspots]
+        .sort((a, b) => b.intensity - a.intensity)
+        .slice(0, PER_THEME);
+      for (const spot of ranked) {
+        const poly = unodcCountryPolygons.get(spot.iso3);
+        if (!poly) continue;
+        entries.push({
+          id: `${theme.id}-${spot.iso3}`,
+          iso3: spot.iso3,
+          intensity: spot.intensity,
+          color,
+          themeId: theme.id,
+          rings: poly.rings,
+          label: `${theme.label}: ${spot.name} · ${spot.value} (${spot.year})`,
+        });
+      }
+    }
+
+    entries.sort((a, b) => b.intensity - a.intensity);
+    return entries.slice(0, MAX_TOTAL).map((b) => ({
+      id: b.id,
+      iso3: b.iso3,
+      rings: b.rings,
+      color: b.color,
+      intensity: b.intensity,
+      themeId: b.themeId,
+      label: b.label,
+    }));
+  }, [
+    showUnodcPanel,
+    unodcStatus,
+    unodcPreview,
+    unodcCountryPolygons,
+    unodcThemes,
+  ]);
+
+  /**
+   * Heat blobs only when country polygons failed to load.
+   * Choropleth alone is calmer and more accurate.
+   */
+  const unodcHeatZones: GlobeHeatZone[] = useMemo(() => {
+    if (
+      !showUnodcPanel ||
+      unodcStatus !== "ready" ||
+      !unodcPreview ||
+      unodcCountryPolygons
+    ) {
+      return [];
+    }
+    return unodcPreview.themes.flatMap((theme) => {
+      if (!unodcThemes[theme.id] || theme.hotspots.length === 0) {
+        return [];
+      }
+      return buildUnodcThemeHeatZones(theme, UNODC_THEME_CSS[theme.id]).map(
+        (z) => ({
+          ...z,
+          intensity: z.intensity * 0.65,
+        }),
+      );
+    });
+  }, [
+    showUnodcPanel,
+    unodcStatus,
+    unodcPreview,
+    unodcCountryPolygons,
+    unodcThemes,
+  ]);
   const unGlobalMarkerColor =
     unGlobalOverlayMarkers.length > 0
       ? ([0, 0.65, 1] as [number, number, number])
@@ -3043,7 +3494,10 @@ function App() {
           };
         })
       : [];
-  const globeOverlayMarkers = [...unGlobalOverlayMarkers, ...tradePulseGlobeMarkers];
+  const globeOverlayMarkers = [
+    ...unGlobalOverlayMarkers,
+    ...tradePulseGlobeMarkers,
+  ];
   const globeMarkerColor =
     tradePulseGlobeMarkers.length > 0
       ? ([1, 0.24, 0.18] as [number, number, number])
@@ -4318,6 +4772,16 @@ function App() {
           <button
             className="nav-btn"
             onClick={() =>
+              runRateLimitedButtonAction("unodc-load", () => {
+                void loadUnodcHotspots();
+              })
+            }
+          >
+            UNODC
+          </button>
+          <button
+            className="nav-btn"
+            onClick={() =>
               runRateLimitedButtonAction("un-global-load", () => {
                 void loadUnGlobalPreview();
               })
@@ -5410,6 +5874,297 @@ function App() {
         </FloatingChrome>
       )}
 
+      {showUnodcPanel && (
+        <FloatingChrome
+          className={`un-panel unodc-panel ${
+            isUnodcPanelMinimized ? "un-panel-minimized" : ""
+          }`}
+          role="dialog"
+          aria-label="UNODC theme hotspots"
+        >
+          <div className="un-panel-header">
+            <div>
+              <h3>UNODC Hotspots</h3>
+              <span>
+                {unodcStatus === "ready" && unodcPreview
+                  ? unodcPreview.queryLabel
+                  : "Data Portal themes"}
+              </span>
+            </div>
+            <div className="un-panel-actions">
+              <button
+                type="button"
+                className="un-minimize"
+                onClick={() =>
+                  runRateLimitedButtonAction("unodc-minimize", () =>
+                    setIsUnodcPanelMinimized((m) => !m),
+                  )
+                }
+                aria-label={
+                  isUnodcPanelMinimized ? "Expand UNODC panel" : "Minimize UNODC panel"
+                }
+              >
+                {isUnodcPanelMinimized ? "+" : "_"}
+              </button>
+              <button
+                type="button"
+                className="un-close"
+                onClick={() =>
+                  runRateLimitedButtonAction("unodc-close", () => {
+                    setShowUnodcPanel(false);
+                  })
+                }
+                aria-label="Close UNODC panel"
+              >
+                x
+              </button>
+            </div>
+          </div>
+
+          {!isUnodcPanelMinimized && (
+            <div className="trade-pulse-panel-scroll">
+              <div className="trade-pulse-panel-inner">
+                {unodcStatus === "loading" && (
+                  <div className="un-loading">Loading UNODC themes…</div>
+                )}
+                {unodcStatus === "error" && (
+                  <div className="un-error">
+                    <span>{unodcError}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        runRateLimitedButtonAction("unodc-retry", () => {
+                          void loadUnodcHotspots(false);
+                        })
+                      }
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+                {unodcStatus === "ready" && unodcPreview && (
+                  <>
+                    <div className="un-status-row">
+                      <span>{unodcPreview.source}</span>
+                      <strong>
+                        {Object.values(unodcThemes).filter(Boolean).length} on globe
+                        · {unodcCountryPolygons ? "choropleth" : "heat"}
+                      </strong>
+                    </div>
+                    <div className="unodc-mode-row" role="group" aria-label="Theme focus">
+                      <button
+                        type="button"
+                        className="trade-pulse-year-btn active"
+                        onClick={() =>
+                          runRateLimitedButtonAction("unodc-mode-focus", () =>
+                            setUnodcFocusMode("focus"),
+                          )
+                        }
+                      >
+                        Focus
+                      </button>
+                      <button
+                        type="button"
+                        className="trade-pulse-year-btn"
+                        onClick={() =>
+                          runRateLimitedButtonAction("unodc-mode-all", () =>
+                            setUnodcFocusMode("all-live"),
+                          )
+                        }
+                      >
+                        All live
+                      </button>
+                      <button
+                        type="button"
+                        className="trade-pulse-year-btn"
+                        onClick={() =>
+                          runRateLimitedButtonAction("unodc-mode-none", () =>
+                            setUnodcFocusMode("none"),
+                          )
+                        }
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <div className="un-status-row unodc-live-count">
+                      <span>
+                        {countLiveUnodcThemes(unodcPreview)}/
+                        {unodcPreview.themes.length} themes with country data
+                      </span>
+                      {countLiveUnodcThemes(unodcPreview) <
+                        unodcPreview.themes.length && (
+                        <button
+                          type="button"
+                          className="trade-pulse-year-btn"
+                          onClick={() =>
+                            runRateLimitedButtonAction("unodc-reload-all", () => {
+                              void loadUnodcHotspots(false, {
+                                forceRefresh: true,
+                              });
+                            })
+                          }
+                        >
+                          Reload all themes
+                        </button>
+                      )}
+                    </div>
+                    <div className="unodc-legend" aria-label="Theme colors">
+                      {unodcPreview.themes.map((theme) => {
+                        const canToggle =
+                          theme.dataMode === "live" && theme.hotspotCount > 0;
+                        return (
+                          <button
+                            type="button"
+                            key={`legend-${theme.id}`}
+                            className={`unodc-legend-item ${
+                              unodcThemes[theme.id] ? "active" : ""
+                            } ${canToggle ? "" : "disabled"}`}
+                            disabled={!canToggle}
+                            title={
+                              canToggle
+                                ? theme.label
+                                : `${theme.label} — no country series yet`
+                            }
+                            onClick={() =>
+                              runRateLimitedButtonAction(
+                                `unodc-legend-${theme.id}`,
+                                () => toggleUnodcTheme(theme.id),
+                              )
+                            }
+                          >
+                            <i
+                              className="unodc-legend-swatch"
+                              style={{ background: UNODC_THEME_CSS[theme.id] }}
+                            />
+                            <span>{theme.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="un-goal-list" aria-label="UNODC themes">
+                      {unodcPreview.themes.map((theme) => {
+                        const canToggle =
+                          theme.dataMode === "live" && theme.hotspotCount > 0;
+                        return (
+                          <article
+                            className={`un-goal-row unodc-theme-card ${
+                              unodcThemes[theme.id] ? "active" : ""
+                            } ${canToggle ? "" : "is-unavailable"}`}
+                            key={theme.id}
+                            style={
+                              {
+                                "--unodc-theme-color": UNODC_THEME_CSS[theme.id],
+                              } as React.CSSProperties
+                            }
+                          >
+                            <div className="un-goal-heading">
+                              <span>
+                                <i
+                                  className="unodc-legend-swatch"
+                                  style={{
+                                    background: UNODC_THEME_CSS[theme.id],
+                                  }}
+                                />{" "}
+                                {theme.label}
+                              </span>
+                              <strong>
+                                {canToggle
+                                  ? `${theme.hotspotCount} areas`
+                                  : "No country data"}
+                              </strong>
+                            </div>
+                            <p>
+                              {theme.seriesLabel}
+                              {theme.period ? ` · ${theme.period}` : ""}
+                              {theme.unit ? ` · ${theme.unit}` : ""}
+                            </p>
+                            {theme.note && (
+                              <p className="trade-pulse-insight">{theme.note}</p>
+                            )}
+                            <div className="un-goal-meta">
+                              <button
+                                type="button"
+                                className={`trade-pulse-year-btn ${
+                                  unodcThemes[theme.id] ? "active" : ""
+                                }`}
+                                aria-pressed={unodcThemes[theme.id]}
+                                disabled={!canToggle}
+                                title={
+                                  canToggle
+                                    ? undefined
+                                    : "No open country hotspots for this theme yet"
+                                }
+                                onClick={() =>
+                                  runRateLimitedButtonAction(
+                                    `unodc-theme-${theme.id}`,
+                                    () => toggleUnodcTheme(theme.id),
+                                  )
+                                }
+                              >
+                                {unodcThemes[theme.id] ? "On globe" : "Off"}
+                              </button>
+                              <a
+                                href={theme.portalUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                Portal
+                              </a>
+                            </div>
+                            {unodcThemes[theme.id] &&
+                              theme.hotspots.length > 0 && (
+                                <div className="unodc-hotspot-list">
+                                  {theme.hotspots.slice(0, 8).map((spot) => (
+                                    <span key={spot.id}>
+                                      {spot.iso3} {spot.value}
+                                      <small> ({spot.year})</small>
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                          </article>
+                        );
+                      })}
+                    </div>
+                    <div className="un-footer">
+                      <span>{formatPreviewDate(unodcPreview.updatedAt)}</span>
+                      <div className="un-footer-actions">
+                        <a
+                          href={unodcPreview.datasearchUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Datasearch
+                        </a>
+                        <a
+                          href={unodcPreview.sourceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Portal
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            runRateLimitedButtonAction("unodc-refresh", () => {
+                              void loadUnodcHotspots(false, {
+                                forceRefresh: true,
+                              });
+                            })
+                          }
+                        >
+                          Refresh
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </FloatingChrome>
+      )}
+
       {showUnGlobalPanel && (
         <FloatingChrome
           className={`un-panel un-layer-panel ${
@@ -5670,6 +6425,8 @@ function App() {
             positions={positions.current}
             overlayMarkers={globeOverlayMarkers}
             overlayRoutes={tradePulseGlobeArcs}
+            heatZones={unodcHeatZones}
+            choroplethRegions={unodcChoroplethRegions}
             markerColor={globeMarkerColor}
             glowColor={weatherGlow.color}
             glowCssColor={weatherGlow.css}
@@ -5987,6 +6744,63 @@ function App() {
             </div>
           </div>
           <div className="menu-section">
+            <div className="menu-section-title">UNODC Hotspots</div>
+            <button
+              type="button"
+              className={`menu-toggle-item ${showUnodcPanel ? "active" : ""}`}
+              aria-pressed={showUnodcPanel}
+              onClick={() =>
+                runRateLimitedButtonAction("menu-unodc-panel", () => {
+                  if (showUnodcPanel) {
+                    setIsUnodcPanelMinimized((m) => !m);
+                  } else {
+                    void loadUnodcHotspots(false);
+                  }
+                })
+              }
+            >
+              <div className="menu-toggle-copy">
+                <span>Panel</span>
+                <small>Theme hotspots on globe</small>
+              </div>
+              <strong>
+                {showUnodcPanel
+                  ? isUnodcPanelMinimized
+                    ? "Minimized"
+                    : "Open"
+                  : "Closed"}
+              </strong>
+            </button>
+            {UNODC_THEME_IDS.map((themeId) => {
+              const theme = unodcPreview?.themes.find((t) => t.id === themeId);
+              return (
+                <button
+                  type="button"
+                  key={themeId}
+                  className={`menu-toggle-item ${unodcThemes[themeId] ? "active" : ""}`}
+                  aria-pressed={unodcThemes[themeId]}
+                  onClick={() =>
+                    runRateLimitedButtonAction(`menu-unodc-${themeId}`, () =>
+                      toggleUnodcTheme(themeId),
+                    )
+                  }
+                >
+                  <div className="menu-toggle-copy">
+                    <span>{theme?.label || themeId}</span>
+                    <small>
+                      {theme
+                        ? theme.dataMode === "live"
+                          ? `${theme.hotspotCount} hotspots`
+                          : "Portal tables"
+                        : "Load panel for data"}
+                    </small>
+                  </div>
+                  <strong>{unodcThemes[themeId] ? "On" : "Off"}</strong>
+                </button>
+              );
+            })}
+          </div>
+          <div className="menu-section">
             <div className="menu-section-title">UN Global Layer</div>
             <button
               type="button"
@@ -6207,3 +7021,5 @@ function App() {
 
 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
 createRoot(document.getElementById("root")!).render(<App />);
+
+

@@ -7,6 +7,37 @@ type GlobeMarker = {
   size: number;
 };
 
+/** Colored area highlight (heat blob) projected onto the globe disc. */
+export type GlobeHeatZone = {
+  id: string;
+  location: [number, number];
+  /** Relative 0–1 */
+  intensity: number;
+  /** CSS color for the glow fill */
+  color: string;
+  label?: string;
+  themeId?: string;
+  /** Multiplier for blob diameter (clusters use larger values). */
+  radiusScale?: number;
+  /** Visual style: single country vs regional cluster. */
+  kind?: "point" | "cluster";
+};
+
+/** True country polygon fill for choropleth. */
+export type GlobeChoroplethRegion = {
+  /** Unique path key — themeId+iso3 so multiple themes can stack on one country. */
+  id: string;
+  iso3: string;
+  /** Exterior rings [lng, lat][][] */
+  rings: [number, number][][];
+  /** CSS fill color (include alpha) */
+  color: string;
+  /** 0–1 for stroke / opacity boost */
+  intensity: number;
+  label?: string;
+  themeId?: string;
+};
+
 /** Comtrade / Trade Pulse payload attached to globe route endpoints for + popups */
 export type GlobeArcComtradeDetail = {
   routeId: string;
@@ -62,6 +93,10 @@ interface CobeProps {
   markerColor?: [number, number, number];
   overlayMarkers?: GlobeMarker[];
   overlayRoutes?: GlobeArc[];
+  /** Multi-color area highlights (e.g. UNODC theme hotspots). */
+  heatZones?: GlobeHeatZone[];
+  /** Country polygon fills (true choropleth). */
+  choroplethRegions?: GlobeChoroplethRegion[];
   positions: Map<
     string,
     GlobeMarker
@@ -88,7 +123,13 @@ type PointerInteraction = {
 
 const DEG_TO_RAD = Math.PI / 180;
 const GLOBE_ROTATION_RADIANS_PER_MS = 0.0003;
-const MAX_RENDER_DELTA_MS = 64;
+const MAX_RENDER_DELTA_MS = 48;
+/**
+ * Heat blobs can throttle; choropleth must reproject every frame with the same
+ * phi/theta as cobe or fills drift off the landmasses (looks “unstuck”).
+ */
+const HEAT_IDLE_MS = 100;
+const HEAT_DRAG_MS = 40;
 const POINTER_DRAG_DIVISOR = 200;
 const TOUCH_DRAG_DIVISOR = 100;
 /**
@@ -212,33 +253,68 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+type ProjectBasis = {
+  cosPhi: number;
+  sinPhi: number;
+  cosTheta: number;
+  sinTheta: number;
+  radius: number;
+  half: number;
+};
+
+function makeProjectBasis(
+  rotation: GlobeRotation,
+  width: number,
+  scale: number,
+): ProjectBasis {
+  return {
+    cosPhi: Math.cos(rotation.phi),
+    sinPhi: Math.sin(rotation.phi),
+    cosTheta: Math.cos(rotation.theta),
+    sinTheta: Math.sin(rotation.theta),
+    radius: width * GLOBE_SCREEN_RADIUS_RATIO * scale,
+    half: width / 2,
+  };
+}
+
 function projectVector(
   vector: GlobeVector,
   rotation: GlobeRotation,
   width: number,
   scale: number,
 ) {
-  const cosPhi = Math.cos(rotation.phi);
-  const sinPhi = Math.sin(rotation.phi);
-  const cosTheta = Math.cos(rotation.theta);
-  const sinTheta = Math.sin(rotation.theta);
-  const x = vector.x * cosPhi + vector.z * sinPhi;
+  return projectVectorWithBasis(
+    vector,
+    makeProjectBasis(rotation, width, scale),
+  );
+}
+
+function projectVectorWithBasis(vector: GlobeVector, b: ProjectBasis) {
+  const x = vector.x * b.cosPhi + vector.z * b.sinPhi;
   const y =
-    vector.x * sinPhi * sinTheta +
-    vector.y * cosTheta -
-    vector.z * cosPhi * sinTheta;
+    vector.x * b.sinPhi * b.sinTheta +
+    vector.y * b.cosTheta -
+    vector.z * b.cosPhi * b.sinTheta;
   const depth =
-    -vector.x * sinPhi * cosTheta +
-    vector.y * sinTheta +
-    vector.z * cosPhi * cosTheta;
-  const radius = width * GLOBE_SCREEN_RADIUS_RATIO * scale;
+    -vector.x * b.sinPhi * b.cosTheta +
+    vector.y * b.sinTheta +
+    vector.z * b.cosPhi * b.cosTheta;
 
   return {
-    x: width / 2 + x * radius,
-    y: width / 2 - y * radius,
+    x: b.half + x * b.radius,
+    y: b.half - y * b.radius,
     visible: depth > -0.08,
     depth,
   };
+}
+
+/** Depth-only (no screen coords) for cheap back-face culling. */
+function depthWithBasis(vector: GlobeVector, b: ProjectBasis) {
+  return (
+    -vector.x * b.sinPhi * b.cosTheta +
+    vector.y * b.sinTheta +
+    vector.z * b.cosPhi * b.cosTheta
+  );
 }
 
 function buildProjectedPath(
@@ -263,6 +339,261 @@ function buildProjectedPath(
   }
 
   return path.trim();
+}
+
+type PreparedHeatZone = GlobeHeatZone & { vector: GlobeVector };
+
+type PreparedChoroplethRegion = {
+  id: string;
+  iso3: string;
+  color: string;
+  intensity: number;
+  alpha: number;
+  strokeOpacity: number;
+  /** Precomputed unit vectors so the render loop never redoes lat/lng trig. */
+  rings: GlobeVector[][];
+  /** Cheap back-face reject before walking rings. */
+  centroid: GlobeVector;
+};
+
+type ChoroplethElementCache = {
+  key: string;
+  width: number;
+  paths: Map<string, SVGPathElement>;
+};
+
+function prepareChoroplethRegions(
+  regions: GlobeChoroplethRegion[],
+): PreparedChoroplethRegion[] {
+  return regions.map((region) => {
+    const rings = region.rings.map((ring) =>
+      ring.map(([lng, lat]) => vectorFromLocation([lat, lng])),
+    );
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
+    let n = 0;
+    // Centroid from first ring only — enough for hemisphere culling.
+    const primary = rings[0];
+    if (primary) {
+      for (let i = 0; i < primary.length; i += 1) {
+        const v = primary[i];
+        cx += v.x;
+        cy += v.y;
+        cz += v.z;
+        n += 1;
+      }
+    }
+    const inv = n > 0 ? 1 / n : 0;
+    // Semi-transparent so stacked multi-theme fills remain readable.
+    const alpha = Math.min(0.78, 0.34 + region.intensity * 0.42);
+    return {
+      id: region.id,
+      iso3: region.iso3,
+      color: region.color,
+      intensity: region.intensity,
+      alpha,
+      strokeOpacity: 0.28 + region.intensity * 0.28,
+      rings,
+      centroid: { x: cx * inv, y: cy * inv, z: cz * inv },
+    };
+  });
+}
+
+/**
+ * Max depth of a few samples — large countries stay visible when the centroid
+ * is just past the limb but coast is still on the front hemisphere.
+ */
+function sampleMaxDepth(region: PreparedChoroplethRegion, basis: ProjectBasis) {
+  let maxD = depthWithBasis(region.centroid, basis);
+  const primary = region.rings[0];
+  if (!primary || primary.length === 0) return maxD;
+  const step = Math.max(1, Math.floor(primary.length / 10));
+  for (let i = 0; i < primary.length; i += step) {
+    const d = depthWithBasis(primary[i], basis);
+    if (d > maxD) maxD = d;
+  }
+  return maxD;
+}
+
+function projectChoroplethPath(
+  rings: GlobeVector[][],
+  basis: ProjectBasis,
+): { d: string; visible: boolean } {
+  // Sub-pixel coords keep coastlines stable while spinning (no integer snap jitter).
+  const parts: string[] = [];
+  let visibleCount = 0;
+
+  for (let r = 0; r < rings.length; r += 1) {
+    const ring = rings[r];
+    let drawing = false;
+    let firstX = 0;
+    let firstY = 0;
+    for (let i = 0; i < ring.length; i += 1) {
+      const projected = projectVectorWithBasis(ring[i], basis);
+      // Keep near-limb verts so countries don't hard-cut when the globe turns.
+      // Slightly behind the silhouette still projects onto the disc edge.
+      if (projected.depth < -0.04) {
+        drawing = false;
+        continue;
+      }
+      visibleCount += 1;
+      const px = Math.round(projected.x * 10) / 10;
+      const py = Math.round(projected.y * 10) / 10;
+      if (!drawing) {
+        parts.push(`M${px} ${py}`);
+        firstX = px;
+        firstY = py;
+        drawing = true;
+      } else {
+        parts.push(`L${px} ${py}`);
+      }
+    }
+    if (drawing) {
+      parts.push(`L${firstX} ${firstY}`);
+    }
+  }
+
+  // Show any front-facing fragment — old 32%/avgDepth rules hid half the map mid-spin.
+  const visible = visibleCount >= 3 && parts.length > 0;
+  return {
+    d: visible ? parts.join("") : "",
+    visible,
+  };
+}
+
+function getChoroplethElements(
+  container: SVGSVGElement,
+  regions: PreparedChoroplethRegion[],
+  width: number,
+  cache: React.MutableRefObject<ChoroplethElementCache | null>,
+): ChoroplethElementCache {
+  const key = regions.map((r) => r.id).join("|");
+  const cached = cache.current;
+  if (cached && cached.key === key && cached.width === width) {
+    return cached;
+  }
+
+  const paths = new Map<string, SVGPathElement>();
+  const nodes = container.querySelectorAll<SVGPathElement>("[data-choropleth]");
+  for (let i = 0; i < nodes.length; i += 1) {
+    const path = nodes[i];
+    const id = path.dataset.choropleth || "";
+    if (id) paths.set(id, path);
+  }
+  container.setAttribute("viewBox", `0 0 ${width} ${width}`);
+  const next = { key, width, paths };
+  cache.current = next;
+  return next;
+}
+
+function updateChoropleth(
+  container: SVGSVGElement | null,
+  regions: PreparedChoroplethRegion[],
+  rotation: GlobeRotation,
+  width: number,
+  scale: number,
+  cache: React.MutableRefObject<ChoroplethElementCache | null>,
+) {
+  if (!container) return;
+  if (regions.length === 0) {
+    // Avoid per-path work when UNODC is closed.
+    if (container.dataset.hasPaths === "1") {
+      const cached = cache.current;
+      if (cached) {
+        cached.paths.forEach((path) => {
+          path.style.opacity = "0";
+        });
+      } else {
+        container
+          .querySelectorAll<SVGPathElement>("[data-choropleth]")
+          .forEach((path) => {
+            path.style.opacity = "0";
+          });
+      }
+    }
+    return;
+  }
+
+  container.dataset.hasPaths = "1";
+  const elements = getChoroplethElements(container, regions, width, cache);
+  // Must match cobe's phi/theta of this same frame (no throttle).
+  const basis = makeProjectBasis(rotation, width, scale);
+
+  for (let i = 0; i < regions.length; i += 1) {
+    const region = regions[i];
+    const path = elements.paths.get(region.id);
+    if (!path) continue;
+
+    // Only hide when the whole sampled country is clearly on the far side.
+    if (sampleMaxDepth(region, basis) < -0.08) {
+      if (path.style.opacity !== "0") path.style.opacity = "0";
+      continue;
+    }
+
+    const projected = projectChoroplethPath(region.rings, basis);
+    if (!projected.visible || !projected.d) {
+      if (path.style.opacity !== "0") path.style.opacity = "0";
+      continue;
+    }
+
+    // Only geometry + visibility every frame; colors set once when style missing.
+    path.setAttribute("d", projected.d);
+    path.style.opacity = String(region.alpha);
+    if (path.style.fill !== region.color) {
+      path.style.fill = region.color;
+      path.style.stroke = "rgba(242,244,247,0.4)";
+      path.style.strokeOpacity = String(region.strokeOpacity);
+    }
+  }
+}
+
+function updateHeatZones(
+  container: HTMLDivElement | null,
+  zones: PreparedHeatZone[],
+  rotation: GlobeRotation,
+  width: number,
+  scale: number,
+) {
+  if (!container) return;
+  if (zones.length === 0) {
+    if (container.dataset.hasZones === "1") {
+      container.querySelectorAll<HTMLElement>("[data-heat-zone]").forEach((el) => {
+        el.style.opacity = "0";
+      });
+    }
+    return;
+  }
+  container.dataset.hasZones = "1";
+  const byId = new Map(zones.map((z) => [z.id, z]));
+  const nodes = container.querySelectorAll<HTMLElement>("[data-heat-zone]");
+  nodes.forEach((element) => {
+    const id = element.dataset.heatZone || "";
+    const zone = byId.get(id);
+    if (!zone) {
+      element.style.opacity = "0";
+      return;
+    }
+    const projected = projectVector(zone.vector, rotation, width, scale);
+    const radiusScale = zone.radiusScale ?? 1;
+    const isCluster = zone.kind === "cluster";
+    const base = width * (isCluster ? 0.095 : 0.065);
+    const size =
+      base * (0.5 + zone.intensity * (isCluster ? 2.35 : 1.7)) * radiusScale;
+    element.style.left = `${projected.x}px`;
+    element.style.top = `${projected.y}px`;
+    element.style.width = `${size}px`;
+    element.style.height = `${size}px`;
+    element.style.opacity = projected.visible
+      ? String(
+          Math.min(0.95, (isCluster ? 0.42 : 0.32) + zone.intensity * 0.55),
+        )
+      : "0";
+    element.style.transform = `translate(-50%, -50%) scale(${
+      0.9 + projected.depth * 0.14
+    })`;
+    element.dataset.heatKind = zone.kind || "point";
+  });
 }
 
 function getRoutePoints(routes: GlobeArc[]): RoutePoint[] {
@@ -409,13 +740,20 @@ export function Cobe({
   markerColor = [0.8, 0.1, 0.1],
   overlayMarkers = [],
   overlayRoutes = [],
+  heatZones = [],
+  choroplethRegions = [],
 }: CobeProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const routeOverlayRef = useRef<HTMLDivElement>(null);
+  const heatOverlayRef = useRef<HTMLDivElement>(null);
+  const choroplethSvgRef = useRef<SVGSVGElement>(null);
   const routeOverlayCacheRef = useRef<RouteOverlayElementCache | null>(null);
+  const choroplethCacheRef = useRef<ChoroplethElementCache | null>(null);
   const glowColorRef = useRef(glowColor);
   const markerColorRef = useRef(markerColor);
   const overlayMarkersRef = useRef(overlayMarkers);
+  const heatZonesRef = useRef(heatZones);
+  const preparedChoroplethRef = useRef<PreparedChoroplethRegion[]>([]);
   const pointerInteracting = useRef<PointerInteraction | null>(null);
   const pointerRotationRef = useRef<GlobeRotation>({ phi: 0, theta: 0 });
   const autoRotationRef = useRef(0);
@@ -429,6 +767,15 @@ export function Cobe({
     [overlayRoutes],
   );
   const overlayRoutesRef = useRef(routeOverlayData);
+  const preparedHeatZones = useMemo(
+    () =>
+      heatZones.map((zone) => ({
+        ...zone,
+        vector: vectorFromLocation(zone.location),
+      })),
+    [heatZones],
+  );
+  const preparedHeatZonesRef = useRef(preparedHeatZones);
 
   useEffect(() => {
     glowColorRef.current = glowColor;
@@ -441,6 +788,20 @@ export function Cobe({
   useEffect(() => {
     overlayMarkersRef.current = overlayMarkers;
   }, [overlayMarkers]);
+
+  useEffect(() => {
+    heatZonesRef.current = heatZones;
+  }, [heatZones]);
+
+  useEffect(() => {
+    preparedHeatZonesRef.current = preparedHeatZones;
+  }, [preparedHeatZones]);
+
+  useEffect(() => {
+    preparedChoroplethRef.current = prepareChoroplethRegions(choroplethRegions);
+    // Region set changed — rebuild path element index on next update.
+    choroplethCacheRef.current = null;
+  }, [choroplethRegions]);
 
   useEffect(() => {
     overlayRoutesRef.current = routeOverlayData;
@@ -509,18 +870,27 @@ export function Cobe({
     onResize();
 
     let globe: ReturnType<typeof createGlobe> | null = null;
+    let lastHeatOverlayAt = 0;
+    let lastViewBoxWidth = -1;
+    const markersScratch: GlobeMarker[] = [];
+    // Cap DPR for fill-rate; 2× on large canvases is a common FPS sink.
+    const dpr =
+      typeof window !== "undefined"
+        ? Math.min(1.25, window.devicePixelRatio || 1)
+        : 1;
     // Never early-return after adding the resize listener — that would leak it.
     if (canvasRef.current) {
       try {
         globe = createGlobe(canvasRef.current, {
-          devicePixelRatio: 2,
+          devicePixelRatio: dpr,
           width: width || 400,
           height: width || 400,
           phi: 0,
           theta: 0,
           dark: 1,
           diffuse: 0.8,
-          mapSamples: 16000,
+          // Base samples; drop further while UNODC choropleth is active (see render loop).
+          mapSamples: 8000,
           mapBrightness: 6,
           baseColor: [212 / 255, 175 / 255, 55 / 255], // #d4af37 gold
           markerColor: markerColorRef.current,
@@ -557,9 +927,24 @@ export function Cobe({
         theta: pointerRotationRef.current.theta,
       };
       const currentWidth = width || 400;
+      const interacting = pointerInteracting.current !== null;
 
+      // Reuse one array — avoid spreading Maps every frame (GC pressure).
+      markersScratch.length = 0;
+      for (const marker of positions.values()) {
+        markersScratch.push(marker);
+      }
+      const overlays = overlayMarkersRef.current;
+      for (let i = 0; i < overlays.length; i += 1) {
+        markersScratch.push(overlays[i]);
+      }
+
+      // Visitor positions mutate in place — markers must update every frame for live motion.
+      // Slightly fewer samples with choropleth so WebGL + SVG share the frame budget.
+      const choropleth = preparedChoroplethRef.current;
+      const mapSamples = choropleth.length > 0 ? 6000 : 8000;
       globe.update({
-        markers: [...positions.values(), ...overlayMarkersRef.current],
+        markers: markersScratch,
         glowColor: glowColorRef.current,
         markerColor: markerColorRef.current,
         phi: currentRotation.phi,
@@ -567,17 +952,53 @@ export function Cobe({
         width: currentWidth,
         height: currentWidth,
         scale: COBE_RENDER_SCALE,
+        mapSamples,
       });
 
-      // Overlay uses cobe render scale (not CSS zoom); CSS scales the parent as a unit.
-      updateRouteOverlay(
-        routeOverlayRef.current,
-        overlayRoutesRef.current,
-        currentRotation,
-        currentWidth,
-        COBE_RENDER_SCALE,
-        routeOverlayCacheRef,
-      );
+      const hasRoutes = overlayRoutesRef.current.routes.length > 0;
+      if (hasRoutes) {
+        // Overlay uses cobe render scale (not CSS zoom); CSS scales the parent as a unit.
+        updateRouteOverlay(
+          routeOverlayRef.current,
+          overlayRoutesRef.current,
+          currentRotation,
+          currentWidth,
+          COBE_RENDER_SCALE,
+          routeOverlayCacheRef,
+        );
+      }
+
+      // Same rotation, same frame as globe.update — required for land fills to stick.
+      if (choropleth.length > 0) {
+        if (lastViewBoxWidth !== currentWidth) {
+          lastViewBoxWidth = currentWidth;
+          choroplethCacheRef.current = null;
+        }
+        updateChoropleth(
+          choroplethSvgRef.current,
+          choropleth,
+          currentRotation,
+          currentWidth,
+          COBE_RENDER_SCALE,
+          choroplethCacheRef,
+        );
+      }
+
+      // Heat fallback only — can lag a frame without looking “unstuck”.
+      const heat = preparedHeatZonesRef.current;
+      if (heat.length > 0) {
+        const heatInterval = interacting ? HEAT_DRAG_MS : HEAT_IDLE_MS;
+        if (now - lastHeatOverlayAt >= heatInterval) {
+          lastHeatOverlayAt = now;
+          updateHeatZones(
+            heatOverlayRef.current,
+            heat,
+            currentRotation,
+            currentWidth,
+            COBE_RENDER_SCALE,
+          );
+        }
+      }
 
       animationFrame = requestAnimationFrame(renderFrame);
     };
@@ -913,6 +1334,44 @@ export function Cobe({
           zIndex: 0,
         }}
       />
+      <svg
+        ref={choroplethSvgRef}
+        className="globe-choropleth-svg"
+        viewBox="0 0 400 400"
+        aria-hidden={choroplethRegions.length === 0}
+      >
+        {choroplethRegions.map((region) => (
+          <path
+            key={region.id}
+            className="globe-choropleth-path"
+            data-choropleth={region.id}
+            data-iso3={region.iso3}
+            data-theme={region.themeId || ""}
+          >
+            <title>{region.label || region.iso3}</title>
+          </path>
+        ))}
+      </svg>
+      <div
+        ref={heatOverlayRef}
+        className="globe-heat-overlay"
+        aria-hidden={preparedHeatZones.length === 0}
+      >
+        {preparedHeatZones.map((zone) => (
+          <div
+            key={zone.id}
+            className={`globe-heat-zone globe-heat-zone-${zone.kind || "point"}`}
+            data-heat-zone={zone.id}
+            data-heat-kind={zone.kind || "point"}
+            title={zone.label || undefined}
+            style={
+              {
+                "--heat-color": zone.color,
+              } as React.CSSProperties
+            }
+          />
+        ))}
+      </div>
       <div
         ref={routeOverlayRef}
         className="globe-arc-overlay"

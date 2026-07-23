@@ -172,6 +172,56 @@ export type UnGlobalPreview = {
   stale?: boolean;
 };
 
+/** UNODC Data Portal research themes (data.unodc.org). */
+export type UnodcThemeId =
+  | "drug-seizure"
+  | "drug-use"
+  | "drug-trafficking"
+  | "homicide"
+  | "violent-crime"
+  | "corruption"
+  | "prisons"
+  | "justice"
+  | "firearms"
+  | "trafficking-persons"
+  | "wildlife"
+  | "covid";
+
+export type UnodcHotspotPoint = {
+  id: string;
+  iso3: string;
+  name: string;
+  lat: number;
+  lng: number;
+  value: number;
+  year: number;
+  /** 0–1 relative intensity within theme for marker size. */
+  intensity: number;
+};
+
+export type UnodcThemePreview = {
+  id: UnodcThemeId;
+  label: string;
+  portalUrl: string;
+  unit: string;
+  seriesLabel: string;
+  dataMode: "live" | "unavailable";
+  period: string | null;
+  hotspotCount: number;
+  hotspots: UnodcHotspotPoint[];
+  note?: string;
+};
+
+export type UnodcHotspotsPreview = {
+  source: string;
+  sourceUrl: string;
+  datasearchUrl: string;
+  updatedAt: string;
+  queryLabel: string;
+  themes: UnodcThemePreview[];
+  notes: string[];
+};
+
 export type TradePulseLayer =
   | "dependency"
   | "lifelines"
