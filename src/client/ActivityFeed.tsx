@@ -26,6 +26,9 @@ export interface ActivityEvent {
 
 export type ActivityFilter = "all" | "connect" | "disconnect";
 
+/** Public globe WebSocket link — separate from paid Live Feed access. */
+export type GlobeSocketStatus = "connecting" | "connected" | "disconnected";
+
 const FEED_MAX_EVENTS = 100;
 const TEXT_MAX_LEN = 96;
 
@@ -168,12 +171,17 @@ type ActivityFeedProps = {
   onToggleCompact: () => void;
   filter: ActivityFilter;
   onFilterChange: (filter: ActivityFilter) => void;
-  isSocketConnected: boolean;
+  /** @deprecated prefer socketStatus — kept for compatibility */
+  isSocketConnected?: boolean;
+  /** Public WS link status (markers). Not the same as feed unlock. */
+  socketStatus?: GlobeSocketStatus;
   /** Stripe-paid unlock — feed content is hidden until ok */
   access: LiveFeedAccess;
   checkoutBusy?: boolean;
   onSignIn?: () => void;
   onBuyAccess?: () => void;
+  /** Manual PartySocket reconnect when link drops */
+  onReconnectSocket?: () => void;
 };
 
 export function ActivityFeed({
@@ -190,12 +198,19 @@ export function ActivityFeed({
   filter,
   onFilterChange,
   isSocketConnected,
+  socketStatus: socketStatusProp,
   access,
   checkoutBusy = false,
   onSignIn,
   onBuyAccess,
+  onReconnectSocket,
 }: ActivityFeedProps) {
   const isLocked = access !== "ok";
+  const socketStatus: GlobeSocketStatus =
+    socketStatusProp ??
+    (isSocketConnected ? "connected" : "disconnected");
+  const isLinkUp = socketStatus === "connected";
+  const isLinkConnecting = socketStatus === "connecting";
   const [now, setNow] = useState(() => Date.now());
   const [copyState, setCopyState] = useState<"idle" | "ok" | "err">("idle");
   const listRef = useRef<HTMLDivElement>(null);
@@ -327,48 +342,62 @@ export function ActivityFeed({
     onFilterChange(next);
   };
 
+  // Locked = billing gate. Offline = public WS link. Never conflate them.
   const launcherMeta = isLocked
     ? access === "login_required"
-      ? "sign in required"
-      : "Stripe access required"
-    : isSocketConnected
+      ? "locked · sign in"
+      : "locked · Stripe $20"
+    : isLinkUp
       ? `${counter} online`
-      : "reconnecting";
+      : isLinkConnecting
+        ? "connecting…"
+        : "link down · reconnect";
+
+  const launcherTitle = isLocked
+    ? access === "login_required"
+      ? "Live Feed is locked — sign in, then buy Stripe access. Globe socket is separate."
+      : "Live Feed is locked until Stripe ($20). Globe markers still work over the free socket."
+    : isLinkUp
+      ? "Live visitor feed (unlocked)"
+      : isLinkConnecting
+        ? "Connecting public globe socket…"
+        : "Globe socket disconnected — reconnect to resume feed events";
 
   return (
     <div className="activity-floating">
       <button
         type="button"
         className={`activity-launcher ${open ? "activity-launcher-open" : ""} ${
-          !isSocketConnected && !isLocked ? "activity-launcher-offline" : ""
-        } ${isLocked ? "activity-launcher-locked" : ""}`}
+          isLocked
+            ? "activity-launcher-locked"
+            : !isLinkUp
+              ? "activity-launcher-offline"
+              : ""
+        }`}
         onClick={onToggle}
         aria-controls="live-feed-menu"
         aria-expanded={open}
-        title={
-          isLocked
-            ? "Live feed requires Stripe-paid access"
-            : isSocketConnected
-              ? "Live visitor feed"
-              : "Feed reconnecting…"
-        }
+        title={launcherTitle}
       >
         <span
           className={`pulse-dot ${
             isLocked
               ? "pulse-dot-locked"
-              : !isSocketConnected
-                ? "pulse-dot-offline"
+              : !isLinkUp
+                ? isLinkConnecting
+                  ? "pulse-dot-connecting"
+                  : "pulse-dot-offline"
                 : ""
-          } ${isPaused && !isLocked ? "pulse-dot-paused" : ""}`}
+          } ${isPaused && !isLocked && isLinkUp ? "pulse-dot-paused" : ""}`}
         />
         <span className="launcher-copy">
           <span className="launcher-label">Live Feed</span>
           <span className="launcher-meta">
             {launcherMeta}
-            {!isLocked && isPaused ? " · paused" : ""}
-            {!isLocked && leaveCount > 0 ? ` · ${leaveCount} left` : ""}
-            {isLocked ? " · locked" : ""}
+            {!isLocked && isPaused && isLinkUp ? " · paused" : ""}
+            {!isLocked && isLinkUp && leaveCount > 0
+              ? ` · ${leaveCount} left`
+              : ""}
           </span>
         </span>
         <span className="launcher-action">{open ? "Hide" : "Open"}</span>
@@ -390,23 +419,21 @@ export function ActivityFeed({
               <p>
                 {isLocked
                   ? access === "login_required"
-                    ? "Sign in, then unlock with Stripe ($20)"
-                    : "Stripe checkout required — same access as Transit"
-                  : !isSocketConnected
-                    ? "Connection interrupted"
+                    ? "Feed content locked — sign in, then Stripe ($20)"
+                    : "Feed content locked — Stripe checkout required"
+                  : !isLinkUp
+                    ? isLinkConnecting
+                      ? "Globe link connecting… feed events wait for socket"
+                      : "Globe link down — reconnect to receive feed events"
                     : isPaused
                       ? "Joins paused — leaves still recorded"
-                      : "Live visitor signals"}
+                      : "Live visitor signals (unlocked)"}
               </p>
             </div>
             <div className="activity-header-actions">
-              {!isLocked && (
+              {!isLocked && isLinkUp && (
                 <div className="activity-count" title="Visitors currently online">
-                  <span
-                    className={`pulse-dot ${
-                      !isSocketConnected ? "pulse-dot-offline" : ""
-                    }`}
-                  />
+                  <span className="pulse-dot" />
                   <span>{counter}</span>
                 </div>
               )}
@@ -421,12 +448,64 @@ export function ActivityFeed({
             </div>
           </header>
 
+          <div
+            className="activity-status-row"
+            role="status"
+            aria-label="Connection and access status"
+          >
+            <span
+              className={`activity-status-chip ${
+                isLinkUp
+                  ? "chip-ok"
+                  : isLinkConnecting
+                    ? "chip-warn"
+                    : "chip-bad"
+              }`}
+            >
+              Link:{" "}
+              {isLinkUp
+                ? "connected"
+                : isLinkConnecting
+                  ? "connecting"
+                  : "offline"}
+            </span>
+            <span
+              className={`activity-status-chip ${
+                isLocked ? "chip-locked" : "chip-ok"
+              }`}
+            >
+              Feed:{" "}
+              {isLocked
+                ? access === "login_required"
+                  ? "locked (sign in)"
+                  : "locked (Stripe)"
+                : "unlocked"}
+            </span>
+            {!isLinkUp && onReconnectSocket && (
+              <button
+                type="button"
+                className="activity-reconnect-btn"
+                onClick={onReconnectSocket}
+              >
+                Reconnect
+              </button>
+            )}
+          </div>
+
           {isLocked ? (
             <div className="activity-lock-panel" role="status">
-              <div className="activity-lock-badge">Stripe required</div>
+              <div className="activity-lock-badge">
+                {access === "login_required" ? "Sign in required" : "Stripe required"}
+              </div>
               <p className="activity-lock-copy">
-                The live visitor feed is a paid feature. Complete Stripe checkout
-                ($20) to unlock Live Feed and Local Transit on this account.
+                Live Feed details (joins/leaves with city/org) need Stripe access
+                ($20) — same unlock as Transit. This is separate from the globe
+                WebSocket link
+                {isLinkUp
+                  ? " (which is connected — markers still work)."
+                  : isLinkConnecting
+                    ? " (still connecting)."
+                    : " (currently offline — use Reconnect)."}
               </p>
               <div className="activity-lock-actions">
                 {access === "login_required" ? (
@@ -447,8 +526,8 @@ export function ActivityFeed({
                 )}
               </div>
               <p className="activity-lock-note">
-                Globe markers stay free. Feed geo details are only sent after
-                payment (server-gated).
+                Globe markers stay free for everyone. Paid feed geo is
+                server-gated after payment.
               </p>
             </div>
           ) : (
@@ -456,7 +535,7 @@ export function ActivityFeed({
               <div className="activity-summary" aria-label="Feed summary">
                 <div className="activity-stat">
                   <span>Online</span>
-                  <strong>{counter}</strong>
+                  <strong>{isLinkUp ? counter : "—"}</strong>
                 </div>
                 <div className="activity-stat">
                   <span>Joins</span>
@@ -536,12 +615,26 @@ export function ActivityFeed({
                 aria-live={isPaused ? "off" : "polite"}
                 aria-relevant="additions"
               >
-                {!isSocketConnected && (
+                {!isLinkUp && (
                   <div className="activity-banner activity-banner-warn">
-                    Socket offline — feed will resume on reconnect.
+                    {isLinkConnecting
+                      ? "Globe link connecting… feed events pause until open."
+                      : "Globe link offline — feed events pause until reconnect."}
+                    {onReconnectSocket && !isLinkConnecting && (
+                      <>
+                        {" "}
+                        <button
+                          type="button"
+                          className="activity-banner-action"
+                          onClick={onReconnectSocket}
+                        >
+                          Reconnect now
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
-                {isPaused && (
+                {isPaused && isLinkUp && (
                   <div className="activity-banner activity-banner-info">
                     Paused — new joins are hidden; leaves are still logged.
                   </div>

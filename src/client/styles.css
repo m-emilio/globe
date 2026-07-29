@@ -603,7 +603,10 @@ b {
   pointer-events: none;
   overflow: visible;
   z-index: 4;
-  mix-blend-mode: screen;
+  /* normal blend is far cheaper than screen with many animated strokes */
+  mix-blend-mode: normal;
+  /* paint only — layout contain was racing path mounts / clipping strokes */
+  contain: paint;
 }
 
 .globe-arc-svg {
@@ -611,6 +614,7 @@ b {
   inset: 0;
   width: 100%;
   height: 100%;
+  overflow: visible;
 }
 
 .globe-arc-path {
@@ -619,14 +623,20 @@ b {
   stroke-width: calc(var(--arc-width) * 1px);
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-dasharray: var(--arc-dash);
-  filter: url(#globe-arc-glow);
-  transition: opacity 120ms linear;
-  animation: globe-arc-flow 2.4s linear infinite;
+  /* SVG feGaussianBlur + dash animation was the main FPS killer with PKI arcs */
+  filter: none;
+  transition: none;
+  animation: none;
+  opacity: 0.92;
+  vector-effect: non-scaling-stroke;
+}
+
+.globe-arc-path.globe-arc-solid {
+  stroke-dasharray: none;
 }
 
 .globe-arc-critical {
-  animation-duration: 1.5s;
+  stroke-width: calc(var(--arc-width) * 1.05px);
 }
 
 .globe-arc-point {
@@ -636,9 +646,11 @@ b {
   border: 1px solid var(--arc-color);
   border-radius: 50%;
   background: var(--arc-color);
-  box-shadow: 0 0 14px var(--arc-color);
-  transition: opacity 120ms linear;
-  animation: globe-arc-point-pulse 1.8s ease-in-out infinite;
+  /* soft shadow only — no infinite pulse animation */
+  box-shadow: 0 0 8px color-mix(in srgb, var(--arc-color) 55%, transparent);
+  transition: opacity 80ms linear;
+  animation: none;
+  transform: translate(-50%, -50%);
   transform-origin: center;
   pointer-events: none; /* only the + button is clickable */
 }
@@ -2489,6 +2501,112 @@ b {
 
 .unodc-panel .un-status-row strong {
   color: #ff8a70;
+}
+
+.nav-btn-active {
+  border-color: rgba(255, 45, 85, 0.55) !important;
+  color: #ffb3c7 !important;
+  box-shadow: 0 0 12px rgba(255, 45, 85, 0.25);
+}
+
+.pki-panel .un-status-row strong {
+  color: #ff7aa2;
+}
+
+.pki-disclaimer {
+  margin: 0.35rem 0 0.6rem;
+  font-size: 10px;
+  line-height: 1.35;
+  opacity: 0.85;
+}
+
+.pki-cve-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(48vh, 420px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.pki-cve-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 2px solid rgba(255, 45, 85, 0.55);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(12, 14, 20, 0.55);
+}
+
+.pki-cve-card.severity-high {
+  border-left-color: #ff9f0a;
+}
+
+.pki-cve-card.severity-medium {
+  border-left-color: #ffd60a;
+}
+
+.pki-cve-card.severity-low {
+  border-left-color: #30d158;
+}
+
+.pki-cve-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.pki-cve-heading strong {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: #f2f4f7;
+}
+
+.pki-severity-pill,
+.pki-kev-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #0b0d10;
+}
+
+.pki-kev-pill {
+  background: #bf5af2;
+  color: #fff;
+}
+
+.pki-cve-title {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #d5dbe3;
+}
+
+.pki-cve-meta {
+  margin: 4px 0 0;
+  font-size: 10px;
+  color: #8b949e;
+}
+
+.pki-cve-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.pki-cve-tags span {
+  font-size: 9px;
+  color: #a8b3c0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .unodc-theme-card.is-unavailable {
@@ -4402,6 +4520,93 @@ button[aria-busy="true"],
   background: #ffd166;
   box-shadow: 0 0 8px rgba(255, 209, 102, 0.55);
   animation: none;
+}
+
+.pulse-dot-connecting {
+  background: #64d2ff;
+  box-shadow: 0 0 8px rgba(100, 210, 255, 0.55);
+  animation: pulse-dot-blink 1s ease-in-out infinite;
+}
+
+@keyframes pulse-dot-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.activity-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 0;
+}
+
+.activity-status-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #c8d0d8;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.activity-status-chip.chip-ok {
+  color: #30d158;
+  border-color: rgba(48, 209, 88, 0.35);
+  background: rgba(48, 209, 88, 0.08);
+}
+
+.activity-status-chip.chip-warn {
+  color: #64d2ff;
+  border-color: rgba(100, 210, 255, 0.35);
+  background: rgba(100, 210, 255, 0.08);
+}
+
+.activity-status-chip.chip-bad {
+  color: #ff6b6b;
+  border-color: rgba(255, 107, 107, 0.4);
+  background: rgba(255, 107, 107, 0.1);
+}
+
+.activity-status-chip.chip-locked {
+  color: #ffd166;
+  border-color: rgba(255, 209, 102, 0.4);
+  background: rgba(255, 209, 102, 0.1);
+}
+
+.activity-reconnect-btn,
+.activity-banner-action {
+  border: 1px solid rgba(0, 217, 255, 0.45);
+  background: rgba(0, 217, 255, 0.1);
+  color: #00d9ff;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.activity-reconnect-btn:hover,
+.activity-banner-action:hover {
+  background: rgba(0, 217, 255, 0.18);
+}
+
+.activity-banner-action {
+  display: inline;
+  margin-left: 4px;
+  vertical-align: baseline;
 }
 
 .launcher-copy {

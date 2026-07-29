@@ -29,6 +29,7 @@
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
     "@types/topojson-client": "^3.1.5",
+    "@webgpu/types": "^0.1.71",
     "esbuild": "0.25.2",
     "typescript": "5.8.3",
     "wrangler": "4.107.0"

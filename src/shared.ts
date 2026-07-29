@@ -222,6 +222,67 @@ export type UnodcHotspotsPreview = {
   notes: string[];
 };
 
+/** PKI / TLS / certificate-related vulnerability layer for the globe. */
+export type PkiVulnSeverity = "critical" | "high" | "medium" | "low" | "unknown";
+
+export type PkiVulnCategory =
+  | "certificate"
+  | "tls-ssl"
+  | "openssl"
+  | "crypto-key"
+  | "pki-auth"
+  | "other-pki";
+
+export type PkiVulnCve = {
+  id: string;
+  title: string;
+  severity: PkiVulnSeverity;
+  /** 0–10 when known */
+  cvss?: number | null;
+  description: string;
+  vendor?: string | null;
+  product?: string | null;
+  categories: PkiVulnCategory[];
+  knownExploited: boolean;
+  publishedAt?: string | null;
+  kevDateAdded?: string | null;
+  nvdUrl: string;
+  cisaUrl?: string | null;
+};
+
+export type PkiCountryHotspot = {
+  id: string;
+  iso3: string;
+  name: string;
+  lat: number;
+  lng: number;
+  /** Relative 0–1 for marker / heat size */
+  intensity: number;
+  /** Aggregate risk score (higher = more relevant PKI exposure signal) */
+  score: number;
+  cveCount: number;
+  criticalCount: number;
+  highCount: number;
+  kevCount: number;
+  topCves: string[];
+  categories: PkiVulnCategory[];
+};
+
+export type PkiVulnsPreview = {
+  source: string;
+  sourceUrl: string;
+  cisaKevUrl: string;
+  nvdUrl: string;
+  updatedAt: string;
+  queryLabel: string;
+  dataMode: "live" | "partial" | "unavailable";
+  cveCount: number;
+  hotspotCount: number;
+  cves: PkiVulnCve[];
+  hotspots: PkiCountryHotspot[];
+  notes: string[];
+};
+
 export type TradePulseLayer =
   | "dependency"
   | "lifelines"

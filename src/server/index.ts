@@ -36,6 +36,10 @@ import {
   getUnodcHotspotsPreview,
   UNODC_EDGE_CACHE_VERSION,
 } from "./unodcHotspots";
+import {
+  getPkiVulnsPreview,
+  PKI_EDGE_CACHE_VERSION,
+} from "./pkiVulns";
 
 import type {
   ComtradeAvailabilityPreview,
@@ -4192,6 +4196,31 @@ export default {
             );
           },
           { cacheVersion: UNODC_EDGE_CACHE_VERSION },
+        ),
+      );
+    }
+
+    if (url.pathname === "/api/pki-vulns-preview") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await withPublicEdgeCache(
+          request,
+          ctx,
+          async () => {
+            const limited = await rateLimitDurable(
+              env,
+              `preview:pki:${clientIpFromRequest(request)}`,
+              30,
+              60_000,
+              applySecurityHeaders,
+            );
+            if (limited) return limited;
+            return withSecurityHeaders(await getPkiVulnsPreview(env), request);
+          },
+          { cacheVersion: PKI_EDGE_CACHE_VERSION },
         ),
       );
     }

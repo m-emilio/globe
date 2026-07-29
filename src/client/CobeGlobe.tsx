@@ -1,6 +1,17 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import createGlobe from "cobe";
+import {
+  getArcGpuProjector,
+  packSamplesForGpu,
+  pathFromGpuOutput,
+} from "./arcGpuProjector";
 
 type GlobeMarker = {
   location: [number, number];
@@ -68,6 +79,10 @@ export type GlobeArcComtradeDetail = {
   insight: string;
   /** free-subscription when Worker hydrated from Free API */
   dataMode?: "derived-preview" | "free-subscription";
+  /** trade = Comtrade/Trade Pulse; pki = CVE/PKI arcs */
+  kind?: "trade" | "pki";
+  /** Optional external reference URL (e.g. NVD) */
+  referenceUrl?: string;
 };
 
 export type GlobeArc = {
@@ -130,6 +145,14 @@ const MAX_RENDER_DELTA_MS = 48;
  */
 const HEAT_IDLE_MS = 100;
 const HEAT_DRAG_MS = 40;
+/**
+ * Arc SVG projection throttle. Keep tight so strokes stay locked to the globe
+ * (GPU async must never replace this as the sole live path).
+ */
+const ROUTE_IDLE_MS = 16;
+const ROUTE_DRAG_MS = 16;
+const ROUTE_HEAVY_IDLE_MS = 24;
+const ROUTE_HEAVY_COUNT = 14;
 const POINTER_DRAG_DIVISOR = 200;
 const TOUCH_DRAG_DIVISOR = 100;
 /**
@@ -239,14 +262,22 @@ function buildRouteVectors(from: [number, number], to: [number, number], steps: 
 }
 
 function buildRouteSamples(route: GlobeArc) {
+  // Balance smoothness vs per-frame cost (was 28 — too heavy; 8 — too broken on long hauls).
   if (route.via) {
     return [
-      ...buildRouteVectors(route.from, route.via, 16),
-      ...buildRouteVectors(route.via, route.to, 16).slice(1),
+      ...buildRouteVectors(route.from, route.via, 10),
+      ...buildRouteVectors(route.via, route.to, 10).slice(1),
     ];
   }
 
-  return buildRouteVectors(route.from, route.to, 28);
+  return buildRouteVectors(route.from, route.to, 14);
+}
+
+/** Solid stroke marker — never pass "0" into stroke-dasharray (arcs vanish). */
+function isSolidArcDash(dash: string | undefined) {
+  if (!dash) return true;
+  const d = dash.trim().toLowerCase();
+  return d === "" || d === "none" || d === "0" || d === "solid";
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -289,7 +320,12 @@ function projectVector(
   );
 }
 
-function projectVectorWithBasis(vector: GlobeVector, b: ProjectBasis) {
+function projectVectorWithBasis(
+  vector: GlobeVector,
+  b: ProjectBasis,
+  /** Softer cull for long great-circle arcs (routes) vs markers. */
+  minDepth = -0.08,
+) {
   const x = vector.x * b.cosPhi + vector.z * b.sinPhi;
   const y =
     vector.x * b.sinPhi * b.sinTheta +
@@ -303,7 +339,7 @@ function projectVectorWithBasis(vector: GlobeVector, b: ProjectBasis) {
   return {
     x: b.half + x * b.radius,
     y: b.half - y * b.radius,
-    visible: depth > -0.08,
+    visible: depth > minDepth,
     depth,
   };
 }
@@ -322,23 +358,31 @@ function buildProjectedPath(
   rotation: GlobeRotation,
   width: number,
   scale: number,
+  basis?: ProjectBasis,
 ) {
+  const b = basis ?? makeProjectBasis(rotation, width, scale);
   let path = "";
   let isDrawing = false;
+  let visibleCount = 0;
 
-  for (const sample of samples) {
-    const point = projectVector(sample, rotation, width, scale);
+  for (let i = 0; i < samples.length; i += 1) {
+    // Softer limb cull so long Trade Pulse / PKI arcs still draw fragments.
+    const point = projectVectorWithBasis(samples[i], b, -0.28);
 
     if (!point.visible) {
       isDrawing = false;
       continue;
     }
 
-    path += `${isDrawing ? "L" : "M"} ${point.x.toFixed(1)} ${point.y.toFixed(1)} `;
+    visibleCount += 1;
+    const px = Math.round(point.x * 10) / 10;
+    const py = Math.round(point.y * 10) / 10;
+    path += `${isDrawing ? "L" : "M"}${px} ${py} `;
     isDrawing = true;
   }
 
-  return path.trim();
+  // Need at least 2 points for a visible stroke segment.
+  return visibleCount >= 2 ? path.trim() : "";
 }
 
 type PreparedHeatZone = GlobeHeatZone & { vector: GlobeVector };
@@ -669,25 +713,142 @@ function getRouteOverlayElements(
   cache: React.MutableRefObject<RouteOverlayElementCache | null>,
 ) {
   const cached = cache.current;
+  const pathCount = overlay.routes.length;
+  const pointCount = overlay.points.length;
 
-  if (cached && cached.key === overlay.key && cached.width === width) {
+  // Re-query when route set changes OR React hasn't finished mounting paths yet
+  // (cache hit with empty/short NodeList was why arcs "sometimes" never appeared).
+  if (
+    cached &&
+    cached.key === overlay.key &&
+    cached.width === width &&
+    cached.paths.length === pathCount &&
+    cached.points.length === pointCount &&
+    pathCount > 0
+  ) {
     return cached;
   }
 
+  const svg = container.querySelector<SVGSVGElement>(".globe-arc-svg");
+  const pathNodes = Array.from(
+    container.querySelectorAll<SVGPathElement>(".globe-arc-path"),
+  );
+  const pointNodes = Array.from(
+    container.querySelectorAll<HTMLDivElement>(".globe-arc-point"),
+  );
+
+  // Prefer id matching so order/reorders never desync projection from DOM.
+  const pathsById = new Map<string, SVGPathElement>();
+  for (const path of pathNodes) {
+    const id = path.dataset.arcId || "";
+    if (id) pathsById.set(id, path);
+  }
+  const paths = overlay.routes.map((route, index) => {
+    return pathsById.get(route.id) || pathNodes[index] || null;
+  }).filter((p): p is SVGPathElement => Boolean(p));
+
+  const pointsByKey = new Map<string, HTMLDivElement>();
+  for (const el of pointNodes) {
+    const key = el.dataset.arcPoint || "";
+    if (key) pointsByKey.set(key, el);
+  }
+  const points = overlay.points.map((point, index) => {
+    return pointsByKey.get(point.key) || pointNodes[index] || null;
+  }).filter((p): p is HTMLDivElement => Boolean(p));
+
+  // Only cache when DOM fully matches data — otherwise retry next frame.
+  const complete =
+    paths.length === pathCount && points.length === pointCount && pathCount > 0;
   const elements = {
     key: overlay.key,
     width,
-    svg: container.querySelector<SVGSVGElement>(".globe-arc-svg"),
-    paths: Array.from(container.querySelectorAll<SVGPathElement>(".globe-arc-path")),
-    points: Array.from(container.querySelectorAll<HTMLDivElement>(".globe-arc-point")),
+    svg,
+    paths,
+    points,
   };
 
-  elements.svg?.setAttribute("viewBox", `0 0 ${width} ${width}`);
-  cache.current = elements;
+  if (complete) {
+    svg?.setAttribute("viewBox", `0 0 ${width} ${width}`);
+    cache.current = elements;
+  } else {
+    cache.current = null;
+  }
 
   return elements;
 }
 
+/** Original CPU path — always available; never remove this fallback. */
+function updateRouteOverlayCpu(
+  elements: RouteOverlayElementCache,
+  overlay: RouteOverlayData,
+  rotation: GlobeRotation,
+  width: number,
+  scale: number,
+) {
+  const basis = makeProjectBasis(rotation, width, scale);
+  const routes = overlay.routes;
+  const points = overlay.points;
+
+  for (let index = 0; index < routes.length; index += 1) {
+    const path = elements.paths[index];
+    if (!path) continue;
+    const projectedPath = buildProjectedPath(
+      routes[index].samples,
+      rotation,
+      width,
+      scale,
+      basis,
+    );
+    if (projectedPath) {
+      path.setAttribute("d", projectedPath);
+      if (path.style.opacity !== "0.92") path.style.opacity = "0.92";
+    } else if (path.style.opacity !== "0") {
+      path.style.opacity = "0";
+    }
+  }
+
+  for (let index = 0; index < points.length; index += 1) {
+    const element = elements.points[index];
+    if (!element) continue;
+    // Points: slightly softer cull so + controls stay clickable near the limb.
+    const projected = projectVectorWithBasis(points[index].vector, basis, -0.12);
+    element.style.left = `${projected.x}px`;
+    element.style.top = `${projected.y}px`;
+    if (projected.visible) {
+      if (element.style.opacity !== "1") element.style.opacity = "1";
+    } else if (element.style.opacity !== "0") {
+      element.style.opacity = "0";
+    }
+  }
+}
+
+function applyGpuPathOutputs(
+  elements: RouteOverlayElementCache,
+  overlay: RouteOverlayData,
+  gpuOut: Float32Array,
+) {
+  let offset = 0;
+  for (let index = 0; index < overlay.routes.length; index += 1) {
+    const path = elements.paths[index];
+    const count = overlay.routes[index].samples.length;
+    if (path) {
+      const projectedPath = pathFromGpuOutput(gpuOut, offset, count);
+      if (projectedPath) {
+        path.setAttribute("d", projectedPath);
+        if (path.style.opacity !== "0.92") path.style.opacity = "0.92";
+      } else if (path.style.opacity !== "0") {
+        path.style.opacity = "0";
+      }
+    }
+    offset += count;
+  }
+}
+
+/**
+ * Live arc update: CPU is always authoritative so strokes stick to the globe.
+ * WebGPU may refine denser math in the background, but stale GPU results are
+ * discarded (async GPU was skipping CPU and lagging arcs behind rotation).
+ */
 function updateRouteOverlay(
   container: HTMLDivElement | null,
   overlay: RouteOverlayData,
@@ -695,41 +856,85 @@ function updateRouteOverlay(
   width: number,
   scale: number,
   cache: React.MutableRefObject<RouteOverlayElementCache | null>,
-) {
-  if (!container) {
-    return;
+  gpuCtl?: {
+    gen: number;
+    setGen: (n: number) => void;
+    /** phi/theta snapshot for the in-flight GPU job */
+    rotSnap: { phi: number; theta: number; key: string };
+  },
+): boolean {
+  if (!container || overlay.routes.length === 0) {
+    return true;
   }
 
   const elements = getRouteOverlayElements(container, overlay, width, cache);
+  // DOM not ready yet (React commit lag) — caller should retry next frame.
+  if (
+    elements.paths.length !== overlay.routes.length ||
+    elements.points.length !== overlay.points.length
+  ) {
+    return false;
+  }
 
-  overlay.routes.forEach((route, index) => {
-    const path = elements.paths[index];
+  // Always project with current rotation (original path — never skip).
+  updateRouteOverlayCpu(elements, overlay, rotation, width, scale);
 
-    if (!path) {
-      return;
+  // Optional WebGPU offload: background only, never replaces live CPU stickiness.
+  // Applied only if rotation hasn't moved meaningfully since submit (same-frame refine).
+  const gpu = getArcGpuProjector();
+  const totalSamples = overlay.routes.reduce(
+    (n, r) => n + r.samples.length,
+    0,
+  );
+  const gpuWorthIt = totalSamples >= 64 && gpu.isReady() && !gpu.isBusy();
+  if (gpuWorthIt && gpuCtl) {
+    const basis = makeProjectBasis(rotation, width, scale);
+    const gen = gpuCtl.gen + 1;
+    gpuCtl.setGen(gen);
+    gpuCtl.rotSnap = {
+      phi: rotation.phi,
+      theta: rotation.theta,
+      key: overlay.key,
+    };
+    const snap = { ...gpuCtl.rotSnap };
+    const flat: Array<{ x: number; y: number; z: number }> = [];
+    for (const route of overlay.routes) {
+      for (const s of route.samples) flat.push(s);
     }
+    const packed = packSamplesForGpu(flat);
+    void gpu
+      .project(packed, {
+        cosPhi: basis.cosPhi,
+        sinPhi: basis.sinPhi,
+        cosTheta: basis.cosTheta,
+        sinTheta: basis.sinTheta,
+        radius: basis.radius,
+        half: basis.half,
+        minDepth: -0.28,
+      })
+      .then((out) => {
+        if (!out || gen !== gpuCtl.gen) return;
+        // Drop if the globe moved — applying stale paths is what made arcs drift.
+        const dPhi = Math.abs(gpuCtl.rotSnap.phi - snap.phi);
+        const dTheta = Math.abs(gpuCtl.rotSnap.theta - snap.theta);
+        if (dPhi > 0.002 || dTheta > 0.002) return;
+        if (gpuCtl.rotSnap.key !== snap.key) return;
+        if (!container.isConnected) return;
+        const live = getRouteOverlayElements(container, overlay, width, cache);
+        if (
+          live.key !== snap.key ||
+          live.paths.length !== overlay.routes.length
+        ) {
+          return;
+        }
+        applyGpuPathOutputs(live, overlay, out);
+      })
+      .catch(() => {
+        // Ignore — CPU already drew correctly this tick.
+      });
+  }
 
-    const projectedPath = buildProjectedPath(route.samples, rotation, width, scale);
-    path.setAttribute("d", projectedPath);
-    path.style.opacity = projectedPath ? "0.88" : "0";
-  });
-
-  overlay.points.forEach((point, index) => {
-    const element = elements.points[index];
-
-    if (!element) {
-      return;
-    }
-
-    const projected = projectVector(point.vector, rotation, width, scale);
-    element.style.left = `${projected.x}px`;
-    element.style.top = `${projected.y}px`;
-    element.style.opacity = projected.visible ? "1" : "0";
-    element.style.transform = `translate(-50%, -50%) scale(${Math.max(
-      0.7,
-      0.85 + projected.depth * 0.18,
-    ).toFixed(2)})`;
-  });
+  return true;
 }
 
 export function Cobe({
@@ -803,8 +1008,11 @@ export function Cobe({
     choroplethCacheRef.current = null;
   }, [choroplethRegions]);
 
-  useEffect(() => {
+  // Layout effect: after React commits arc DOM, sync data and force redraw.
+  // Fixes "arcs sometimes never appear" when rAF ran before path nodes existed.
+  useLayoutEffect(() => {
     overlayRoutesRef.current = routeOverlayData;
+    routeOverlayCacheRef.current = null;
   }, [routeOverlayData]);
 
   const updatePointerRotation = (clientX: number, clientY: number, divisor: number) => {
@@ -871,13 +1079,21 @@ export function Cobe({
 
     let globe: ReturnType<typeof createGlobe> | null = null;
     let lastHeatOverlayAt = 0;
+    let lastRouteOverlayAt = 0;
+    /** When true, redraw routes next frame (new data or incomplete DOM). */
+    let routeNeedsImmediateDraw = true;
     let lastViewBoxWidth = -1;
+    let lastRouteKey = "";
+    let routeGpuGen = 0;
+    const routeGpuRotSnap = { phi: 0, theta: 0, key: "" };
     const markersScratch: GlobeMarker[] = [];
     // Cap DPR for fill-rate; 2× on large canvases is a common FPS sink.
     const dpr =
       typeof window !== "undefined"
-        ? Math.min(1.25, window.devicePixelRatio || 1)
+        ? Math.min(1.15, window.devicePixelRatio || 1)
         : 1;
+    // Warm WebGPU in the background — never blocks cobe/WebGL init.
+    void getArcGpuProjector().ensureReady();
     // Never early-return after adding the resize listener — that would leak it.
     if (canvasRef.current) {
       try {
@@ -940,9 +1156,15 @@ export function Cobe({
       }
 
       // Visitor positions mutate in place — markers must update every frame for live motion.
-      // Slightly fewer samples with choropleth so WebGL + SVG share the frame budget.
+      // Drop mapSamples when SVG overlays are heavy so WebGL + arcs share the frame budget.
       const choropleth = preparedChoroplethRef.current;
-      const mapSamples = choropleth.length > 0 ? 6000 : 8000;
+      const routeCount = overlayRoutesRef.current.routes.length;
+      const mapSamples =
+        choropleth.length > 0 || routeCount >= ROUTE_HEAVY_COUNT
+          ? 5000
+          : routeCount > 0
+            ? 6500
+            : 8000;
       globe.update({
         markers: markersScratch,
         glowColor: glowColorRef.current,
@@ -955,20 +1177,55 @@ export function Cobe({
         mapSamples,
       });
 
-      const hasRoutes = overlayRoutesRef.current.routes.length > 0;
-      if (hasRoutes) {
-        // Overlay uses cobe render scale (not CSS zoom); CSS scales the parent as a unit.
-        updateRouteOverlay(
-          routeOverlayRef.current,
-          overlayRoutesRef.current,
-          currentRotation,
-          currentWidth,
-          COBE_RENDER_SCALE,
-          routeOverlayCacheRef,
-        );
+      if (routeCount > 0) {
+        const routeKey = overlayRoutesRef.current.key;
+        if (routeKey !== lastRouteKey) {
+          lastRouteKey = routeKey;
+          routeNeedsImmediateDraw = true;
+          routeOverlayCacheRef.current = null;
+          routeGpuGen += 1;
+        }
+        // Always reproject when spinning/dragging so arcs stay glued to the globe.
+        // Light throttle only when many routes (Trade Pulse + PKI).
+        const routeInterval = interacting
+          ? ROUTE_DRAG_MS
+          : routeCount >= ROUTE_HEAVY_COUNT
+            ? ROUTE_HEAVY_IDLE_MS
+            : ROUTE_IDLE_MS;
+        if (
+          routeNeedsImmediateDraw ||
+          now - lastRouteOverlayAt >= routeInterval
+        ) {
+          lastRouteOverlayAt = now;
+          // Keep rotSnap current so late GPU results are rejected if we moved.
+          routeGpuRotSnap.phi = currentRotation.phi;
+          routeGpuRotSnap.theta = currentRotation.theta;
+          routeGpuRotSnap.key = routeKey;
+          const ok = updateRouteOverlay(
+            routeOverlayRef.current,
+            overlayRoutesRef.current,
+            currentRotation,
+            currentWidth,
+            COBE_RENDER_SCALE,
+            routeOverlayCacheRef,
+            {
+              gen: routeGpuGen,
+              setGen: (n) => {
+                routeGpuGen = n;
+              },
+              rotSnap: routeGpuRotSnap,
+            },
+          );
+          // Keep retrying until path/point DOM matches route data.
+          routeNeedsImmediateDraw = !ok;
+        }
+      } else {
+        lastRouteKey = "";
+        routeNeedsImmediateDraw = true;
       }
 
       // Same rotation, same frame as globe.update — required for land fills to stick.
+      // Skip choropleth work when only routes are active (PKI / Trade Pulse).
       if (choropleth.length > 0) {
         if (lastViewBoxWidth !== currentWidth) {
           lastViewBoxWidth = currentWidth;
@@ -1378,28 +1635,25 @@ export function Cobe({
         aria-hidden={routePoints.length === 0}
       >
         <svg className="globe-arc-svg" viewBox="0 0 400 400">
-          <defs>
-            <filter id="globe-arc-glow" x="-30%" y="-30%" width="160%" height="160%">
-              <feGaussianBlur stdDeviation="2.2" result="blur" />
-              <feMerge>
-                <feMergeNode in="blur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-          </defs>
-          {overlayRoutes.map((route) => (
-            <path
-              className={`globe-arc-path globe-arc-${route.severity}`}
-              key={route.id}
-              style={
-                {
-                  "--arc-color": route.color,
-                  "--arc-width": route.width,
-                  "--arc-dash": route.dash,
-                } as React.CSSProperties
-              }
-            />
-          ))}
+          {overlayRoutes.map((route) => {
+            const solid = isSolidArcDash(route.dash);
+            const style = {
+              ["--arc-color" as string]: route.color,
+              ["--arc-width" as string]: route.width,
+              // Solid arcs must not set a zero dasharray (invisible strokes).
+              strokeDasharray: solid ? "none" : route.dash,
+            } as React.CSSProperties;
+            return (
+              <path
+                className={`globe-arc-path globe-arc-${route.severity}${
+                  solid ? " globe-arc-solid" : ""
+                }`}
+                key={route.id}
+                data-arc-id={route.id}
+                style={style}
+              />
+            );
+          })}
         </svg>
         {routePoints.map((point) => (
           <div
@@ -1419,13 +1673,13 @@ export function Cobe({
               className="globe-arc-plus"
               aria-label={
                 selectedPointKey === point.key
-                  ? `Close Comtrade data for ${point.countryName}`
-                  : `Show Comtrade data for ${point.countryName}`
+                  ? `Close route data for ${point.countryName}`
+                  : `Show route data for ${point.countryName}`
               }
               title={
                 selectedPointKey === point.key
                   ? "Close (resume globe)"
-                  : `${point.countryName} · Comtrade details (pauses globe)`
+                  : `${point.countryName} · expand details (pauses globe)`
               }
               onPointerDown={(e) => {
                 e.stopPropagation();
@@ -1537,7 +1791,11 @@ export function Cobe({
             ref={popupRef}
             className="globe-arc-comtrade-popup"
             role="dialog"
-            aria-label={`Comtrade data for ${selectedPoint.countryName}`}
+            aria-label={
+              selectedPoint.comtrade.kind === "pki"
+                ? `PKI CVE data for ${selectedPoint.countryName}`
+                : `Comtrade data for ${selectedPoint.countryName}`
+            }
             style={
               {
                 "--arc-color": selectedPoint.color,
@@ -1571,11 +1829,17 @@ export function Cobe({
               <div>
                 <strong>{selectedPoint.countryName}</strong>
                 <span>
-                  {selectedPoint.role === "origin"
-                    ? "Origin"
-                    : selectedPoint.role === "relay"
-                      ? "Intermediary hub"
-                      : "Destination"}{" "}
+                  {selectedPoint.comtrade.kind === "pki"
+                    ? selectedPoint.role === "origin"
+                      ? "Vendor / origin signal"
+                      : selectedPoint.role === "relay"
+                        ? "Relay exposure"
+                        : "Exposure destination"
+                    : selectedPoint.role === "origin"
+                      ? "Origin"
+                      : selectedPoint.role === "relay"
+                        ? "Intermediary hub"
+                        : "Destination"}{" "}
                   · {selectedPoint.comtrade.severity}
                   <em className="globe-arc-comtrade-drag-hint"> · drag header to move</em>
                 </span>
@@ -1595,7 +1859,7 @@ export function Cobe({
                 <button
                   type="button"
                   className="globe-arc-comtrade-close"
-                  aria-label="Close Comtrade popup and resume globe"
+                  aria-label="Close popup and resume globe"
                   onClick={() => closeRoutePointPopup()}
                 >
                   ×
@@ -1612,8 +1876,53 @@ export function Cobe({
               </p>
               <p className="globe-arc-comtrade-commodity">
                 <strong>{selectedPoint.comtrade.commodity}</strong>
-                <span>HS {selectedPoint.comtrade.commodityCode}</span>
+                <span>
+                  {selectedPoint.comtrade.kind === "pki" ? "" : "HS "}
+                  {selectedPoint.comtrade.commodityCode}
+                </span>
               </p>
+              {selectedPoint.comtrade.kind === "pki" ? (
+                <div className="globe-arc-comtrade-grid">
+                  <div>
+                    <span>CVE</span>
+                    <strong>{selectedPoint.comtrade.commodityCode}</strong>
+                  </div>
+                  <div>
+                    <span>Severity</span>
+                    <strong>{selectedPoint.comtrade.severity}</strong>
+                  </div>
+                  <div>
+                    <span>Date</span>
+                    <strong>{selectedPoint.comtrade.period}</strong>
+                  </div>
+                  <div>
+                    <span>Known exploited</span>
+                    <strong>
+                      {selectedPoint.comtrade.quantity === "KEV" ? "Yes (CISA KEV)" : "No / unknown"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Vendor</span>
+                    <strong>{selectedPoint.comtrade.originName}</strong>
+                  </div>
+                  <div>
+                    <span>Product</span>
+                    <strong>{selectedPoint.comtrade.customsProcedure || "n/a"}</strong>
+                  </div>
+                  <div>
+                    <span>Categories</span>
+                    <strong>{selectedPoint.comtrade.transportMode}</strong>
+                  </div>
+                  <div>
+                    <span>CVSS / score</span>
+                    <strong>
+                      {selectedPoint.comtrade.confidencePct > 0
+                        ? selectedPoint.comtrade.confidencePct.toFixed(1)
+                        : "n/a"}
+                    </strong>
+                  </div>
+                </div>
+              ) : (
               <div className="globe-arc-comtrade-grid">
                 <div>
                   <span>Period</span>
@@ -1692,6 +2001,7 @@ export function Cobe({
                   <strong>{selectedPoint.comtrade.customsProcedure}</strong>
                 </div>
               </div>
+              )}
               {selectedPoint.comtrade.layers.length > 0 && (
                 <div className="globe-arc-comtrade-layers">
                   {selectedPoint.comtrade.layers.map((layer) => (
@@ -1702,11 +2012,27 @@ export function Cobe({
               <p className="globe-arc-comtrade-insight">
                 {selectedPoint.comtrade.insight}
               </p>
+              {selectedPoint.comtrade.kind === "pki" &&
+                selectedPoint.comtrade.referenceUrl && (
+                  <p className="globe-arc-comtrade-disclaimer">
+                    <a
+                      href={selectedPoint.comtrade.referenceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Open NVD record
+                    </a>
+                  </p>
+                )}
               <p className="globe-arc-comtrade-disclaimer">
-                {selectedPoint.comtrade.period}
-                {selectedPoint.comtrade.dataMode === "free-subscription"
-                  ? " · UN Comtrade"
-                  : " · Preview"}
+                {selectedPoint.comtrade.kind === "pki"
+                  ? "Vendor→country exposure signal · not exploit geolocation"
+                  : selectedPoint.comtrade.period}
+                {selectedPoint.comtrade.kind === "pki"
+                  ? ""
+                  : selectedPoint.comtrade.dataMode === "free-subscription"
+                    ? " · UN Comtrade"
+                    : " · Preview"}
               </p>
             </div>
             <button

@@ -24,6 +24,7 @@ import {
   prependActivityEvent,
   type ActivityEvent,
   type ActivityFilter,
+  type GlobeSocketStatus,
   type LiveFeedAccess,
 } from "./ActivityFeed";
 import usePartySocket from "partysocket/react";
@@ -37,6 +38,9 @@ import type {
   OutgoingMessage,
   ComtradePreview,
   NearbyPathsPreview,
+  PkiVulnCve,
+  PkiVulnSeverity,
+  PkiVulnsPreview,
   TradePulseLayer,
   TradePulsePreview,
   TradePulseRoutePreview,
@@ -198,6 +202,178 @@ const UN_GLOBAL_SECTION_LABELS: Record<UnGlobalSection, string> = {
 };
 
 type UnodcStatus = "idle" | "loading" | "ready" | "error";
+type PkiVulnsStatus = "idle" | "loading" | "ready" | "error";
+
+const PKI_PREVIEW_URL = "/api/pki-vulns-preview?v=1";
+
+const PKI_SEVERITY_COLORS: Record<PkiVulnSeverity, string> = {
+  critical: "#ff2d55",
+  high: "#ff9f0a",
+  medium: "#ffd60a",
+  low: "#30d158",
+  unknown: "#8e8e93",
+};
+
+/** Heat color by dominant severity signal on a country hotspot. */
+function pkiSeverityColor(severity: PkiVulnSeverity): string {
+  return PKI_SEVERITY_COLORS[severity] || PKI_SEVERITY_COLORS.unknown;
+}
+
+/** Approximate country centers for vendor-origin endpoints (Trade Pulse style). */
+const PKI_COUNTRY_CENTERS: Record<
+  string,
+  { name: string; lat: number; lng: number }
+> = {
+  USA: { name: "United States", lat: 39.83, lng: -98.58 },
+  CAN: { name: "Canada", lat: 56.13, lng: -106.35 },
+  GBR: { name: "United Kingdom", lat: 55.38, lng: -3.44 },
+  DEU: { name: "Germany", lat: 51.17, lng: 10.45 },
+  FRA: { name: "France", lat: 46.23, lng: 2.21 },
+  NLD: { name: "Netherlands", lat: 52.13, lng: 5.29 },
+  IRL: { name: "Ireland", lat: 53.14, lng: -7.69 },
+  SWE: { name: "Sweden", lat: 60.13, lng: 18.64 },
+  CHE: { name: "Switzerland", lat: 46.82, lng: 8.23 },
+  JPN: { name: "Japan", lat: 36.2, lng: 138.25 },
+  KOR: { name: "South Korea", lat: 35.91, lng: 127.77 },
+  CHN: { name: "China", lat: 35.86, lng: 104.2 },
+  SGP: { name: "Singapore", lat: 1.35, lng: 103.82 },
+  AUS: { name: "Australia", lat: -25.27, lng: 133.78 },
+  IND: { name: "India", lat: 20.59, lng: 78.96 },
+  BRA: { name: "Brazil", lat: -14.24, lng: -51.93 },
+  ARE: { name: "United Arab Emirates", lat: 23.42, lng: 53.85 },
+  ISR: { name: "Israel", lat: 31.05, lng: 34.85 },
+  RUS: { name: "Russia", lat: 61.52, lng: 105.32 },
+  ZAF: { name: "South Africa", lat: -30.56, lng: 22.94 },
+};
+
+function pkiVendorOriginIso3(cve: PkiVulnCve): string {
+  const blob = `${cve.vendor || ""} ${cve.product || ""} ${cve.title}`;
+  if (/microsoft|windows|active directory|cng/i.test(blob)) return "USA";
+  if (/apple|ios|macos/i.test(blob)) return "USA";
+  if (/cisco|asa|firepower/i.test(blob)) return "USA";
+  if (/fortinet|fortios/i.test(blob)) return "USA";
+  if (/sonicwall/i.test(blob)) return "USA";
+  if (/ivanti|pulse/i.test(blob)) return "USA";
+  if (/openssl|heartbleed/i.test(blob)) return "USA";
+  if (/igel/i.test(blob)) return "DEU";
+  if (/array networks/i.test(blob)) return "USA";
+  if (/gladinet|centrestack|triofox/i.test(blob)) return "USA";
+  return "USA";
+}
+
+/**
+ * Trade Pulse–style arcs: vendor origin → exposure countries for top PKI CVEs.
+ * Expandable + points use the shared route popup (kind: pki).
+ */
+function buildPkiGlobeArcs(
+  preview: PkiVulnsPreview,
+  kevOnly: boolean,
+): GlobeArc[] {
+  // Keep arc count low — each line is reprojected every frame with endpoint DOM.
+  const ranked = (kevOnly
+    ? preview.cves.filter((c) => c.knownExploited)
+    : preview.cves
+  )
+    .slice()
+    .sort((a, b) => {
+      if (a.knownExploited !== b.knownExploited) return a.knownExploited ? -1 : 1;
+      const rank = (s: string) =>
+        s === "critical" ? 0 : s === "high" ? 1 : s === "medium" ? 2 : 3;
+      return rank(a.severity) - rank(b.severity);
+    })
+    .slice(0, 14);
+
+  const hotspotByIso = new Map(
+    preview.hotspots.map((h) => [h.iso3, h] as const),
+  );
+  const arcs: GlobeArc[] = [];
+  const MAX_ARCS = 16;
+
+  for (const cve of ranked) {
+    if (arcs.length >= MAX_ARCS) break;
+    const originIso = pkiVendorOriginIso3(cve);
+    const originCenter =
+      hotspotByIso.get(originIso) ||
+      (PKI_COUNTRY_CENTERS[originIso]
+        ? {
+            iso3: originIso,
+            name: PKI_COUNTRY_CENTERS[originIso].name,
+            lat: PKI_COUNTRY_CENTERS[originIso].lat,
+            lng: PKI_COUNTRY_CENTERS[originIso].lng,
+          }
+        : null);
+    if (!originCenter) continue;
+
+    // One destination per CVE keeps the globe smooth under SVG projection load.
+    let dests = preview.hotspots.filter(
+      (h) => h.topCves.includes(cve.id) && h.iso3 !== originIso,
+    );
+    if (dests.length === 0) {
+      dests = preview.hotspots
+        .filter((h) => h.iso3 !== originIso)
+        .slice(0, 1);
+    } else {
+      dests = dests.slice(0, 1);
+    }
+
+    for (const dest of dests) {
+      if (arcs.length >= MAX_ARCS) break;
+      const color = pkiSeverityColor(cve.severity);
+      const width =
+        cve.severity === "critical" ? 3.2 : cve.severity === "high" ? 2.6 : 2;
+      const period =
+        cve.kevDateAdded ||
+        (cve.publishedAt ? cve.publishedAt.slice(0, 10) : "n/a");
+      const product = cve.product || "n/a";
+      const vendor = cve.vendor || originCenter.name;
+      const cats = cve.categories.join(", ") || "pki";
+
+      arcs.push({
+        id: `pki-${cve.id}-${dest.iso3}`,
+        from: [originCenter.lat, originCenter.lng],
+        to: [dest.lat, dest.lng],
+        fromLabel: `${vendor} · ${originCenter.name || originIso}`,
+        toLabel: `${dest.name} exposure`,
+        color,
+        width,
+        dash: cve.knownExploited ? "none" : "5 5",
+        severity: cve.severity === "unknown" ? "elevated" : cve.severity,
+        comtrade: {
+          kind: "pki",
+          routeId: cve.id,
+          commodity: cve.title.slice(0, 160),
+          commodityCode: cve.id,
+          period,
+          originName: vendor,
+          originIso3: originIso,
+          destName: dest.name,
+          destIso3: dest.iso3,
+          hubName: null,
+          hubIso3: null,
+          transportMode: cats,
+          customsProcedure: product,
+          valueUsd: 0,
+          quantity: cve.knownExploited ? "KEV" : "NVD",
+          supplierSharePct: 0,
+          exportValueUsd: 0,
+          importValueUsd: 0,
+          asymmetryPct: 0,
+          fobValueUsd: 0,
+          cifValueUsd: 0,
+          frictionPct: 0,
+          reExportSharePct: 0,
+          confidencePct: cve.cvss ?? 0,
+          severity: cve.severity,
+          layers: cve.categories,
+          insight: cve.description.slice(0, 480),
+          referenceUrl: cve.nvdUrl,
+        },
+      });
+    }
+  }
+
+  return arcs;
+}
 
 const UNODC_THEME_IDS /*sec-pass*/: UnodcThemeId[] = [
   "homicide",
@@ -441,7 +617,8 @@ const TRADE_PULSE_TRANSPORT_DASHES: Record<
   TradePulseRoutePreview["transportMode"],
   string
 > = {
-  sea: "0",
+  // "none" = solid stroke. Never use "0" — SVG stroke-dasharray:0 can hide arcs.
+  sea: "none",
   air: "4 7",
   rail: "10 5 2 5",
   road: "2 5",
@@ -1060,12 +1237,20 @@ function App() {
   const [unodcCountryPolygons, setUnodcCountryPolygons] = useState<
     Map<string, { iso3: string; name: string; rings: [number, number][][] }> | null
   >(null);
+  const [showPkiPanel, setShowPkiPanel] = useState(false);
+  const [isPkiPanelMinimized, setIsPkiPanelMinimized] = useState(true);
+  const [pkiStatus, setPkiStatus] = useState<PkiVulnsStatus>("idle");
+  const [pkiPreview, setPkiPreview] = useState<PkiVulnsPreview | null>(null);
+  const [pkiError, setPkiError] = useState("");
+  const [pkiKevOnly, setPkiKevOnly] = useState(false);
+  const [pkiShowMap, setPkiShowMap] = useState(true);
   const [showActivityMenu, setShowActivityMenu] = useState(false);
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
-  const [isDisconnected, setIsDisconnected] = useState(false);
   const [isFeedPaused, setIsFeedPaused] = useState(false);
   const [isCompactFeed, setIsCompactFeed] = useState(false);
-  const [isSocketConnected, setIsSocketConnected] = useState(false);
+  /** Public globe WS — independent of paid Live Feed unlock. */
+  const [socketStatus, setSocketStatus] =
+    useState<GlobeSocketStatus>("connecting");
   const [counter, setCounter] = useState(0);
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
   const [showNearbyPanel, setShowNearbyPanel] = useState(false);
@@ -3025,6 +3210,60 @@ function App() {
     }
   };
 
+  const loadPkiVulns = async (
+    closeMenu = true,
+    options?: { forceRefresh?: boolean },
+  ) => {
+    setShowPkiPanel(true);
+    setIsPkiPanelMinimized(true);
+    if (closeMenu) {
+      setShowMenu(false);
+    }
+    setPkiError("");
+
+    const url = PKI_PREVIEW_URL;
+    if (options?.forceRefresh) {
+      clearPreviewCache(url);
+    }
+
+    const cached = options?.forceRefresh
+      ? null
+      : getPreviewCache<PkiVulnsPreview>(url);
+    if (cached?.data && Array.isArray(cached.data.cves) && cached.fresh) {
+      setPkiPreview(cached.data);
+      setPkiStatus("ready");
+      setPkiShowMap(true);
+      return;
+    }
+    if (cached?.data && Array.isArray(cached.data.cves)) {
+      setPkiPreview(cached.data);
+      setPkiStatus("ready");
+    } else {
+      setPkiStatus("loading");
+    }
+
+    try {
+      const data = await fetchPreviewJson<PkiVulnsPreview>(url, {
+        validate: (v): v is PkiVulnsPreview =>
+          Boolean(
+            v &&
+              typeof v === "object" &&
+              Array.isArray((v as PkiVulnsPreview).cves) &&
+              Array.isArray((v as PkiVulnsPreview).hotspots),
+          ),
+        forceNetwork: Boolean(options?.forceRefresh) || Boolean(cached?.stale),
+      });
+      setPkiPreview(data);
+      setPkiStatus("ready");
+      setPkiShowMap(true);
+    } catch {
+      if (!cached?.data) {
+        setPkiError("PKI vulnerability feed unavailable");
+        setPkiStatus("error");
+      }
+    }
+  };
+
   const setUnodcFocusMode = (mode: "focus" | "all-live" | "none") => {
     if (!unodcPreview) return;
     const next = { ...DEFAULT_UNODC_THEMES };
@@ -3114,16 +3353,24 @@ function App() {
   const socket = usePartySocket({
     room: "default",
     party: "globe",
+    // Same-origin Worker party (test + prod workers.dev).
+    host:
+      typeof window !== "undefined" ? window.location.host : undefined,
+    // Keep retries snappy when the public link drops.
+    minReconnectionDelay: 400,
+    maxReconnectionDelay: 8000,
+    reconnectionDelayGrowFactor: 1.4,
+    maxRetries: Infinity,
     onOpen() {
-      setIsSocketConnected(true);
-      setIsDisconnected(false);
+      setSocketStatus("connected");
     },
     onClose() {
-      setIsSocketConnected(false);
-      setIsDisconnected(true);
+      // PartySocket auto-reconnects — show connecting while it retries.
+      setSocketStatus("connecting");
     },
     onError() {
-      setIsSocketConnected(false);
+      // Don't stick on "disconnected" forever; reconnect path will open again.
+      setSocketStatus((prev) => (prev === "connected" ? "connecting" : prev));
     },
     onMessage(evt) {
       const message = parseSocketMessage(evt.data);
@@ -3131,6 +3378,9 @@ function App() {
       if (!message) {
         return;
       }
+
+      // Any valid server message implies the public link is up.
+      setSocketStatus("connected");
 
       // Public globe markers only — no activity feed from this path
       if (message.type === "add-marker") {
@@ -3140,31 +3390,21 @@ function App() {
           size: visitorId === socket.id ? 0.1 : 0.05,
         });
 
-        if (visitorId === socket.id) {
-          setIsDisconnected(false);
-          setIsSocketConnected(true);
-        }
-
         setCounter(positions.current.size);
         return;
       }
 
       if (message.type === "remove-marker") {
         const removedId = message.id;
-        const wasSelf = removedId === socket.id;
         positions.current.delete(removedId);
         setCounter(positions.current.size);
-        if (wasSelf) {
-          setIsDisconnected(true);
-        }
         // Leaves for the paid feed arrive as feed-leave (not here)
         return;
       }
 
-      // Paid Live Feed channel (server only sends if transitPaid)
+      // Paid Live Feed channel (server only sends feed-join/leave if transitPaid)
       if (message.type === "feed-access") {
-        // Access is still driven by authUser.transitPaid for UI lock;
-        // server already gated feed-join/leave delivery.
+        // UI lock still uses authUser.transitPaid; this confirms WS auth path ran.
         return;
       }
 
@@ -3422,6 +3662,27 @@ function App() {
     unodcCountryPolygons,
     unodcThemes,
   ]);
+
+  const pkiVisibleCves: PkiVulnCve[] = useMemo(() => {
+    if (!pkiPreview) return [];
+    return pkiKevOnly
+      ? pkiPreview.cves.filter((c) => c.knownExploited)
+      : pkiPreview.cves;
+  }, [pkiPreview, pkiKevOnly]);
+
+  /** Trade Pulse–style arcs + expandable + points for PKI CVEs. */
+  const pkiGlobeArcs: GlobeArc[] = useMemo(() => {
+    if (
+      !showPkiPanel ||
+      !pkiShowMap ||
+      pkiStatus !== "ready" ||
+      !pkiPreview?.cves?.length ||
+      !pkiPreview?.hotspots?.length
+    ) {
+      return [];
+    }
+    return buildPkiGlobeArcs(pkiPreview, pkiKevOnly);
+  }, [showPkiPanel, pkiShowMap, pkiStatus, pkiPreview, pkiKevOnly]);
   const unGlobalMarkerColor =
     unGlobalOverlayMarkers.length > 0
       ? ([0, 0.65, 1] as [number, number, number])
@@ -3502,6 +3763,12 @@ function App() {
     tradePulseGlobeMarkers.length > 0
       ? ([1, 0.24, 0.18] as [number, number, number])
       : unGlobalMarkerColor;
+  const globeHeatZones = unodcHeatZones;
+  const globeChoroplethRegions = unodcChoroplethRegions;
+  const globeOverlayRoutes: GlobeArc[] = [
+    ...tradePulseGlobeArcs,
+    ...pkiGlobeArcs,
+  ];
 
   return (
     <div className="App">
@@ -4750,14 +5017,18 @@ function App() {
           </button>
           */}
           <button
-            className="nav-btn"
+            className={`nav-btn ${showPkiPanel ? "nav-btn-active" : ""}`}
             onClick={() =>
               runRateLimitedButtonAction("cve-feed", () => {
-                window.location.href = "https://cvefeed.io/dashboard/";
+                if (showPkiPanel) {
+                  setIsPkiPanelMinimized((m) => !m);
+                  return;
+                }
+                void loadPkiVulns();
               })
             }
           >
-            CVE FEED
+            CVE / PKI
           </button>
           <button
             className="nav-btn trade-pulse-nav-btn"
@@ -5874,6 +6145,239 @@ function App() {
         </FloatingChrome>
       )}
 
+      {showPkiPanel && (
+        <FloatingChrome
+          className={`un-panel pki-panel ${
+            isPkiPanelMinimized ? "un-panel-minimized" : ""
+          }`}
+          role="dialog"
+          aria-label="PKI vulnerability feed"
+        >
+          <div className="un-panel-header">
+            <div>
+              <h3>CVE / PKI Map</h3>
+              <span>
+                {pkiStatus === "ready" && pkiPreview
+                  ? pkiPreview.queryLabel
+                  : "Certificate · TLS · crypto-key vulns"}
+              </span>
+            </div>
+            <div className="un-panel-actions">
+              <button
+                type="button"
+                className="un-minimize"
+                onClick={() =>
+                  runRateLimitedButtonAction("pki-minimize", () =>
+                    setIsPkiPanelMinimized((m) => !m),
+                  )
+                }
+                aria-label={
+                  isPkiPanelMinimized ? "Expand PKI panel" : "Minimize PKI panel"
+                }
+              >
+                {isPkiPanelMinimized ? "+" : "_"}
+              </button>
+              <button
+                type="button"
+                className="un-close"
+                onClick={() =>
+                  runRateLimitedButtonAction("pki-close", () => {
+                    setShowPkiPanel(false);
+                    setPkiShowMap(false);
+                  })
+                }
+                aria-label="Close PKI panel"
+              >
+                x
+              </button>
+            </div>
+          </div>
+
+          {!isPkiPanelMinimized && (
+            <div className="trade-pulse-panel-scroll">
+              <div className="trade-pulse-panel-inner">
+                {pkiStatus === "loading" && (
+                  <div className="un-loading">Loading PKI / CVE feed…</div>
+                )}
+                {pkiStatus === "error" && (
+                  <div className="un-error">
+                    <span>{pkiError}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        runRateLimitedButtonAction("pki-retry", () => {
+                          void loadPkiVulns(false, { forceRefresh: true });
+                        })
+                      }
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+                {pkiStatus === "ready" && pkiPreview && (
+                  <>
+                    <div className="un-status-row">
+                      <span>{pkiPreview.source}</span>
+                      <strong>
+                        {pkiGlobeArcs.length} arcs · {pkiPreview.hotspotCount}{" "}
+                        countries · {pkiPreview.cveCount} CVEs
+                      </strong>
+                    </div>
+                    <div className="unodc-mode-row" role="group" aria-label="PKI map filters">
+                      <button
+                        type="button"
+                        className={`trade-pulse-year-btn ${pkiShowMap ? "active" : ""}`}
+                        onClick={() =>
+                          runRateLimitedButtonAction("pki-map-toggle", () =>
+                            setPkiShowMap((v) => !v),
+                          )
+                        }
+                      >
+                        {pkiShowMap ? "Arcs on" : "Arcs off"}
+                      </button>
+                      <button
+                        type="button"
+                        className={`trade-pulse-year-btn ${pkiKevOnly ? "active" : ""}`}
+                        onClick={() =>
+                          runRateLimitedButtonAction("pki-kev-only", () =>
+                            setPkiKevOnly((v) => !v),
+                          )
+                        }
+                      >
+                        {pkiKevOnly ? "KEV only" : "All CVEs"}
+                      </button>
+                    </div>
+                    <div className="unodc-legend" aria-label="PKI severity colors">
+                      <span className="unodc-legend-item active">
+                        <i
+                          className="unodc-legend-swatch"
+                          style={{ background: "#ff2d55" }}
+                        />
+                        Critical
+                      </span>
+                      <span className="unodc-legend-item active">
+                        <i
+                          className="unodc-legend-swatch"
+                          style={{ background: "#ff9f0a" }}
+                        />
+                        High
+                      </span>
+                      <span className="unodc-legend-item active">
+                        <i
+                          className="unodc-legend-swatch"
+                          style={{ background: "#ffd60a" }}
+                        />
+                        Medium
+                      </span>
+                      <span className="unodc-legend-item active">
+                        <i
+                          className="unodc-legend-swatch"
+                          style={{ background: "#64d2ff" }}
+                        />
+                        Low / other
+                      </span>
+                    </div>
+                    <p className="trade-pulse-insight pki-disclaimer">
+                      Lines link vendor origin → exposure countries (Trade Pulse style).
+                      Tap <strong>+</strong> on endpoints for CVE details. Not exploit geolocation.
+                    </p>
+                    <div className="pki-cve-list" aria-label="PKI-related CVEs">
+                      {pkiVisibleCves.slice(0, 40).map((cve) => (
+                        <article
+                          key={cve.id}
+                          className={`pki-cve-card severity-${cve.severity}`}
+                        >
+                          <div className="pki-cve-heading">
+                            <strong>{cve.id}</strong>
+                            <span
+                              className="pki-severity-pill"
+                              style={{
+                                background: PKI_SEVERITY_COLORS[cve.severity],
+                              }}
+                            >
+                              {cve.severity}
+                              {cve.cvss != null ? ` ${cve.cvss.toFixed(1)}` : ""}
+                            </span>
+                            {cve.knownExploited && (
+                              <span className="pki-kev-pill">KEV</span>
+                            )}
+                          </div>
+                          <p className="pki-cve-title">{cve.title}</p>
+                          {(cve.vendor || cve.product) && (
+                            <p className="pki-cve-meta">
+                              {[cve.vendor, cve.product].filter(Boolean).join(" · ")}
+                            </p>
+                          )}
+                          <div className="pki-cve-tags">
+                            {cve.categories.map((cat) => (
+                              <span key={`${cve.id}-${cat}`}>{cat}</span>
+                            ))}
+                          </div>
+                          <div className="un-goal-meta">
+                            <a
+                              href={cve.nvdUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              NVD
+                            </a>
+                            {cve.cisaUrl && (
+                              <a
+                                href={cve.cisaUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                CISA KEV
+                              </a>
+                            )}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                    <div className="un-footer">
+                      <span>{formatPreviewDate(pkiPreview.updatedAt)}</span>
+                      <div className="un-footer-actions">
+                        <a
+                          href={pkiPreview.cisaKevUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          CISA KEV
+                        </a>
+                        <a
+                          href={pkiPreview.nvdUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          NVD
+                        </a>
+                        <a
+                          href="https://cvefeed.io/dashboard/"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          CVE Feed
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            runRateLimitedButtonAction("pki-refresh", () => {
+                              void loadPkiVulns(false, { forceRefresh: true });
+                            })
+                          }
+                        >
+                          Refresh
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </FloatingChrome>
+      )}
+
       {showUnodcPanel && (
         <FloatingChrome
           className={`un-panel unodc-panel ${
@@ -6424,9 +6928,9 @@ function App() {
             counter={counter}
             positions={positions.current}
             overlayMarkers={globeOverlayMarkers}
-            overlayRoutes={tradePulseGlobeArcs}
-            heatZones={unodcHeatZones}
-            choroplethRegions={unodcChoroplethRegions}
+            overlayRoutes={globeOverlayRoutes}
+            heatZones={globeHeatZones}
+            choroplethRegions={globeChoroplethRegions}
             markerColor={globeMarkerColor}
             glowColor={weatherGlow.color}
             glowCssColor={weatherGlow.css}
@@ -6467,9 +6971,18 @@ function App() {
           }
           filter={activityFilter}
           onFilterChange={handleActivityFilterChange}
-          isSocketConnected={isSocketConnected && !isDisconnected}
+          socketStatus={socketStatus}
+          isSocketConnected={socketStatus === "connected"}
           access={liveFeedAccess}
           checkoutBusy={checkoutBusy}
+          onReconnectSocket={() => {
+            setSocketStatus("connecting");
+            try {
+              socket.reconnect();
+            } catch {
+              // PartySocket may already be mid-retry
+            }
+          }}
           onSignIn={() => {
             setShowActivityMenu(false);
             setShowAuthPanel(true);
