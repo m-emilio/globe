@@ -12,6 +12,7 @@ import {
   packSamplesForGpu,
   pathFromGpuOutput,
 } from "./arcGpuProjector";
+import { safeGlobeHref } from "./safeUrl";
 
 type GlobeMarker = {
   location: [number, number];
@@ -150,9 +151,12 @@ const HEAT_DRAG_MS = 40;
  * (GPU async must never replace this as the sole live path).
  */
 const ROUTE_IDLE_MS = 16;
-const ROUTE_DRAG_MS = 16;
-const ROUTE_HEAVY_IDLE_MS = 24;
-const ROUTE_HEAVY_COUNT = 14;
+const ROUTE_DRAG_MS = 20;
+const ROUTE_HEAVY_IDLE_MS = 33;
+const ROUTE_ULTRA_IDLE_MS = 50;
+/** Start throttling mapSamples / projection earlier for PKI sets. */
+const ROUTE_HEAVY_COUNT = 10;
+const ROUTE_ULTRA_COUNT = 18;
 const POINTER_DRAG_DIVISOR = 200;
 const TOUCH_DRAG_DIVISOR = 100;
 /**
@@ -261,16 +265,24 @@ function buildRouteVectors(from: [number, number], to: [number, number], steps: 
   );
 }
 
-function buildRouteSamples(route: GlobeArc) {
-  // Balance smoothness vs per-frame cost (was 28 — too heavy; 8 — too broken on long hauls).
+function routeSampleSteps(routeCount: number): number {
+  // Adaptive density: fewer samples when many arcs (PKI paging still smooth).
+  if (routeCount >= 20) return 6;
+  if (routeCount >= 14) return 8;
+  if (routeCount >= 8) return 10;
+  return 14;
+}
+
+function buildRouteSamples(route: GlobeArc, steps = 14) {
   if (route.via) {
+    const leg = Math.max(4, Math.floor(steps * 0.7));
     return [
-      ...buildRouteVectors(route.from, route.via, 10),
-      ...buildRouteVectors(route.via, route.to, 10).slice(1),
+      ...buildRouteVectors(route.from, route.via, leg),
+      ...buildRouteVectors(route.via, route.to, leg).slice(1),
     ];
   }
 
-  return buildRouteVectors(route.from, route.to, 14);
+  return buildRouteVectors(route.from, route.to, steps);
 }
 
 /** Solid stroke marker — never pass "0" into stroke-dasharray (arcs vanish). */
@@ -640,10 +652,43 @@ function updateHeatZones(
   });
 }
 
+function severityRankLocal(s: string): number {
+  return s === "critical" ? 0 : s === "high" ? 1 : s === "medium" ? 2 : 3;
+}
+
+/**
+ * Collapse shared endpoints (many PKI arcs share USA origin) into one + control.
+ * Huge DOM/layout savings when denser arc sets are on screen.
+ */
 function getRoutePoints(routes: GlobeArc[]): RoutePoint[] {
-  return routes.flatMap((route) => [
-    {
-      key: `${route.id}-from`,
+  const byKey = new Map<string, RoutePoint>();
+
+  const consider = (point: RoutePoint) => {
+    const existing = byKey.get(point.key);
+    if (!existing) {
+      byKey.set(point.key, point);
+      return;
+    }
+    // Keep highest-severity / KEV-preferring detail for the popup.
+    const better =
+      severityRankLocal(point.severity) < severityRankLocal(existing.severity) ||
+      (point.comtrade?.quantity === "CISA KEV" &&
+        existing.comtrade?.quantity !== "CISA KEV");
+    if (better) byKey.set(point.key, point);
+  };
+
+  for (const route of routes) {
+    const fromIso = route.comtrade?.originIso3 || "";
+    const toIso = route.comtrade?.destIso3 || "";
+    const fromKey = fromIso
+      ? `origin:${fromIso}`
+      : `origin:${route.from[0].toFixed(1)},${route.from[1].toFixed(1)}`;
+    const toKey = toIso
+      ? `dest:${toIso}`
+      : `dest:${route.to[0].toFixed(1)},${route.to[1].toFixed(1)}`;
+
+    consider({
+      key: fromKey,
       vector: vectorFromLocation(route.from),
       color: route.color,
       severity: route.severity,
@@ -651,24 +696,27 @@ function getRoutePoints(routes: GlobeArc[]): RoutePoint[] {
       role: "origin",
       countryName: route.comtrade?.originName ?? route.fromLabel ?? "Origin",
       comtrade: route.comtrade,
-    },
-    ...(route.via
-      ? [
-          {
-            key: `${route.id}-via`,
-            vector: vectorFromLocation(route.via),
-            color: route.color,
-            severity: route.severity,
-            label: route.viaLabel ?? "Relay",
-            role: "relay",
-            countryName:
-              route.comtrade?.hubName ?? route.viaLabel ?? "Relay",
-            comtrade: route.comtrade,
-          },
-        ]
-      : []),
-    {
-      key: `${route.id}-to`,
+    });
+
+    if (route.via) {
+      const viaIso = route.comtrade?.hubIso3 || "";
+      const viaKey = viaIso
+        ? `relay:${viaIso}`
+        : `relay:${route.via[0].toFixed(1)},${route.via[1].toFixed(1)}`;
+      consider({
+        key: viaKey,
+        vector: vectorFromLocation(route.via),
+        color: route.color,
+        severity: route.severity,
+        label: route.viaLabel ?? "Relay",
+        role: "relay",
+        countryName: route.comtrade?.hubName ?? route.viaLabel ?? "Relay",
+        comtrade: route.comtrade,
+      });
+    }
+
+    consider({
+      key: toKey,
       vector: vectorFromLocation(route.to),
       color: route.color,
       severity: route.severity,
@@ -676,8 +724,10 @@ function getRoutePoints(routes: GlobeArc[]): RoutePoint[] {
       role: "destination",
       countryName: route.comtrade?.destName ?? route.toLabel ?? "Destination",
       comtrade: route.comtrade,
-    },
-  ]);
+    });
+  }
+
+  return Array.from(byKey.values());
 }
 
 function formatPopupUsd(value: number): string {
@@ -696,11 +746,12 @@ function formatPopupPct(value: number): string {
 }
 
 function prepareRouteOverlay(routes: GlobeArc[]): RouteOverlayData {
+  const steps = routeSampleSteps(routes.length);
   return {
-    key: routes.map((route) => route.id).join("|"),
+    key: `${steps}|${routes.map((route) => route.id).join("|")}`,
     routes: routes.map((route) => ({
       id: route.id,
-      samples: buildRouteSamples(route),
+      samples: buildRouteSamples(route, steps),
     })),
     points: getRoutePoints(routes),
   };
@@ -1186,12 +1237,16 @@ export function Cobe({
           routeGpuGen += 1;
         }
         // Always reproject when spinning/dragging so arcs stay glued to the globe.
-        // Light throttle only when many routes (Trade Pulse + PKI).
+        // Throttle harder as route count grows (PKI density / pages).
         const routeInterval = interacting
-          ? ROUTE_DRAG_MS
-          : routeCount >= ROUTE_HEAVY_COUNT
-            ? ROUTE_HEAVY_IDLE_MS
-            : ROUTE_IDLE_MS;
+          ? routeCount >= ROUTE_ULTRA_COUNT
+            ? ROUTE_ULTRA_IDLE_MS
+            : ROUTE_DRAG_MS
+          : routeCount >= ROUTE_ULTRA_COUNT
+            ? ROUTE_ULTRA_IDLE_MS
+            : routeCount >= ROUTE_HEAVY_COUNT
+              ? ROUTE_HEAVY_IDLE_MS
+              : ROUTE_IDLE_MS;
         if (
           routeNeedsImmediateDraw ||
           now - lastRouteOverlayAt >= routeInterval
@@ -1475,7 +1530,7 @@ export function Cobe({
         }
         title="Globe view controls"
       >
-        {isGlobeControlsOpen ? "Globe ▾" : "Globe ▴"}
+        {isGlobeControlsOpen ? "Globe ▴" : "Globe ▾"}
       </button>
       {isGlobeControlsOpen && (
         <div id="globe-controls-panel" className="globe-controls-panel">
@@ -1789,11 +1844,15 @@ export function Cobe({
         createPortal(
           <div
             ref={popupRef}
-            className="globe-arc-comtrade-popup"
+            className={
+              selectedPoint.comtrade.kind === "pki"
+                ? "globe-arc-comtrade-popup globe-arc-pki-popup"
+                : "globe-arc-comtrade-popup"
+            }
             role="dialog"
             aria-label={
               selectedPoint.comtrade.kind === "pki"
-                ? `PKI CVE data for ${selectedPoint.countryName}`
+                ? `Certificate / PKI exposure for ${selectedPoint.countryName}`
                 : `Comtrade data for ${selectedPoint.countryName}`
             }
             style={
@@ -1827,20 +1886,27 @@ export function Cobe({
               }}
             >
               <div>
-                <strong>{selectedPoint.countryName}</strong>
+                <strong>
+                  {selectedPoint.comtrade.kind === "pki"
+                    ? selectedPoint.comtrade.commodityCode
+                    : selectedPoint.countryName}
+                </strong>
                 <span>
                   {selectedPoint.comtrade.kind === "pki"
                     ? selectedPoint.role === "origin"
-                      ? "Vendor / origin signal"
+                      ? "Vendor origin"
                       : selectedPoint.role === "relay"
-                        ? "Relay exposure"
-                        : "Exposure destination"
+                        ? "Relay"
+                        : "Exposure country"
                     : selectedPoint.role === "origin"
                       ? "Origin"
                       : selectedPoint.role === "relay"
                         ? "Intermediary hub"
                         : "Destination"}{" "}
                   · {selectedPoint.comtrade.severity}
+                  {selectedPoint.comtrade.kind === "pki"
+                    ? ` · ${selectedPoint.countryName}`
+                    : ""}
                   <em className="globe-arc-comtrade-drag-hint"> · drag header to move</em>
                 </span>
               </div>
@@ -1867,13 +1933,25 @@ export function Cobe({
               </div>
             </div>
             <div className="globe-arc-comtrade-popup-body">
-              <p className="globe-arc-comtrade-route">
-                {selectedPoint.comtrade.originIso3} →{" "}
-                {selectedPoint.comtrade.destIso3}
-                {selectedPoint.comtrade.hubIso3
-                  ? ` via ${selectedPoint.comtrade.hubIso3}`
-                  : ""}
-              </p>
+              {selectedPoint.comtrade.kind === "pki" ? (
+                <p className="globe-arc-comtrade-route pki-arc-route">
+                  {selectedPoint.comtrade.originName} →{" "}
+                  {selectedPoint.comtrade.destName}
+                  <span className="pki-arc-route-meta">
+                    {" "}
+                    ({selectedPoint.comtrade.originIso3} →{" "}
+                    {selectedPoint.comtrade.destIso3})
+                  </span>
+                </p>
+              ) : (
+                <p className="globe-arc-comtrade-route">
+                  {selectedPoint.comtrade.originIso3} →{" "}
+                  {selectedPoint.comtrade.destIso3}
+                  {selectedPoint.comtrade.hubIso3
+                    ? ` via ${selectedPoint.comtrade.hubIso3}`
+                    : ""}
+                </p>
+              )}
               <p className="globe-arc-comtrade-commodity">
                 <strong>{selectedPoint.comtrade.commodity}</strong>
                 <span>
@@ -1882,44 +1960,49 @@ export function Cobe({
                 </span>
               </p>
               {selectedPoint.comtrade.kind === "pki" ? (
-                <div className="globe-arc-comtrade-grid">
+                <div className="globe-arc-comtrade-grid pki-popup-grid">
                   <div>
-                    <span>CVE</span>
-                    <strong>{selectedPoint.comtrade.commodityCode}</strong>
+                    <span>Catalog</span>
+                    <strong>{selectedPoint.comtrade.quantity}</strong>
                   </div>
                   <div>
                     <span>Severity</span>
-                    <strong>{selectedPoint.comtrade.severity}</strong>
+                    <strong className="pki-popup-severity">
+                      {selectedPoint.comtrade.severity}
+                    </strong>
                   </div>
                   <div>
-                    <span>Date</span>
+                    <span>Published / KEV date</span>
                     <strong>{selectedPoint.comtrade.period}</strong>
                   </div>
                   <div>
-                    <span>Known exploited</span>
-                    <strong>
-                      {selectedPoint.comtrade.quantity === "KEV" ? "Yes (CISA KEV)" : "No / unknown"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Vendor</span>
-                    <strong>{selectedPoint.comtrade.originName}</strong>
-                  </div>
-                  <div>
-                    <span>Product</span>
-                    <strong>{selectedPoint.comtrade.customsProcedure || "n/a"}</strong>
-                  </div>
-                  <div>
-                    <span>Categories</span>
-                    <strong>{selectedPoint.comtrade.transportMode}</strong>
-                  </div>
-                  <div>
-                    <span>CVSS / score</span>
+                    <span>CVSS</span>
                     <strong>
                       {selectedPoint.comtrade.confidencePct > 0
                         ? selectedPoint.comtrade.confidencePct.toFixed(1)
-                        : "n/a"}
+                        : "—"}
                     </strong>
+                  </div>
+                  <div>
+                    <span>Vendor origin</span>
+                    <strong>{selectedPoint.comtrade.originName}</strong>
+                  </div>
+                  <div>
+                    <span>Exposure country</span>
+                    <strong>
+                      {selectedPoint.comtrade.destName} (
+                      {selectedPoint.comtrade.destIso3})
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Product</span>
+                    <strong>
+                      {selectedPoint.comtrade.customsProcedure || "—"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Class</span>
+                    <strong>{selectedPoint.comtrade.transportMode}</strong>
                   </div>
                 </div>
               ) : (
@@ -2013,20 +2096,20 @@ export function Cobe({
                 {selectedPoint.comtrade.insight}
               </p>
               {selectedPoint.comtrade.kind === "pki" &&
-                selectedPoint.comtrade.referenceUrl && (
-                  <p className="globe-arc-comtrade-disclaimer">
+                safeGlobeHref(selectedPoint.comtrade.referenceUrl) && (
+                  <p className="globe-arc-comtrade-disclaimer pki-popup-links">
                     <a
-                      href={selectedPoint.comtrade.referenceUrl}
+                      href={safeGlobeHref(selectedPoint.comtrade.referenceUrl)}
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      Open NVD record
+                      Open NVD record →
                     </a>
                   </p>
                 )}
               <p className="globe-arc-comtrade-disclaimer">
                 {selectedPoint.comtrade.kind === "pki"
-                  ? "Vendor→country exposure signal · not exploit geolocation"
+                  ? "Arc = vendor origin → deployment/exposure signal. Not exploit geolocation or attribution."
                   : selectedPoint.comtrade.period}
                 {selectedPoint.comtrade.kind === "pki"
                   ? ""

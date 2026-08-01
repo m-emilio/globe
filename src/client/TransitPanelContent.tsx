@@ -440,13 +440,17 @@ export function TransitPanelContent({
         <div className="nearby-footer">
           <span>{preview.note ?? "Transit App"}</span>
           <div className="nearby-footer-actions">
-            <a
-              href={preview.sourceUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              API docs
-            </a>
+            {preview.sourceUrl &&
+              /^https:\/\//i.test(preview.sourceUrl) &&
+              !/^(javascript|data):/i.test(preview.sourceUrl) && (
+                <a
+                  href={preview.sourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  API docs
+                </a>
+              )}
             <button type="button" onClick={onRefresh}>
               Refresh
             </button>

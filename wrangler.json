@@ -9,7 +9,8 @@
     }
   ],
   "assets": {
-    "directory": "public"
+    "directory": "public",
+    "not_found_handling": "single-page-application"
   },
   "build": {
     "command": "npm run build:client"

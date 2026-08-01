@@ -167,7 +167,7 @@ export async function getPaymentLink(
       {
         error: "already_paid",
         message:
-          "Stripe access is already unlocked on this account (Transit + Live Feed).",
+          "Stripe access is already unlocked on this account (Transit + Live Feed + support chat).",
         url: null,
       },
       { status: 409 },
@@ -199,7 +199,7 @@ export async function getPaymentLink(
   return json(
     {
       url: paymentLinkUrl,
-      label: "Transit + Live Feed",
+      label: "Transit + Live Feed + support chat",
       amountLabel: "$20",
     },
     { status: 200 },
@@ -575,7 +575,7 @@ export async function ensureBillingCatalog(
   const paymentLinkUrl = resolvePaymentLinkUrl(env);
   const catalog: BillingCatalog = {
     paymentLinkUrl,
-    label: "Transit + Live Feed",
+    label: "Transit + Live Feed + support chat",
     amountLabel: "$20",
     updatedAt: new Date().toISOString(),
   };

@@ -18,6 +18,14 @@ import {
   type GlobeHeatZone,
 } from "./CobeGlobe";
 import { FloatingChrome } from "./FloatingChrome";
+import { UnHubPage } from "./UnHubPage";
+import { PkiHubPage } from "./PkiHubPage";
+import { safeGlobeHref } from "./safeUrl";
+import {
+  SiteTour,
+  markSiteTourSeen,
+  shouldShowSiteTour,
+} from "./SiteTour";
 import {
   ActivityFeed,
   createActivityEvent,
@@ -38,6 +46,7 @@ import type {
   OutgoingMessage,
   ComtradePreview,
   NearbyPathsPreview,
+  PkiCountryHotspot,
   PkiVulnCve,
   PkiVulnSeverity,
   PkiVulnsPreview,
@@ -48,6 +57,13 @@ import type {
   UnGlobalPreview,
   UnodcHotspotsPreview,
   UnodcThemeId,
+} from "../shared";
+import {
+  CHAT_CLIENT_MAX_PER_WINDOW,
+  CHAT_RATE_WINDOW_MS,
+  fallbackChatDisplayName,
+  sanitizeChatDisplayName,
+  sanitizeChatText,
 } from "../shared";
 import {
   authFetch,
@@ -204,7 +220,7 @@ const UN_GLOBAL_SECTION_LABELS: Record<UnGlobalSection, string> = {
 type UnodcStatus = "idle" | "loading" | "ready" | "error";
 type PkiVulnsStatus = "idle" | "loading" | "ready" | "error";
 
-const PKI_PREVIEW_URL = "/api/pki-vulns-preview?v=1";
+const PKI_PREVIEW_URL = "/api/pki-vulns-preview?v=2";
 
 const PKI_SEVERITY_COLORS: Record<PkiVulnSeverity, string> = {
   critical: "#ff2d55",
@@ -214,12 +230,21 @@ const PKI_SEVERITY_COLORS: Record<PkiVulnSeverity, string> = {
   unknown: "#8e8e93",
 };
 
-/** Heat color by dominant severity signal on a country hotspot. */
+const PKI_CATEGORY_LABELS: Record<string, string> = {
+  certificate: "Certificate",
+  "tls-ssl": "TLS / SSL",
+  openssl: "OpenSSL",
+  "crypto-key": "Crypto key",
+  "pki-auth": "PKI auth",
+  "other-pki": "Other PKI",
+};
+
+/** Heat color by severity for PKI arcs. */
 function pkiSeverityColor(severity: PkiVulnSeverity): string {
   return PKI_SEVERITY_COLORS[severity] || PKI_SEVERITY_COLORS.unknown;
 }
 
-/** Approximate country centers for vendor-origin endpoints (Trade Pulse style). */
+/** Fallback country centers when hotspot list omits an origin/exposure ISO3. */
 const PKI_COUNTRY_CENTERS: Record<
   string,
   { name: string; lat: number; lng: number }
@@ -244,107 +269,304 @@ const PKI_COUNTRY_CENTERS: Record<
   ISR: { name: "Israel", lat: 31.05, lng: 34.85 },
   RUS: { name: "Russia", lat: 61.52, lng: 105.32 },
   ZAF: { name: "South Africa", lat: -30.56, lng: 22.94 },
+  ITA: { name: "Italy", lat: 41.87, lng: 12.57 },
+  ESP: { name: "Spain", lat: 40.46, lng: -3.75 },
+  IDN: { name: "Indonesia", lat: -0.79, lng: 113.92 },
+  MEX: { name: "Mexico", lat: 23.63, lng: -102.55 },
+  TUR: { name: "Turkey", lat: 38.96, lng: 35.24 },
+  POL: { name: "Poland", lat: 51.92, lng: 19.15 },
+  SAU: { name: "Saudi Arabia", lat: 23.89, lng: 45.08 },
+  NOR: { name: "Norway", lat: 60.47, lng: 8.47 },
+  FIN: { name: "Finland", lat: 61.92, lng: 25.75 },
+  DNK: { name: "Denmark", lat: 56.26, lng: 9.5 },
 };
 
+type PkiGeoPoint = {
+  iso3: string;
+  name: string;
+  lat: number;
+  lng: number;
+};
+
+function pkiResolvePoint(
+  iso3: string,
+  hotspotByIso: Map<string, PkiCountryHotspot>,
+): PkiGeoPoint | null {
+  const h = hotspotByIso.get(iso3);
+  if (h) {
+    return { iso3: h.iso3, name: h.name, lat: h.lat, lng: h.lng };
+  }
+  const fb = PKI_COUNTRY_CENTERS[iso3];
+  if (!fb) return null;
+  return { iso3, name: fb.name, lat: fb.lat, lng: fb.lng };
+}
+
 function pkiVendorOriginIso3(cve: PkiVulnCve): string {
+  if (cve.originIso3) return cve.originIso3;
   const blob = `${cve.vendor || ""} ${cve.product || ""} ${cve.title}`;
-  if (/microsoft|windows|active directory|cng/i.test(blob)) return "USA";
-  if (/apple|ios|macos/i.test(blob)) return "USA";
-  if (/cisco|asa|firepower/i.test(blob)) return "USA";
-  if (/fortinet|fortios/i.test(blob)) return "USA";
-  if (/sonicwall/i.test(blob)) return "USA";
-  if (/ivanti|pulse/i.test(blob)) return "USA";
-  if (/openssl|heartbleed/i.test(blob)) return "USA";
   if (/igel/i.test(blob)) return "DEU";
   if (/array networks/i.test(blob)) return "USA";
-  if (/gladinet|centrestack|triofox/i.test(blob)) return "USA";
+  if (/fortinet/i.test(blob)) return "CAN";
   return "USA";
 }
 
+function pkiSeverityRank(s: string): number {
+  return s === "critical" ? 0 : s === "high" ? 1 : s === "medium" ? 2 : 3;
+}
+
+/** Count hotspot countries that list this CVE when exposureIso3s is missing. */
+function previewHotspotLinks(
+  preview: PkiVulnsPreview,
+  cveId: string,
+): number {
+  return preview.hotspots.filter((h) => h.topCves.includes(cveId)).length;
+}
+
+/** Catalog filter: solid KEV vs dotted NVD catalog arcs. */
+type PkiCatalogFilter = "all" | "kev" | "nvd";
+type PkiSortMode =
+  | "priority"
+  | "severity"
+  | "cvss"
+  | "newest"
+  | "vendor"
+  | "cve";
+/** Visible arc budget — sparse default keeps the globe smooth. */
+type PkiDensity = "sparse" | "balanced" | "dense";
+
+const PKI_DENSITY_LIMITS: Record<PkiDensity, number> = {
+  sparse: 8,
+  balanced: 14,
+  dense: 22,
+};
+const PKI_DESTS_PER_CVE: Record<PkiDensity, number> = {
+  sparse: 3,
+  balanced: 5,
+  dense: 8,
+};
+const PKI_SORT_LABELS: Record<PkiSortMode, string> = {
+  priority: "Priority",
+  severity: "Severity",
+  cvss: "CVSS",
+  newest: "Newest",
+  vendor: "Vendor",
+  cve: "CVE ID",
+};
+const DEFAULT_PKI_SEVERITIES: PkiVulnSeverity[] = [
+  "critical",
+  "high",
+  "medium",
+  "low",
+  "unknown",
+];
+
+type PkiArcBuildOptions = {
+  catalog: PkiCatalogFilter;
+  severities: Set<PkiVulnSeverity>;
+  category: string | "all";
+  focusCve: string | null;
+  sort: PkiSortMode;
+  density: PkiDensity;
+  page: number;
+};
+
+type PkiArcSelection = {
+  arcs: GlobeArc[];
+  total: number;
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  kevCount: number;
+  nvdCount: number;
+};
+
+function pkiArcDateMs(cve: PkiVulnCve): number {
+  const raw = cve.kevDateAdded || cve.publishedAt || "";
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : 0;
+}
+
+function sortPkiCves(list: PkiVulnCve[], sort: PkiSortMode): PkiVulnCve[] {
+  const out = list.slice();
+  out.sort((a, b) => {
+    switch (sort) {
+      case "severity": {
+        const sr = pkiSeverityRank(a.severity) - pkiSeverityRank(b.severity);
+        if (sr !== 0) return sr;
+        return (b.cvss || 0) - (a.cvss || 0);
+      }
+      case "cvss":
+        return (b.cvss || 0) - (a.cvss || 0);
+      case "newest":
+        return pkiArcDateMs(b) - pkiArcDateMs(a);
+      case "vendor":
+        return (a.vendor || "zzz").localeCompare(b.vendor || "zzz");
+      case "cve":
+        return a.id.localeCompare(b.id);
+      case "priority":
+      default: {
+        if (a.knownExploited !== b.knownExploited) {
+          return a.knownExploited ? -1 : 1;
+        }
+        const sr = pkiSeverityRank(a.severity) - pkiSeverityRank(b.severity);
+        if (sr !== 0) return sr;
+        return (b.cvss || 0) - (a.cvss || 0);
+      }
+    }
+  });
+  return out;
+}
+
+function sortPkiArcs(arcs: GlobeArc[], sort: PkiSortMode): GlobeArc[] {
+  const out = arcs.slice();
+  out.sort((a, b) => {
+    const ac = a.comtrade;
+    const bc = b.comtrade;
+    switch (sort) {
+      case "severity": {
+        const sr =
+          pkiSeverityRank(ac?.severity || "unknown") -
+          pkiSeverityRank(bc?.severity || "unknown");
+        if (sr !== 0) return sr;
+        return (bc?.confidencePct || 0) - (ac?.confidencePct || 0);
+      }
+      case "cvss":
+        return (bc?.confidencePct || 0) - (ac?.confidencePct || 0);
+      case "newest":
+        return (bc?.period || "").localeCompare(ac?.period || "");
+      case "vendor":
+        return (ac?.originName || "").localeCompare(bc?.originName || "");
+      case "cve":
+        return (ac?.commodityCode || "").localeCompare(bc?.commodityCode || "");
+      case "priority":
+      default: {
+        const aKev = ac?.quantity === "CISA KEV" ? 0 : 1;
+        const bKev = bc?.quantity === "CISA KEV" ? 0 : 1;
+        if (aKev !== bKev) return aKev - bKev;
+        const sr =
+          pkiSeverityRank(ac?.severity || "unknown") -
+          pkiSeverityRank(bc?.severity || "unknown");
+        if (sr !== 0) return sr;
+        return (bc?.confidencePct || 0) - (ac?.confidencePct || 0);
+      }
+    }
+  });
+  return out;
+}
+
 /**
- * Trade Pulse–style arcs: vendor origin → exposure countries for top PKI CVEs.
- * Expandable + points use the shared route popup (kind: pki).
+ * Build filtered PKI arcs with paging + fair KEV (solid) / NVD (dotted) mix.
+ * Keeps visible set small so globe projection stays smooth.
  */
 function buildPkiGlobeArcs(
   preview: PkiVulnsPreview,
-  kevOnly: boolean,
-): GlobeArc[] {
-  // Keep arc count low — each line is reprojected every frame with endpoint DOM.
-  const ranked = (kevOnly
-    ? preview.cves.filter((c) => c.knownExploited)
-    : preview.cves
-  )
-    .slice()
-    .sort((a, b) => {
-      if (a.knownExploited !== b.knownExploited) return a.knownExploited ? -1 : 1;
-      const rank = (s: string) =>
-        s === "critical" ? 0 : s === "high" ? 1 : s === "medium" ? 2 : 3;
-      return rank(a.severity) - rank(b.severity);
-    })
-    .slice(0, 14);
+  options: PkiArcBuildOptions,
+): PkiArcSelection {
+  const pageSize = PKI_DENSITY_LIMITS[options.density];
+  const maxDests = options.focusCve
+    ? 24
+    : PKI_DESTS_PER_CVE[options.density];
+
+  let cves = preview.cves.slice();
+  if (options.focusCve) {
+    cves = cves.filter((c) => c.id === options.focusCve);
+  } else {
+    if (options.catalog === "kev") {
+      cves = cves.filter((c) => c.knownExploited);
+    } else if (options.catalog === "nvd") {
+      cves = cves.filter((c) => !c.knownExploited);
+    }
+    if (options.severities.size < DEFAULT_PKI_SEVERITIES.length) {
+      cves = cves.filter((c) => options.severities.has(c.severity));
+    }
+    if (options.category !== "all") {
+      cves = cves.filter((c) => c.categories.includes(options.category as never));
+    }
+  }
+  cves = sortPkiCves(cves, options.sort);
 
   const hotspotByIso = new Map(
     preview.hotspots.map((h) => [h.iso3, h] as const),
   );
-  const arcs: GlobeArc[] = [];
-  const MAX_ARCS = 16;
+  const candidates: GlobeArc[] = [];
 
-  for (const cve of ranked) {
-    if (arcs.length >= MAX_ARCS) break;
+  for (const cve of cves) {
     const originIso = pkiVendorOriginIso3(cve);
-    const originCenter =
-      hotspotByIso.get(originIso) ||
-      (PKI_COUNTRY_CENTERS[originIso]
-        ? {
-            iso3: originIso,
-            name: PKI_COUNTRY_CENTERS[originIso].name,
-            lat: PKI_COUNTRY_CENTERS[originIso].lat,
-            lng: PKI_COUNTRY_CENTERS[originIso].lng,
-          }
-        : null);
+    const originCenter = pkiResolvePoint(originIso, hotspotByIso);
     if (!originCenter) continue;
 
-    // One destination per CVE keeps the globe smooth under SVG projection load.
-    let dests = preview.hotspots.filter(
-      (h) => h.topCves.includes(cve.id) && h.iso3 !== originIso,
-    );
-    if (dests.length === 0) {
-      dests = preview.hotspots
-        .filter((h) => h.iso3 !== originIso)
-        .slice(0, 1);
-    } else {
-      dests = dests.slice(0, 1);
+    const exposureIsos =
+      cve.exposureIso3s && cve.exposureIso3s.length > 0
+        ? cve.exposureIso3s
+        : preview.hotspots
+            .filter((h) => h.topCves.includes(cve.id) && h.iso3 !== originIso)
+            .map((h) => h.iso3);
+
+    const dests: PkiGeoPoint[] = [];
+    const seen = new Set<string>();
+    for (const iso of exposureIsos) {
+      if (iso === originIso || seen.has(iso)) continue;
+      const pt = pkiResolvePoint(iso, hotspotByIso);
+      if (!pt) continue;
+      seen.add(iso);
+      dests.push(pt);
+      if (dests.length >= maxDests) break;
     }
 
-    for (const dest of dests) {
-      if (arcs.length >= MAX_ARCS) break;
-      const color = pkiSeverityColor(cve.severity);
-      const width =
-        cve.severity === "critical" ? 3.2 : cve.severity === "high" ? 2.6 : 2;
-      const period =
-        cve.kevDateAdded ||
-        (cve.publishedAt ? cve.publishedAt.slice(0, 10) : "n/a");
-      const product = cve.product || "n/a";
-      const vendor = cve.vendor || originCenter.name;
-      const cats = cve.categories.join(", ") || "pki";
+    if (dests.length === 0 && !options.focusCve) {
+      for (const h of preview.hotspots) {
+        if (h.iso3 === originIso || seen.has(h.iso3)) continue;
+        dests.push({
+          iso3: h.iso3,
+          name: h.name,
+          lat: h.lat,
+          lng: h.lng,
+        });
+        if (dests.length >= Math.min(3, maxDests)) break;
+      }
+    }
 
-      arcs.push({
+    const color = pkiSeverityColor(cve.severity);
+    const width =
+      cve.severity === "critical"
+        ? 2.6
+        : cve.severity === "high"
+          ? 2.1
+          : cve.severity === "medium"
+            ? 1.6
+            : 1.3;
+    const period =
+      cve.kevDateAdded ||
+      (cve.publishedAt ? cve.publishedAt.slice(0, 10) : "n/a");
+    const product = cve.product || "—";
+    const vendor = cve.vendor || "Unknown vendor";
+    const cats =
+      cve.categories
+        .map((c) => PKI_CATEGORY_LABELS[c] || c)
+        .join(" · ") || "PKI / TLS";
+    const isKev = cve.knownExploited;
+    const catalog = isKev ? "CISA KEV" : "NVD catalog";
+    // KEV = solid; NVD = dotted (short dashes). Never use "0".
+    const dash = isKev ? "none" : "2.5 3.5";
+
+    for (const dest of dests) {
+      candidates.push({
         id: `pki-${cve.id}-${dest.iso3}`,
         from: [originCenter.lat, originCenter.lng],
         to: [dest.lat, dest.lng],
-        fromLabel: `${vendor} · ${originCenter.name || originIso}`,
-        toLabel: `${dest.name} exposure`,
+        fromLabel: `${vendor} · ${originCenter.name}`,
+        toLabel: `${dest.name} · exposure`,
         color,
         width,
-        dash: cve.knownExploited ? "none" : "5 5",
+        dash,
         severity: cve.severity === "unknown" ? "elevated" : cve.severity,
         comtrade: {
           kind: "pki",
           routeId: cve.id,
-          commodity: cve.title.slice(0, 160),
+          commodity: cve.title.slice(0, 200),
           commodityCode: cve.id,
           period,
-          originName: vendor,
+          originName: `${vendor} · ${originCenter.name}`,
           originIso3: originIso,
           destName: dest.name,
           destIso3: dest.iso3,
@@ -353,7 +575,7 @@ function buildPkiGlobeArcs(
           transportMode: cats,
           customsProcedure: product,
           valueUsd: 0,
-          quantity: cve.knownExploited ? "KEV" : "NVD",
+          quantity: catalog,
           supplierSharePct: 0,
           exportValueUsd: 0,
           importValueUsd: 0,
@@ -364,15 +586,48 @@ function buildPkiGlobeArcs(
           reExportSharePct: 0,
           confidencePct: cve.cvss ?? 0,
           severity: cve.severity,
-          layers: cve.categories,
-          insight: cve.description.slice(0, 480),
+          layers: cve.categories.map((c) => PKI_CATEGORY_LABELS[c] || c),
+          insight: cve.description.slice(0, 520),
           referenceUrl: cve.nvdUrl,
         },
       });
     }
   }
 
-  return arcs;
+  const sorted = sortPkiArcs(candidates, options.sort);
+  const kevPool = sorted.filter((a) => a.comtrade?.quantity === "CISA KEV");
+  const nvdPool = sorted.filter((a) => a.comtrade?.quantity !== "CISA KEV");
+
+  // Fair mix so dotted NVD arcs are not starved when KEV dominates priority sort.
+  let ordered: GlobeArc[];
+  if (options.catalog === "all" && !options.focusCve) {
+    ordered = [];
+    let i = 0;
+    let j = 0;
+    while (i < kevPool.length || j < nvdPool.length) {
+      // Prefer 1 KEV solid then 1 NVD dotted when both remain
+      if (i < kevPool.length) ordered.push(kevPool[i++]);
+      if (j < nvdPool.length) ordered.push(nvdPool[j++]);
+    }
+  } else {
+    ordered = sorted;
+  }
+
+  const total = ordered.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize) || 1);
+  const page = Math.min(Math.max(0, options.page), pageCount - 1);
+  const start = page * pageSize;
+  const arcs = ordered.slice(start, start + pageSize);
+
+  return {
+    arcs,
+    total,
+    page,
+    pageCount,
+    pageSize,
+    kevCount: kevPool.length,
+    nvdCount: nvdPool.length,
+  };
 }
 
 const UNODC_THEME_IDS /*sec-pass*/: UnodcThemeId[] = [
@@ -823,6 +1078,46 @@ function parseSocketMessage(data: unknown): OutgoingMessage | null {
     return { type: "feed-leave", id, sessionMs, meta };
   }
 
+  if (message.type === "chat") {
+    // Re-sanitize on receive — never trust fields for display
+    try {
+      const id =
+        typeof message.id === "string" ? message.id.slice(0, 128) : "";
+      const fromId =
+        typeof message.fromId === "string" ? message.fromId.slice(0, 128) : "";
+      if (!id || !fromId) return null;
+      if (/[\u0000-\u001F\u007F<>]/.test(id) || /[\u0000-\u001F\u007F<>]/.test(fromId)) {
+        return null;
+      }
+      const text = sanitizeChatText(message.text);
+      if (!text) return null;
+      let displayName = "";
+      try {
+        displayName = sanitizeChatDisplayName(message.displayName);
+      } catch {
+        displayName = "";
+      }
+      if (!displayName) displayName = fallbackChatDisplayName(fromId);
+      const ts =
+        typeof message.ts === "number" &&
+        Number.isFinite(message.ts) &&
+        message.ts > 0 &&
+        message.ts < Date.now() + 120_000
+          ? message.ts
+          : Date.now();
+      return {
+        type: "chat",
+        id,
+        fromId,
+        text,
+        displayName,
+        ts,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   if (message.type !== "add-marker" || !message.position || typeof message.position !== "object") {
     return null;
   }
@@ -982,6 +1277,74 @@ function getIsTradePulsePreview() {
     url.pathname === "/preview/trade-pulse" ||
     url.searchParams.get("preview") === "trade-pulse"
   );
+}
+
+/** Dedicated mobile UN hub page: /un, #un, or ?view=un */
+function getIsUnHubRoute() {
+  if (typeof window === "undefined") return false;
+  const url = new URL(window.location.href);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  return (
+    path === "/un" ||
+    url.hash === "#un" ||
+    url.hash === "#/un" ||
+    url.searchParams.get("view") === "un"
+  );
+}
+
+function openUnHubRoute() {
+  const url = new URL(window.location.href);
+  url.pathname = "/un";
+  url.hash = "";
+  url.searchParams.delete("view");
+  window.history.pushState({ unHub: true }, "", url.toString());
+}
+
+function closeUnHubRoute() {
+  const url = new URL(window.location.href);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/un") {
+    url.pathname = "/";
+  }
+  if (url.hash === "#un" || url.hash === "#/un") {
+    url.hash = "";
+  }
+  url.searchParams.delete("view");
+  window.history.pushState({ unHub: false }, "", url.toString());
+}
+
+/** Dedicated mobile PKI hub: /pki, #pki, or ?view=pki */
+function getIsPkiHubRoute() {
+  if (typeof window === "undefined") return false;
+  const url = new URL(window.location.href);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  return (
+    path === "/pki" ||
+    url.hash === "#pki" ||
+    url.hash === "#/pki" ||
+    url.searchParams.get("view") === "pki"
+  );
+}
+
+function openPkiHubRoute() {
+  const url = new URL(window.location.href);
+  url.pathname = "/pki";
+  url.hash = "";
+  url.searchParams.delete("view");
+  window.history.pushState({ pkiHub: true }, "", url.toString());
+}
+
+function closePkiHubRoute() {
+  const url = new URL(window.location.href);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/pki") {
+    url.pathname = "/";
+  }
+  if (url.hash === "#pki" || url.hash === "#/pki") {
+    url.hash = "";
+  }
+  url.searchParams.delete("view");
+  window.history.pushState({ pkiHub: false }, "", url.toString());
 }
 
 function getRoutePulseLayer(
@@ -1196,6 +1559,11 @@ function getWeatherGlow(weather: WeatherFeed | null): {
 
 function App() {
   const isTradePulsePreview = getIsTradePulsePreview();
+  const [showSiteTour, setShowSiteTour] = useState(() => shouldShowSiteTour());
+  const dismissSiteTour = useCallback(() => {
+    markSiteTourSeen();
+    setShowSiteTour(false);
+  }, []);
   const [showAbout, setShowAbout] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showWeatherPanel, setShowWeatherPanel] = useState(false);
@@ -1211,6 +1579,8 @@ function App() {
   const [comtradeSections, setComtradeSections] = useState(DEFAULT_COMTRADE_SECTIONS);
   const [comtradeValueMode, setComtradeValueMode] =
     useState<ComtradeValueMode>("compact");
+  const [showUnHub, setShowUnHub] = useState(() => getIsUnHubRoute());
+  const [showPkiHub, setShowPkiHub] = useState(() => getIsPkiHubRoute());
   const [showTradePulsePanel, setShowTradePulsePanel] = useState(isTradePulsePreview);
   /** Start minimized so the globe (and point + popups) stay primary */
   const [isTradePulsePanelMinimized, setIsTradePulsePanelMinimized] =
@@ -1242,8 +1612,16 @@ function App() {
   const [pkiStatus, setPkiStatus] = useState<PkiVulnsStatus>("idle");
   const [pkiPreview, setPkiPreview] = useState<PkiVulnsPreview | null>(null);
   const [pkiError, setPkiError] = useState("");
-  const [pkiKevOnly, setPkiKevOnly] = useState(false);
   const [pkiShowMap, setPkiShowMap] = useState(true);
+  const [pkiCatalog, setPkiCatalog] = useState<PkiCatalogFilter>("all");
+  const [pkiSort, setPkiSort] = useState<PkiSortMode>("priority");
+  const [pkiDensity, setPkiDensity] = useState<PkiDensity>("sparse");
+  const [pkiArcPage, setPkiArcPage] = useState(0);
+  const [pkiFocusCve, setPkiFocusCve] = useState<string | null>(null);
+  const [pkiCategory, setPkiCategory] = useState<string | "all">("all");
+  const [pkiSeverities, setPkiSeverities] = useState<Set<PkiVulnSeverity>>(
+    () => new Set<PkiVulnSeverity>(["critical", "high", "medium"]),
+  );
   const [showActivityMenu, setShowActivityMenu] = useState(false);
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
   const [isFeedPaused, setIsFeedPaused] = useState(false);
@@ -1253,6 +1631,17 @@ function App() {
     useState<GlobeSocketStatus>("connecting");
   const [counter, setCounter] = useState(0);
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
+  /** Ephemeral chat — React memory only; cleared on refresh / navigation */
+  const [chatMessages, setChatMessages] = useState<
+    Array<{
+      id: string;
+      fromId: string;
+      text: string;
+      displayName: string;
+      ts: number;
+      isSelf?: boolean;
+    }>
+  >([]);
   const [showNearbyPanel, setShowNearbyPanel] = useState(false);
   const [nearbyStatus, setNearbyStatus] = useState<NearbyStatus>("idle");
   const [nearbyPreview, setNearbyPreview] = useState<NearbyPathsPreview | null>(
@@ -2318,7 +2707,7 @@ function App() {
   };
 
   /**
-   * Stripe Payment Link checkout for paid API access (Transit + Live Feed).
+   * Stripe Payment Link checkout for paid API access (Transit + Live Feed + support chat).
    * Requires an active session so the server can bind client_reference_id.
    * Guests never receive a payment URL — only a sign-in prompt.
    */
@@ -2335,7 +2724,7 @@ function App() {
     }
     if (authUser.transitPaid) {
       setAuthMessage(
-        "Stripe access already unlocked (Transit + Live Feed).",
+        "Stripe access already unlocked (Transit + Live Feed + support chat).",
       );
       return;
     }
@@ -2417,6 +2806,7 @@ function App() {
     liveFeedUnlockedRef.current = liveFeedAccess === "ok";
     if (liveFeedAccess !== "ok") {
       setActivityFeed([]);
+      setChatMessages([]);
       activeVisitors.current.clear();
     }
   }, [liveFeedAccess]);
@@ -2478,7 +2868,7 @@ function App() {
           const user = await refreshAuth();
           if (user?.transitPaid) {
             setAuthMessage(
-              "Payment confirmed — Transit, Nearby maps, and Live Feed unlocked. Refreshing…",
+              "Payment confirmed — Transit, Nearby maps, Live Feed, and web support chat unlocked. Refreshing…",
             );
             // Reconnect WebSocket so server re-evaluates feedPaid from session cookie
             window.setTimeout(() => {
@@ -3076,6 +3466,54 @@ function App() {
     }
   }, []);
 
+  const openUnHub = useCallback(() => {
+    closePkiHubRoute();
+    setShowPkiHub(false);
+    openUnHubRoute();
+    setShowUnHub(true);
+    setShowMenu(false);
+  }, []);
+
+  const closeUnHub = useCallback(() => {
+    closeUnHubRoute();
+    setShowUnHub(false);
+  }, []);
+
+  const openPkiHub = useCallback(() => {
+    closeUnHubRoute();
+    setShowUnHub(false);
+    openPkiHubRoute();
+    setShowPkiHub(true);
+    setShowMenu(false);
+  }, []);
+
+  const closePkiHub = useCallback(() => {
+    closePkiHubRoute();
+    setShowPkiHub(false);
+  }, []);
+
+  useEffect(() => {
+    const syncRoute = () => {
+      setShowUnHub(getIsUnHubRoute());
+      setShowPkiHub(getIsPkiHubRoute());
+    };
+    window.addEventListener("popstate", syncRoute);
+    window.addEventListener("hashchange", syncRoute);
+    return () => {
+      window.removeEventListener("popstate", syncRoute);
+      window.removeEventListener("hashchange", syncRoute);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!showUnHub && !showPkiHub) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [showUnHub, showPkiHub]);
+
   const toggleUnGlobalSection = (section: UnGlobalSection) => {
     setUnGlobalSections((current) => ({
       ...current,
@@ -3216,6 +3654,7 @@ function App() {
   ) => {
     setShowPkiPanel(true);
     setIsPkiPanelMinimized(true);
+    setPkiShowMap(true);
     if (closeMenu) {
       setShowMenu(false);
     }
@@ -3264,6 +3703,14 @@ function App() {
     }
   };
 
+  // Open PKI hub → ensure feed is loading/ready
+  useEffect(() => {
+    if (!showPkiHub) return;
+    if (pkiStatus === "idle" || pkiStatus === "error") {
+      void loadPkiVulns(false);
+    }
+  }, [showPkiHub]);
+
   const setUnodcFocusMode = (mode: "focus" | "all-live" | "none") => {
     if (!unodcPreview) return;
     const next = { ...DEFAULT_UNODC_THEMES };
@@ -3283,7 +3730,8 @@ function App() {
   const loadUnGlobalPreview = async (closeMenu = true) => {
     // Keep other popups open so multiple panels can be used side by side
     setShowUnGlobalPanel(true);
-    setIsUnGlobalPanelMinimized(false);
+    // Minimized by default — full controls live in the UN hub page
+    setIsUnGlobalPanelMinimized(true);
     if (closeMenu) {
       setShowMenu(false);
     }
@@ -3382,15 +3830,34 @@ function App() {
       // Any valid server message implies the public link is up.
       setSocketStatus("connected");
 
-      // Public globe markers only — no activity feed from this path
+      // Public globe markers
       if (message.type === "add-marker") {
         const visitorId = message.position.id;
+        const isYou = visitorId === socket.id;
         positions.current.set(visitorId, {
           location: [message.position.lat, message.position.lng],
-          size: visitorId === socket.id ? 0.1 : 0.05,
+          size: isYou ? 0.1 : 0.05,
         });
-
         setCounter(positions.current.size);
+
+        // Fallback: if paid feed is unlocked but feed-join not yet seen, still
+        // record self so Live Feed is never empty for the connected user.
+        if (
+          isYou &&
+          liveFeedUnlockedRef.current &&
+          !activeVisitors.current.has(visitorId)
+        ) {
+          const selfEvent = createActivityEvent({
+            id: visitorId,
+            type: "connect",
+            timestamp: Date.now(),
+            userName: "You",
+            country: message.position.country,
+            isSelf: true,
+          });
+          activeVisitors.current.set(visitorId, selfEvent);
+          addActivityEvent(selfEvent);
+        }
         return;
       }
 
@@ -3404,14 +3871,28 @@ function App() {
 
       // Paid Live Feed channel (server only sends feed-join/leave if transitPaid)
       if (message.type === "feed-access") {
-        // UI lock still uses authUser.transitPaid; this confirms WS auth path ran.
+        // Align client gate with server cookie entitlement (true and false)
+        const paid = Boolean(message.paid);
+        liveFeedUnlockedRef.current = paid;
+        if (!paid) {
+          setActivityFeed([]);
+          setChatMessages([]);
+          activeVisitors.current.clear();
+        }
         return;
       }
 
       if (message.type === "feed-join") {
-        if (!liveFeedUnlockedRef.current) return;
+        // Prefer server paid signal; also allow if UI already unlocked
+        if (!liveFeedUnlockedRef.current && !message.meta) return;
+        // If server sent feed-join, this client is entitled to the paid feed
+        liveFeedUnlockedRef.current = true;
         const meta = message.meta;
         const isYou = meta.id === socket.id;
+        // Avoid duplicate "You joined" on reconnect replay
+        if (activeVisitors.current.has(meta.id) && isYou) {
+          return;
+        }
         const activityEvent = createActivityEvent({
           id: meta.id,
           type: "connect",
@@ -3452,9 +3933,80 @@ function App() {
           }),
           { force: true },
         );
+        return;
+      }
+
+      // Paid web-support chat — memory only; isolated so failures never touch feed state
+      if (message.type === "chat") {
+        if (!liveFeedUnlockedRef.current) return;
+        try {
+          const isSelf = message.fromId === socket.id;
+          setChatMessages((prev) => {
+            if (prev.some((m) => m.id === message.id)) return prev;
+            return [
+              {
+                id: message.id,
+                fromId: message.fromId,
+                text: message.text,
+                displayName: isSelf ? "You" : message.displayName,
+                ts: message.ts,
+                isSelf,
+              },
+              ...prev,
+            ].slice(0, 60);
+          });
+        } catch {
+          // ignore chat UI errors
+        }
       }
     },
   });
+
+  const chatSendWindowRef = useRef({ start: 0, count: 0 });
+
+  const sendChatMessage = useCallback(
+    (text: string) => {
+      const clean = sanitizeChatText(text);
+      // Paid web-support chat — same gate as Live Feed (server also enforces feedPaid)
+      if (
+        !clean ||
+        socketStatus !== "connected" ||
+        liveFeedAccess !== "ok" ||
+        !authUser?.transitPaid
+      ) {
+        return false;
+      }
+
+      // Client pre-throttle (server still enforces)
+      const now = Date.now();
+      const win = chatSendWindowRef.current;
+      if (now - win.start >= CHAT_RATE_WINDOW_MS) {
+        win.start = now;
+        win.count = 0;
+      }
+      win.count += 1;
+      if (win.count > CHAT_CLIENT_MAX_PER_WINDOW) return false;
+
+      try {
+        const displayName = sanitizeChatDisplayName(
+          authUser?.fingerprint
+            ? shortFingerprint(authUser.fingerprint)
+            : "",
+        );
+        // Only send allow-listed fields
+        const payload: { type: "chat"; text: string; displayName?: string } = {
+          type: "chat",
+          text: clean,
+        };
+        if (displayName) payload.displayName = displayName;
+        socket.send(JSON.stringify(payload));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [socket, socketStatus, authUser, liveFeedAccess],
+  );
   const weatherGlow = getWeatherGlow(weatherFeed);
   const enabledComtradeSectionCount =
     Object.values(comtradeSections).filter(Boolean).length;
@@ -3665,13 +4217,31 @@ function App() {
 
   const pkiVisibleCves: PkiVulnCve[] = useMemo(() => {
     if (!pkiPreview) return [];
-    return pkiKevOnly
-      ? pkiPreview.cves.filter((c) => c.knownExploited)
-      : pkiPreview.cves;
-  }, [pkiPreview, pkiKevOnly]);
+    let list = pkiPreview.cves.slice();
+    if (pkiCatalog === "kev") list = list.filter((c) => c.knownExploited);
+    else if (pkiCatalog === "nvd") list = list.filter((c) => !c.knownExploited);
+    if (pkiSeverities.size < DEFAULT_PKI_SEVERITIES.length) {
+      list = list.filter((c) => pkiSeverities.has(c.severity));
+    }
+    if (pkiCategory !== "all") {
+      list = list.filter((c) =>
+        c.categories.includes(pkiCategory as never),
+      );
+    }
+    return sortPkiCves(list, pkiSort);
+  }, [pkiPreview, pkiCatalog, pkiSeverities, pkiCategory, pkiSort]);
 
-  /** Trade Pulse–style arcs + expandable + points for PKI CVEs. */
-  const pkiGlobeArcs: GlobeArc[] = useMemo(() => {
+  /** Filtered / paged PKI arcs — sparse default for globe performance. */
+  const pkiArcSelection: PkiArcSelection = useMemo(() => {
+    const empty: PkiArcSelection = {
+      arcs: [],
+      total: 0,
+      page: 0,
+      pageCount: 1,
+      pageSize: PKI_DENSITY_LIMITS[pkiDensity],
+      kevCount: 0,
+      nvdCount: 0,
+    };
     if (
       !showPkiPanel ||
       !pkiShowMap ||
@@ -3679,10 +4249,39 @@ function App() {
       !pkiPreview?.cves?.length ||
       !pkiPreview?.hotspots?.length
     ) {
-      return [];
+      return empty;
     }
-    return buildPkiGlobeArcs(pkiPreview, pkiKevOnly);
-  }, [showPkiPanel, pkiShowMap, pkiStatus, pkiPreview, pkiKevOnly]);
+    return buildPkiGlobeArcs(pkiPreview, {
+      catalog: pkiCatalog,
+      severities: pkiSeverities,
+      category: pkiCategory,
+      focusCve: pkiFocusCve,
+      sort: pkiSort,
+      density: pkiDensity,
+      page: pkiArcPage,
+    });
+  }, [
+    showPkiPanel,
+    pkiShowMap,
+    pkiStatus,
+    pkiPreview,
+    pkiCatalog,
+    pkiSeverities,
+    pkiCategory,
+    pkiFocusCve,
+    pkiSort,
+    pkiDensity,
+    pkiArcPage,
+  ]);
+
+  const pkiGlobeArcs = pkiArcSelection.arcs;
+
+  // Clamp page if filters shrink the set
+  useEffect(() => {
+    if (pkiArcPage > 0 && pkiArcPage >= pkiArcSelection.pageCount) {
+      setPkiArcPage(Math.max(0, pkiArcSelection.pageCount - 1));
+    }
+  }, [pkiArcPage, pkiArcSelection.pageCount]);
   const unGlobalMarkerColor =
     unGlobalOverlayMarkers.length > 0
       ? ([0, 0.65, 1] as [number, number, number])
@@ -5000,130 +5599,26 @@ function App() {
         </div>
       )}
 
+      {showSiteTour && <SiteTour onDone={dismissSiteTour} />}
+
       <nav className="nav-bar" ref={navBarRef}>
         <div className="nav-left">
-          <h1 className="nav-title">FEDERALKEY</h1>
+          <a
+            className="nav-title"
+            href="https://federalkey.org"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open federalkey.org"
+          >
+            FEDERALKEY
+          </a>
         </div>
 
         <div className="nav-center">
-          {/* ABOUT button commented out / sent to background
-          <button
-            className="nav-btn"
-            onClick={() =>
-              runRateLimitedButtonAction("about-open", () => setShowAbout(true))
-            }
-          >
-            ABOUT
-          </button>
-          */}
-          <button
-            className={`nav-btn ${showPkiPanel ? "nav-btn-active" : ""}`}
-            onClick={() =>
-              runRateLimitedButtonAction("cve-feed", () => {
-                if (showPkiPanel) {
-                  setIsPkiPanelMinimized((m) => !m);
-                  return;
-                }
-                void loadPkiVulns();
-              })
-            }
-          >
-            CVE / PKI
-          </button>
-          <button
-            className="nav-btn trade-pulse-nav-btn"
-            onClick={() =>
-              runRateLimitedButtonAction("trade-pulse-load", () => {
-                void loadTradePulsePreview();
-              })
-            }
-          >
-            TRADE PULSE
-          </button>
-          <button
-            className="nav-btn"
-            onClick={() =>
-              runRateLimitedButtonAction("unodc-load", () => {
-                void loadUnodcHotspots();
-              })
-            }
-          >
-            UNODC
-          </button>
-          <button
-            className="nav-btn"
-            onClick={() =>
-              runRateLimitedButtonAction("un-global-load", () => {
-                void loadUnGlobalPreview();
-              })
-            }
-          >
-            UN LAYER
-          </button>
+          {/* Feature buttons live in the bottom macOS-style dock */}
         </div>
 
         <div className="nav-right">
-          <button
-            type="button"
-            className={`weather-icon-btn transit-icon-btn ${
-              transitStatus === "loading" ? "weather-icon-loading" : ""
-            } ${showTransitPanel ? "transit-icon-btn-open" : ""}`}
-            onClick={() => {
-              void loadLocalTransit();
-            }}
-            aria-label="Local transit options"
-            title="Local transit"
-            aria-pressed={showTransitPanel}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="5" y="3.5" width="14" height="14" rx="2.5" />
-              <path d="M5 10.5h14" />
-              <path d="M9 17.5v2.5" />
-              <path d="M15 17.5v2.5" />
-              <path d="M8 20h8" />
-              <circle cx="9" cy="13.5" r="1" />
-              <circle cx="15" cy="13.5" r="1" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={`weather-icon-btn nearby-icon-btn ${
-              nearbyStatus === "loading" ? "weather-icon-loading" : ""
-            } ${showNearbyPanel ? "nearby-icon-btn-open" : ""}`}
-            onClick={() => {
-              void loadNearbyPaths();
-            }}
-            aria-label="Nearby street traces"
-            title="Nearby streets & paths"
-            aria-pressed={showNearbyPanel}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 18V6" />
-              <path d="M10 18V9" />
-              <path d="M16 18V4" />
-              <path d="M20 14H4" />
-              <path d="M20 10H10" />
-              <circle cx="4" cy="14" r="1.2" />
-              <circle cx="10" cy="10" r="1.2" />
-              <circle cx="16" cy="14" r="1.2" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={`weather-icon-btn ${weatherStatus === "loading" ? "weather-icon-loading" : ""}`}
-            onClick={() =>
-              runRateLimitedButtonAction("weather-load", () => {
-                void loadWeatherFeed();
-              })
-            }
-            aria-label="Load current weather"
-            title="Current weather"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7.5 17.5H17a4 4 0 0 0 .6-7.95 6 6 0 0 0-11.15 1.9A3.2 3.2 0 0 0 7.5 17.5Z" />
-              <path d="m13 11-3 5h3l-2 5 5-7h-3l2-3Z" />
-            </svg>
-          </button>
           <button
             className="nav-menu-btn"
             onClick={() =>
@@ -5137,6 +5632,68 @@ function App() {
           </button>
         </div>
       </nav>
+
+      {/* Top chrome: globe controls + Live Feed (tutorial is also top-fixed) */}
+      <div className="top-chrome" aria-label="Globe and live feed controls">
+        <div id="globe-controls-slot" className="globe-controls-slot" />
+        <ActivityFeed
+          open={showActivityMenu}
+          onToggle={() =>
+            runRateLimitedButtonAction("activity-toggle", () =>
+              setShowActivityMenu((open) => !open),
+            )
+          }
+          onClose={() =>
+            runRateLimitedButtonAction("activity-close", () =>
+              setShowActivityMenu(false),
+            )
+          }
+          counter={counter}
+          events={activityFeed}
+          onClear={() =>
+            runRateLimitedButtonAction("activity-clear", clearActivityFeed)
+          }
+          isPaused={isFeedPaused}
+          onTogglePause={() =>
+            runRateLimitedButtonAction("activity-pause", () =>
+              setIsFeedPaused((paused) => !paused),
+            )
+          }
+          isCompact={isCompactFeed}
+          onToggleCompact={() =>
+            runRateLimitedButtonAction("activity-compact", () =>
+              setIsCompactFeed((compact) => !compact),
+            )
+          }
+          filter={activityFilter}
+          onFilterChange={handleActivityFilterChange}
+          socketStatus={socketStatus}
+          isSocketConnected={socketStatus === "connected"}
+          access={liveFeedAccess}
+          checkoutBusy={checkoutBusy}
+          onReconnectSocket={() => {
+            setSocketStatus("connecting");
+            try {
+              socket.reconnect();
+            } catch {
+              // PartySocket may already be mid-retry
+            }
+          }}
+          onSignIn={() => {
+            setShowActivityMenu(false);
+            setShowAuthPanel(true);
+            setAuthMode("login");
+            setAuthMessage(
+              "Sign in, then buy Stripe access to unlock Live Feed and web support chat.",
+            );
+          }}
+          onBuyAccess={() => {
+            void startTransitCheckout();
+          }}
+          chatMessages={chatMessages}
+          onSendChat={sendChatMessage}
+        />
+      </div>
 
       {showTransitPanel && (
         <FloatingChrome
@@ -5366,7 +5923,7 @@ function App() {
                   </span>
                   <div className="nearby-footer-actions">
                     <a
-                      href={nearbyPreview.sourceUrl}
+                      href={safeGlobeHref(nearbyPreview.sourceUrl)}
                       target="_blank"
                       rel="noopener noreferrer"
                     >
@@ -5858,7 +6415,7 @@ function App() {
                 <span>{formatPreviewDate(comtradePreview.updatedAt)}</span>
                 <div className="un-footer-actions">
                   <a
-                    href={comtradePreview.sourceUrl}
+                    href={safeGlobeHref(comtradePreview.sourceUrl)}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -5881,7 +6438,85 @@ function App() {
         </FloatingChrome>
       )}
 
-      {showTradePulsePanel && (
+      {showUnHub && (
+        <UnHubPage
+          onClose={closeUnHub}
+          onViewGlobe={closeUnHub}
+          tradePulseOn={showTradePulsePanel}
+          tradePulseStatus={tradePulseStatus}
+          tradePulseError={tradePulseError}
+          tradePulsePreview={tradePulsePreview}
+          tradePulsePeriod={tradePulsePeriod}
+          tradePulseYearOptions={tradePulseYearOptions}
+          tradePulseLayers={tradePulseLayers}
+          tradePulseLayerLabels={TRADE_PULSE_LAYER_LABELS}
+          tradePulseLayerShortLabels={TRADE_PULSE_LAYER_SHORT_LABELS}
+          tradePulseLayerColors={TRADE_PULSE_LAYER_COLORS}
+          tradePulseLayersList={TRADE_PULSE_LAYERS}
+          onToggleTradePulse={() => {
+            if (showTradePulsePanel) {
+              setShowTradePulsePanel(false);
+            } else {
+              void loadTradePulsePreview(false);
+            }
+          }}
+          onSelectTradePulsePeriod={(period) => selectTradePulsePeriod(period)}
+          onToggleTradePulseLayer={toggleTradePulseLayer}
+          onToggleAllTradePulseLayers={toggleAllTradePulseLayers}
+          onRefreshTradePulse={() => {
+            void loadTradePulsePreview(false, tradePulsePeriod, {
+              keepExpanded: true,
+            });
+          }}
+          unodcOn={showUnodcPanel}
+          unodcStatus={unodcStatus}
+          unodcError={unodcError}
+          unodcPreview={unodcPreview}
+          unodcThemes={unodcThemes}
+          unodcThemeIds={UNODC_THEME_IDS}
+          unodcThemeColors={UNODC_THEME_CSS}
+          onToggleUnodc={() => {
+            if (showUnodcPanel) {
+              setShowUnodcPanel(false);
+            } else {
+              void loadUnodcHotspots(false);
+            }
+          }}
+          onToggleUnodcTheme={toggleUnodcTheme}
+          onUnodcFocusMode={setUnodcFocusMode}
+          onRefreshUnodc={() => {
+            void loadUnodcHotspots(false, { forceRefresh: true });
+          }}
+          unGlobalOn={showUnGlobalPanel}
+          unGlobalStatus={unGlobalStatus}
+          unGlobalError={unGlobalError}
+          unGlobalPreview={unGlobalPreview}
+          unGlobalSections={unGlobalSections}
+          unGlobalSectionLabels={UN_GLOBAL_SECTION_LABELS}
+          unGlobalSectionIds={[
+            "offices",
+            "activeMissions",
+            "pastMissions",
+            "memberStates",
+            "affiliates",
+            "embassies",
+          ]}
+          onToggleUnGlobal={() => {
+            if (showUnGlobalPanel) {
+              setShowUnGlobalPanel(false);
+            } else {
+              void loadUnGlobalPreview(false);
+            }
+          }}
+          onToggleUnGlobalSection={toggleUnGlobalSection}
+          onToggleAllUnGlobalSections={toggleAllUnGlobalSections}
+          onRefreshUnGlobal={() => {
+            void loadUnGlobalPreview(false);
+          }}
+        />
+      )}
+
+      {showTradePulsePanel && !showUnHub && (
         <FloatingChrome
           className={`un-panel trade-pulse-panel ${
             isTradePulsePanelMinimized ? "un-panel-minimized" : ""
@@ -6117,7 +6752,7 @@ function App() {
                       <span>{formatPreviewDate(tradePulsePreview.updatedAt)}</span>
                       <div className="un-footer-actions">
                         <a
-                          href={tradePulsePreview.sourceUrl}
+                          href={safeGlobeHref(tradePulsePreview.sourceUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
                         >
@@ -6145,7 +6780,94 @@ function App() {
         </FloatingChrome>
       )}
 
-      {showPkiPanel && (
+      {showPkiHub && (
+        <PkiHubPage
+          onClose={closePkiHub}
+          onViewGlobe={closePkiHub}
+          layerOn={showPkiPanel}
+          status={pkiStatus}
+          error={pkiError}
+          preview={pkiPreview}
+          visibleCves={pkiVisibleCves}
+          arcStats={{
+            visible: pkiGlobeArcs.length,
+            total: pkiArcSelection.total,
+            page: pkiArcSelection.page,
+            pageCount: pkiArcSelection.pageCount,
+            kevCount: pkiArcSelection.kevCount,
+            nvdCount: pkiArcSelection.nvdCount,
+          }}
+          showMap={pkiShowMap}
+          catalog={pkiCatalog}
+          density={pkiDensity}
+          sort={pkiSort}
+          sortLabels={PKI_SORT_LABELS}
+          severities={pkiSeverities}
+          severityColors={PKI_SEVERITY_COLORS}
+          category={pkiCategory}
+          categoryLabels={PKI_CATEGORY_LABELS}
+          focusCve={pkiFocusCve}
+          onToggleLayer={() => {
+            if (showPkiPanel) {
+              setShowPkiPanel(false);
+              setPkiShowMap(false);
+            } else {
+              void loadPkiVulns(false);
+            }
+          }}
+          onToggleMap={() => setPkiShowMap((v) => !v)}
+          onSetCatalog={(v) => {
+            setPkiCatalog(v);
+            setPkiFocusCve(null);
+            setPkiArcPage(0);
+          }}
+          onSetDensity={(v) => {
+            setPkiDensity(v);
+            setPkiArcPage(0);
+          }}
+          onSetSort={(v) => {
+            setPkiSort(v);
+            setPkiArcPage(0);
+          }}
+          onToggleSeverity={(sev) => {
+            setPkiSeverities((prev) => {
+              const next = new Set(prev);
+              if (next.has(sev)) {
+                if (next.size > 1) next.delete(sev);
+              } else {
+                next.add(sev);
+              }
+              return next;
+            });
+            setPkiArcPage(0);
+          }}
+          onSetCategory={(v) => {
+            setPkiCategory(v);
+            setPkiFocusCve(null);
+            setPkiArcPage(0);
+          }}
+          onPagePrev={() => setPkiArcPage((p) => Math.max(0, p - 1))}
+          onPageNext={() => setPkiArcPage((p) => p + 1)}
+          onFocusCve={(id) => {
+            setPkiFocusCve(id);
+            if (id) {
+              setShowPkiPanel(true);
+              setPkiShowMap(true);
+            }
+            setPkiArcPage(0);
+          }}
+          onRefresh={() => {
+            void loadPkiVulns(false, { forceRefresh: true });
+          }}
+          formatUpdatedAt={formatPreviewDate}
+          exposureCount={(cve) =>
+            cve.exposureIso3s?.length ||
+            (pkiPreview ? previewHotspotLinks(pkiPreview, cve.id) : 0)
+          }
+        />
+      )}
+
+      {showPkiPanel && !showPkiHub && (
         <FloatingChrome
           className={`un-panel pki-panel ${
             isPkiPanelMinimized ? "un-panel-minimized" : ""
@@ -6155,11 +6877,11 @@ function App() {
         >
           <div className="un-panel-header">
             <div>
-              <h3>CVE / PKI Map</h3>
+              <h3>Certificate &amp; PKI exposure</h3>
               <span>
                 {pkiStatus === "ready" && pkiPreview
                   ? pkiPreview.queryLabel
-                  : "Certificate · TLS · crypto-key vulns"}
+                  : "CISA KEV + NVD · vendor origin → deployment signal"}
               </span>
             </div>
             <div className="un-panel-actions">
@@ -6219,144 +6941,389 @@ function App() {
                     <div className="un-status-row">
                       <span>{pkiPreview.source}</span>
                       <strong>
-                        {pkiGlobeArcs.length} arcs · {pkiPreview.hotspotCount}{" "}
-                        countries · {pkiPreview.cveCount} CVEs
+                        {pkiGlobeArcs.length}/{pkiArcSelection.total} arcs ·{" "}
+                        {pkiArcSelection.kevCount} KEV · {pkiArcSelection.nvdCount}{" "}
+                        dotted · {pkiPreview.cveCount} CVEs
                       </strong>
                     </div>
-                    <div className="unodc-mode-row" role="group" aria-label="PKI map filters">
-                      <button
-                        type="button"
-                        className={`trade-pulse-year-btn ${pkiShowMap ? "active" : ""}`}
-                        onClick={() =>
-                          runRateLimitedButtonAction("pki-map-toggle", () =>
-                            setPkiShowMap((v) => !v),
-                          )
-                        }
-                      >
-                        {pkiShowMap ? "Arcs on" : "Arcs off"}
-                      </button>
-                      <button
-                        type="button"
-                        className={`trade-pulse-year-btn ${pkiKevOnly ? "active" : ""}`}
-                        onClick={() =>
-                          runRateLimitedButtonAction("pki-kev-only", () =>
-                            setPkiKevOnly((v) => !v),
-                          )
-                        }
-                      >
-                        {pkiKevOnly ? "KEV only" : "All CVEs"}
-                      </button>
+                    <div className="pki-method-card" aria-label="How to read arcs">
+                      <strong>How to read the arcs</strong>
+                      <ul>
+                        <li>
+                          <em>Direction</em> — vendor origin → deployment/exposure
+                          countries.
+                        </li>
+                        <li>
+                          <em>Solid</em> — CISA KEV (known exploited).{" "}
+                          <em>Dotted</em> — NVD catalog match.
+                        </li>
+                        <li>
+                          <em>Browse</em> — filter, sort, and page arcs so the globe
+                          stays smooth. Focus a CVE to see all its destinations.
+                        </li>
+                      </ul>
                     </div>
-                    <div className="unodc-legend" aria-label="PKI severity colors">
-                      <span className="unodc-legend-item active">
-                        <i
-                          className="unodc-legend-swatch"
-                          style={{ background: "#ff2d55" }}
-                        />
-                        Critical
-                      </span>
-                      <span className="unodc-legend-item active">
-                        <i
-                          className="unodc-legend-swatch"
-                          style={{ background: "#ff9f0a" }}
-                        />
-                        High
-                      </span>
-                      <span className="unodc-legend-item active">
-                        <i
-                          className="unodc-legend-swatch"
-                          style={{ background: "#ffd60a" }}
-                        />
-                        Medium
-                      </span>
-                      <span className="unodc-legend-item active">
-                        <i
-                          className="unodc-legend-swatch"
-                          style={{ background: "#64d2ff" }}
-                        />
-                        Low / other
-                      </span>
-                    </div>
-                    <p className="trade-pulse-insight pki-disclaimer">
-                      Lines link vendor origin → exposure countries (Trade Pulse style).
-                      Tap <strong>+</strong> on endpoints for CVE details. Not exploit geolocation.
-                    </p>
-                    <div className="pki-cve-list" aria-label="PKI-related CVEs">
-                      {pkiVisibleCves.slice(0, 40).map((cve) => (
-                        <article
-                          key={cve.id}
-                          className={`pki-cve-card severity-${cve.severity}`}
+
+                    <div className="pki-controls" aria-label="PKI arc controls">
+                      <div className="pki-control-row" role="group" aria-label="Map display">
+                        <button
+                          type="button"
+                          className={`trade-pulse-year-btn ${pkiShowMap ? "active" : ""}`}
+                          onClick={() =>
+                            runRateLimitedButtonAction("pki-map-toggle", () =>
+                              setPkiShowMap((v) => !v),
+                            )
+                          }
                         >
-                          <div className="pki-cve-heading">
-                            <strong>{cve.id}</strong>
-                            <span
-                              className="pki-severity-pill"
-                              style={{
-                                background: PKI_SEVERITY_COLORS[cve.severity],
-                              }}
+                          {pkiShowMap ? "Arcs on" : "Arcs off"}
+                        </button>
+                        {pkiFocusCve && (
+                          <button
+                            type="button"
+                            className="trade-pulse-year-btn active"
+                            onClick={() =>
+                              runRateLimitedButtonAction("pki-clear-focus", () => {
+                                setPkiFocusCve(null);
+                                setPkiArcPage(0);
+                              })
+                            }
+                          >
+                            Clear focus · {pkiFocusCve}
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="pki-control-label">Catalog</div>
+                      <div className="pki-control-row" role="group" aria-label="Catalog filter">
+                        {(
+                          [
+                            ["all", "All"],
+                            ["kev", "KEV solid"],
+                            ["nvd", "NVD dotted"],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={`trade-pulse-year-btn ${pkiCatalog === id ? "active" : ""}`}
+                            onClick={() =>
+                              runRateLimitedButtonAction(`pki-cat-${id}`, () => {
+                                setPkiCatalog(id);
+                                setPkiFocusCve(null);
+                                setPkiArcPage(0);
+                              })
+                            }
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="pki-control-label">Density (performance)</div>
+                      <div className="pki-control-row" role="group" aria-label="Arc density">
+                        {(
+                          [
+                            ["sparse", "Sparse 8"],
+                            ["balanced", "Balanced 14"],
+                            ["dense", "Dense 22"],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={`trade-pulse-year-btn ${pkiDensity === id ? "active" : ""}`}
+                            onClick={() =>
+                              runRateLimitedButtonAction(`pki-den-${id}`, () => {
+                                setPkiDensity(id);
+                                setPkiArcPage(0);
+                              })
+                            }
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="pki-control-label">Sort</div>
+                      <div className="pki-control-row pki-control-wrap" role="group" aria-label="Sort arcs">
+                        {(Object.keys(PKI_SORT_LABELS) as PkiSortMode[]).map(
+                          (id) => (
+                            <button
+                              key={id}
+                              type="button"
+                              className={`trade-pulse-year-btn ${pkiSort === id ? "active" : ""}`}
+                              onClick={() =>
+                                runRateLimitedButtonAction(`pki-sort-${id}`, () => {
+                                  setPkiSort(id);
+                                  setPkiArcPage(0);
+                                })
+                              }
                             >
-                              {cve.severity}
-                              {cve.cvss != null ? ` ${cve.cvss.toFixed(1)}` : ""}
-                            </span>
-                            {cve.knownExploited && (
-                              <span className="pki-kev-pill">KEV</span>
-                            )}
-                          </div>
-                          <p className="pki-cve-title">{cve.title}</p>
-                          {(cve.vendor || cve.product) && (
+                              {PKI_SORT_LABELS[id]}
+                            </button>
+                          ),
+                        )}
+                      </div>
+
+                      <div className="pki-control-label">Severity</div>
+                      <div className="pki-control-row pki-control-wrap" role="group" aria-label="Severity filter">
+                        {(
+                          [
+                            "critical",
+                            "high",
+                            "medium",
+                            "low",
+                          ] as PkiVulnSeverity[]
+                        ).map((sev) => {
+                          const on = pkiSeverities.has(sev);
+                          return (
+                            <button
+                              key={sev}
+                              type="button"
+                              className={`trade-pulse-year-btn ${on ? "active" : ""}`}
+                              style={
+                                on
+                                  ? {
+                                      borderColor: PKI_SEVERITY_COLORS[sev],
+                                    }
+                                  : undefined
+                              }
+                              onClick={() =>
+                                runRateLimitedButtonAction(`pki-sev-${sev}`, () => {
+                                  setPkiSeverities((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(sev)) {
+                                      if (next.size > 1) next.delete(sev);
+                                    } else {
+                                      next.add(sev);
+                                    }
+                                    return next;
+                                  });
+                                  setPkiArcPage(0);
+                                })
+                              }
+                            >
+                              {sev}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="pki-control-label">Class</div>
+                      <div className="pki-control-row pki-control-wrap" role="group" aria-label="Category filter">
+                        <button
+                          type="button"
+                          className={`trade-pulse-year-btn ${pkiCategory === "all" ? "active" : ""}`}
+                          onClick={() =>
+                            runRateLimitedButtonAction("pki-class-all", () => {
+                              setPkiCategory("all");
+                              setPkiArcPage(0);
+                            })
+                          }
+                        >
+                          All classes
+                        </button>
+                        {Object.entries(PKI_CATEGORY_LABELS).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={`trade-pulse-year-btn ${pkiCategory === id ? "active" : ""}`}
+                            onClick={() =>
+                              runRateLimitedButtonAction(`pki-class-${id}`, () => {
+                                setPkiCategory(id);
+                                setPkiFocusCve(null);
+                                setPkiArcPage(0);
+                              })
+                            }
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="pki-pager" role="group" aria-label="Arc pages">
+                        <button
+                          type="button"
+                          className="trade-pulse-year-btn"
+                          disabled={pkiArcSelection.page <= 0}
+                          onClick={() =>
+                            runRateLimitedButtonAction("pki-page-prev", () =>
+                              setPkiArcPage((p) => Math.max(0, p - 1)),
+                            )
+                          }
+                        >
+                          ← Prev
+                        </button>
+                        <span className="pki-pager-status">
+                          Page {pkiArcSelection.page + 1}/
+                          {pkiArcSelection.pageCount}
+                          {pkiArcSelection.total > 0
+                            ? ` · showing ${pkiGlobeArcs.length} of ${pkiArcSelection.total}`
+                            : ""}
+                        </span>
+                        <button
+                          type="button"
+                          className="trade-pulse-year-btn"
+                          disabled={
+                            pkiArcSelection.page >= pkiArcSelection.pageCount - 1
+                          }
+                          onClick={() =>
+                            runRateLimitedButtonAction("pki-page-next", () =>
+                              setPkiArcPage((p) => p + 1),
+                            )
+                          }
+                        >
+                          Next →
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="pki-legend" aria-label="PKI map legend">
+                      <div className="pki-legend-row">
+                        <span className="pki-legend-item">
+                          <i
+                            className="pki-legend-swatch"
+                            style={{ background: PKI_SEVERITY_COLORS.critical }}
+                          />
+                          Critical
+                        </span>
+                        <span className="pki-legend-item">
+                          <i
+                            className="pki-legend-swatch"
+                            style={{ background: PKI_SEVERITY_COLORS.high }}
+                          />
+                          High
+                        </span>
+                        <span className="pki-legend-item">
+                          <i
+                            className="pki-legend-swatch"
+                            style={{ background: PKI_SEVERITY_COLORS.medium }}
+                          />
+                          Medium
+                        </span>
+                        <span className="pki-legend-item">
+                          <i
+                            className="pki-legend-swatch"
+                            style={{ background: PKI_SEVERITY_COLORS.low }}
+                          />
+                          Low
+                        </span>
+                      </div>
+                      <div className="pki-legend-row pki-legend-line-styles">
+                        <span className="pki-legend-item">
+                          <i className="pki-legend-line solid" />
+                          KEV solid
+                        </span>
+                        <span className="pki-legend-item">
+                          <i className="pki-legend-line dashed" />
+                          NVD dotted
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="pki-cve-list" aria-label="PKI-related CVEs">
+                      {pkiVisibleCves.slice(0, 60).map((cve) => {
+                        const destCount =
+                          cve.exposureIso3s?.length ||
+                          previewHotspotLinks(pkiPreview, cve.id);
+                        const focused = pkiFocusCve === cve.id;
+                        return (
+                          <article
+                            key={cve.id}
+                            className={`pki-cve-card severity-${cve.severity}${
+                              focused ? " pki-cve-card-focused" : ""
+                            }`}
+                          >
+                            <div className="pki-cve-heading">
+                              <strong>{cve.id}</strong>
+                              <span
+                                className="pki-severity-pill"
+                                style={{
+                                  background: PKI_SEVERITY_COLORS[cve.severity],
+                                }}
+                              >
+                                {cve.severity}
+                                {cve.cvss != null
+                                  ? ` · CVSS ${cve.cvss.toFixed(1)}`
+                                  : ""}
+                              </span>
+                              {cve.knownExploited && (
+                                <span className="pki-kev-pill">KEV</span>
+                              )}
+                              {!cve.knownExploited && (
+                                <span className="pki-nvd-pill">NVD</span>
+                              )}
+                            </div>
+                            <p className="pki-cve-title">{cve.title}</p>
                             <p className="pki-cve-meta">
-                              {[cve.vendor, cve.product].filter(Boolean).join(" · ")}
+                              {[cve.vendor, cve.product]
+                                .filter(Boolean)
+                                .join(" · ") || "Vendor / product unspecified"}
+                              {" · "}
+                              {destCount} exposure{" "}
+                              {destCount === 1 ? "country" : "countries"}
                             </p>
-                          )}
-                          <div className="pki-cve-tags">
-                            {cve.categories.map((cat) => (
-                              <span key={`${cve.id}-${cat}`}>{cat}</span>
-                            ))}
-                          </div>
-                          <div className="un-goal-meta">
-                            <a
-                              href={cve.nvdUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              NVD
-                            </a>
-                            {cve.cisaUrl && (
+                            <div className="pki-cve-tags">
+                              {cve.categories.map((cat) => (
+                                <span key={`${cve.id}-${cat}`}>
+                                  {PKI_CATEGORY_LABELS[cat] || cat}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="un-goal-meta pki-cve-actions">
+                              <button
+                                type="button"
+                                className={focused ? "active" : ""}
+                                onClick={() =>
+                                  runRateLimitedButtonAction(
+                                    `pki-focus-${cve.id}`,
+                                    () => {
+                                      setPkiFocusCve(focused ? null : cve.id);
+                                      setPkiShowMap(true);
+                                      setPkiArcPage(0);
+                                    },
+                                  )
+                                }
+                              >
+                                {focused ? "Unfocus map" : "Show on map"}
+                              </button>
                               <a
-                                href={cve.cisaUrl}
+                                href={safeGlobeHref(cve.nvdUrl)}
                                 target="_blank"
                                 rel="noopener noreferrer"
                               >
-                                CISA KEV
+                                NVD
                               </a>
-                            )}
-                          </div>
-                        </article>
-                      ))}
+                              {cve.cisaUrl && (
+                                <a
+                                  href={safeGlobeHref(cve.cisaUrl)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  CISA KEV
+                                </a>
+                              )}
+                            </div>
+                          </article>
+                        );
+                      })}
                     </div>
                     <div className="un-footer">
                       <span>{formatPreviewDate(pkiPreview.updatedAt)}</span>
                       <div className="un-footer-actions">
                         <a
-                          href={pkiPreview.cisaKevUrl}
+                          href={safeGlobeHref(pkiPreview.cisaKevUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
                         >
                           CISA KEV
                         </a>
                         <a
-                          href={pkiPreview.nvdUrl}
+                          href={safeGlobeHref(pkiPreview.nvdUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
                         >
                           NVD
-                        </a>
-                        <a
-                          href="https://cvefeed.io/dashboard/"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          CVE Feed
                         </a>
                         <button
                           type="button"
@@ -6378,7 +7345,7 @@ function App() {
         </FloatingChrome>
       )}
 
-      {showUnodcPanel && (
+      {showUnodcPanel && !showUnHub && (
         <FloatingChrome
           className={`un-panel unodc-panel ${
             isUnodcPanelMinimized ? "un-panel-minimized" : ""
@@ -6608,7 +7575,7 @@ function App() {
                                 {unodcThemes[theme.id] ? "On globe" : "Off"}
                               </button>
                               <a
-                                href={theme.portalUrl}
+                                href={safeGlobeHref(theme.portalUrl)}
                                 target="_blank"
                                 rel="noopener noreferrer"
                               >
@@ -6634,14 +7601,14 @@ function App() {
                       <span>{formatPreviewDate(unodcPreview.updatedAt)}</span>
                       <div className="un-footer-actions">
                         <a
-                          href={unodcPreview.datasearchUrl}
+                          href={safeGlobeHref(unodcPreview.datasearchUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
                         >
                           Datasearch
                         </a>
                         <a
-                          href={unodcPreview.sourceUrl}
+                          href={safeGlobeHref(unodcPreview.sourceUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
                         >
@@ -6669,7 +7636,7 @@ function App() {
         </FloatingChrome>
       )}
 
-      {showUnGlobalPanel && (
+      {showUnGlobalPanel && !showUnHub && (
         <FloatingChrome
           className={`un-panel un-layer-panel ${
             isUnGlobalPanelMinimized ? "un-panel-minimized" : ""
@@ -6892,14 +7859,14 @@ function App() {
                 <span>Updated {formatPreviewDate(unGlobalPreview.updatedAt)}</span>
                 <div className="un-footer-actions">
                   <a
-                    href={unGlobalPreview.sourceUrl}
+                    href={safeGlobeHref(unGlobalPreview.sourceUrl)}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
                     Source
                   </a>
                   <a
-                    href={unGlobalPreview.apiUrl}
+                    href={safeGlobeHref(unGlobalPreview.apiUrl)}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -6938,64 +7905,144 @@ function App() {
         </div>
       </div>
 
-      <div className="bottom-dock">
-        <div id="globe-controls-slot" className="globe-controls-slot" />
-        <ActivityFeed
-          open={showActivityMenu}
-          onToggle={() =>
-            runRateLimitedButtonAction("activity-toggle", () =>
-              setShowActivityMenu((open) => !open),
-            )
-          }
-          onClose={() =>
-            runRateLimitedButtonAction("activity-close", () =>
-              setShowActivityMenu(false),
-            )
-          }
-          counter={counter}
-          events={activityFeed}
-          onClear={() =>
-            runRateLimitedButtonAction("activity-clear", clearActivityFeed)
-          }
-          isPaused={isFeedPaused}
-          onTogglePause={() =>
-            runRateLimitedButtonAction("activity-pause", () =>
-              setIsFeedPaused((paused) => !paused),
-            )
-          }
-          isCompact={isCompactFeed}
-          onToggleCompact={() =>
-            runRateLimitedButtonAction("activity-compact", () =>
-              setIsCompactFeed((compact) => !compact),
-            )
-          }
-          filter={activityFilter}
-          onFilterChange={handleActivityFilterChange}
-          socketStatus={socketStatus}
-          isSocketConnected={socketStatus === "connected"}
-          access={liveFeedAccess}
-          checkoutBusy={checkoutBusy}
-          onReconnectSocket={() => {
-            setSocketStatus("connecting");
-            try {
-              socket.reconnect();
-            } catch {
-              // PartySocket may already be mid-retry
+      {/* macOS-style dock — feature tools (MENU stays in the top nav) */}
+      <nav className="mac-dock" aria-label="App tools dock">
+        <div className="mac-dock-shelf" aria-hidden="true" />
+        <div className="mac-dock-inner">
+          <button
+            type="button"
+            className={`mac-dock-item pki-hub-icon-btn ${
+              showPkiHub ? "pki-hub-icon-btn-open mac-dock-item-open" : ""
+            } ${
+              showPkiPanel && pkiShowMap
+                ? "pki-hub-icon-btn-active mac-dock-item-active"
+                : ""
+            }`}
+            onClick={() =>
+              runRateLimitedButtonAction("pki-hub-open", () => {
+                if (showPkiHub) {
+                  closePkiHub();
+                } else {
+                  openPkiHub();
+                }
+              })
             }
-          }}
-          onSignIn={() => {
-            setShowActivityMenu(false);
-            setShowAuthPanel(true);
-            setAuthMode("login");
-            setAuthMessage(
-              "Sign in, then buy Stripe access to unlock Live Feed.",
-            );
-          }}
-          onBuyAccess={() => {
-            void startTransitCheckout();
-          }}
-        />
-      </div>
+            aria-label="PKI and CVE exposure hub"
+            title="PKI / CVE hub"
+            aria-pressed={showPkiHub}
+          >
+            <span className="mac-dock-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <rect x="6" y="11" width="12" height="10" rx="1.5" />
+                <path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3" />
+                <circle cx="12" cy="15.5" r="1.2" />
+                <path d="M12 16.7v1.8" />
+              </svg>
+            </span>
+            <span className="mac-dock-label">PKI</span>
+          </button>
+          <button
+            type="button"
+            className={`mac-dock-item un-hub-icon-btn ${
+              showUnHub ? "un-hub-icon-btn-open mac-dock-item-open" : ""
+            } ${
+              showTradePulsePanel || showUnodcPanel || showUnGlobalPanel
+                ? "un-hub-icon-btn-active mac-dock-item-active"
+                : ""
+            }`}
+            onClick={() =>
+              runRateLimitedButtonAction("un-hub-open", () => {
+                if (showUnHub) {
+                  closeUnHub();
+                } else {
+                  openUnHub();
+                }
+              })
+            }
+            aria-label="UN data hub — Trade Pulse, UNODC, UN Global"
+            title="UN data hub"
+            aria-pressed={showUnHub}
+          >
+            <span className="mac-dock-icon mac-dock-emoji" aria-hidden="true">
+              🇺🇳
+            </span>
+            <span className="mac-dock-label">UN</span>
+          </button>
+          <button
+            type="button"
+            className={`mac-dock-item transit-icon-btn ${
+              transitStatus === "loading" ? "weather-icon-loading" : ""
+            } ${showTransitPanel ? "transit-icon-btn-open mac-dock-item-open" : ""}`}
+            onClick={() => {
+              void loadLocalTransit();
+            }}
+            aria-label="Local transit options"
+            title="Local transit"
+            aria-pressed={showTransitPanel}
+          >
+            <span className="mac-dock-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <rect x="5" y="3.5" width="14" height="14" rx="2.5" />
+                <path d="M5 10.5h14" />
+                <path d="M9 17.5v2.5" />
+                <path d="M15 17.5v2.5" />
+                <path d="M8 20h8" />
+                <circle cx="9" cy="13.5" r="1" />
+                <circle cx="15" cy="13.5" r="1" />
+              </svg>
+            </span>
+            <span className="mac-dock-label">Transit</span>
+          </button>
+          <button
+            type="button"
+            className={`mac-dock-item nearby-icon-btn ${
+              nearbyStatus === "loading" ? "weather-icon-loading" : ""
+            } ${showNearbyPanel ? "nearby-icon-btn-open mac-dock-item-open" : ""}`}
+            onClick={() => {
+              void loadNearbyPaths();
+            }}
+            aria-label="Nearby street traces"
+            title="Nearby streets & paths"
+            aria-pressed={showNearbyPanel}
+          >
+            <span className="mac-dock-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M4 18V6" />
+                <path d="M10 18V9" />
+                <path d="M16 18V4" />
+                <path d="M20 14H4" />
+                <path d="M20 10H10" />
+                <circle cx="4" cy="14" r="1.2" />
+                <circle cx="10" cy="10" r="1.2" />
+                <circle cx="16" cy="14" r="1.2" />
+              </svg>
+            </span>
+            <span className="mac-dock-label">Nearby</span>
+          </button>
+          <span className="mac-dock-separator" aria-hidden="true" />
+          <button
+            type="button"
+            className={`mac-dock-item ${
+              weatherStatus === "loading" ? "weather-icon-loading" : ""
+            } ${weatherFeed ? "mac-dock-item-active" : ""}`}
+            onClick={() =>
+              runRateLimitedButtonAction("weather-load", () => {
+                void loadWeatherFeed();
+              })
+            }
+            aria-label="Load current weather"
+            title="Current weather"
+          >
+            <span className="mac-dock-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M7.5 17.5H17a4 4 0 0 0 .6-7.95 6 6 0 0 0-11.15 1.9A3.2 3.2 0 0 0 7.5 17.5Z" />
+                <path d="m13 11-3 5h3l-2 5 5-7h-3l2-3Z" />
+              </svg>
+            </span>
+            <span className="mac-dock-label">Weather</span>
+          </button>
+        </div>
+      </nav>
 
       {showAbout && (
         <div className="modal-overlay" onClick={() => setShowAbout(false)}>
@@ -7050,332 +8097,30 @@ function App() {
         <FloatingChrome className="menu-dropdown" aria-label="Global controls menu">
           <div className="menu-dropdown-scroll">
           <div className="menu-dropdown-inner">
-          <div className="menu-section">
-            <div className="menu-section-title">Comtrade</div>
-            <div className="menu-comtrade-summary" aria-label="Comtrade snapshot summary">
-              <div className="menu-comtrade-summary-head">
-                <span>{comtradeMenuStatus}</span>
-                <strong>{comtradeMenuSource}</strong>
-              </div>
-              <small>{comtradeMenuQuery}</small>
-              <div className="menu-comtrade-metrics">
-                <div>
-                  <span>Exports</span>
-                  <strong>
-                    {comtradePreview
-                      ? formatUsd(
-                          comtradePreview.exportsUsd,
-                          comtradePreview.stale,
-                          comtradeValueMode,
-                        )
-                      : "n/a"}
-                  </strong>
-                </div>
-                <div>
-                  <span>Imports</span>
-                  <strong>
-                    {comtradePreview
-                      ? formatUsd(
-                          comtradePreview.importsUsd,
-                          comtradePreview.stale,
-                          comtradeValueMode,
-                        )
-                      : "n/a"}
-                  </strong>
-                </div>
-                <div>
-                  <span>Balance</span>
-                  <strong>
-                    {comtradePreview
-                      ? formatSignedUsd(
-                          comtradePreview.tradeBalanceUsd,
-                          comtradePreview.stale,
-                          comtradeValueMode,
-                        )
-                      : "n/a"}
-                  </strong>
-                </div>
-                <div>
-                  <span>Updated</span>
-                  <strong>{comtradeMenuUpdated}</strong>
-                </div>
-              </div>
-            </div>
+          <div className="menu-section menu-section-un-hub">
+            <div className="menu-section-title">UN Data Hub</div>
             <button
               type="button"
-              className={`menu-toggle-item ${showComtradePanel ? "active" : ""}`}
-              aria-pressed={showComtradePanel}
+              className={`menu-toggle-item ${showUnHub ? "active" : ""}`}
+              aria-pressed={showUnHub}
               onClick={() =>
-                runRateLimitedButtonAction(
-                  "menu-comtrade-panel",
-                  toggleComtradePanelFromMenu,
-                )
+                runRateLimitedButtonAction("menu-un-hub", () => openUnHub())
               }
             >
               <div className="menu-toggle-copy">
-                <span>Panel</span>
-                <small>Trade totals and records</small>
+                <span>🇺🇳 UN hub</span>
+                <small>Trade Pulse · UNODC · UN Global</small>
               </div>
-              <strong>{showComtradePanel ? "Open" : "Closed"}</strong>
-            </button>
-            {COMTRADE_SECTIONS.map((section) => (
-                <button
-                  type="button"
-                  className={`menu-toggle-item ${
-                    comtradeSections[section] ? "active" : ""
-                  }`}
-                  aria-pressed={comtradeSections[section]}
-                  key={section}
-                  onClick={() =>
-                    runRateLimitedButtonAction(`menu-comtrade-${section}`, () =>
-                      toggleComtradeSection(section),
-                    )
-                  }
-                >
-                  <div className="menu-toggle-copy">
-                    <span>{COMTRADE_SECTION_LABELS[section]}</span>
-                    <small>{getComtradeSectionDetail(section)}</small>
-                  </div>
-                  <strong>{comtradeSections[section] ? "On" : "Off"}</strong>
-                </button>
-              ))}
-            <button
-              type="button"
-              className={`menu-toggle-item ${isFullUsdMode ? "active" : ""}`}
-              aria-pressed={isFullUsdMode}
-              onClick={() =>
-                runRateLimitedButtonAction("menu-comtrade-usd-mode", () =>
-                  setComtradeValueMode((mode) => (mode === "compact" ? "full" : "compact")),
-                )
-              }
-            >
-              <div className="menu-toggle-copy">
-                <span>USD format</span>
-                <small>{isFullUsdMode ? "Full figures" : "Compact"}</small>
-              </div>
-              <strong>{isFullUsdMode ? "Full" : "Compact"}</strong>
+              <strong>Open</strong>
             </button>
             <div className="menu-section-meta">
-              {enabledComtradeSectionCount}/4 sections
-            </div>
-          </div>
-          <div className="menu-section menu-section-trade-pulse">
-            <div className="menu-section-title">Trade Pulse</div>
-            <button
-              type="button"
-              className={`menu-toggle-item ${showTradePulsePanel ? "active" : ""}`}
-              aria-pressed={showTradePulsePanel}
-              onClick={() =>
-                runRateLimitedButtonAction("menu-trade-pulse-panel", () => {
-                  if (showTradePulsePanel) {
-                    setIsTradePulsePanelMinimized((minimized) => !minimized);
-                  } else {
-                    void loadTradePulsePreview(false);
-                  }
-                })
-              }
-            >
-              <div className="menu-toggle-copy">
-                <span>Panel</span>
-                <small>Globe dependency radar</small>
-              </div>
-              <strong>
-                {showTradePulsePanel
-                  ? isTradePulsePanelMinimized
-                    ? "Minimized"
-                    : "Open"
-                  : "Closed"}
-              </strong>
-            </button>
-            <div className="menu-trade-pulse-years" role="group" aria-label="Trade year">
-              {tradePulseYearOptions.map((year) => (
-                <button
-                  type="button"
-                  key={year}
-                  className={`menu-toggle-item menu-trade-pulse-year ${
-                    tradePulsePeriod === year ? "active" : ""
-                  }`}
-                  aria-pressed={tradePulsePeriod === year}
-                  onClick={() =>
-                    runRateLimitedButtonAction(`menu-trade-pulse-year-${year}`, () => {
-                      selectTradePulsePeriod(year);
-                    })
-                  }
-                >
-                  <div className="menu-toggle-copy">
-                    <span>{year}</span>
-                    <small>Annual period</small>
-                  </div>
-                  <strong>{tradePulsePeriod === year ? "On" : "Off"}</strong>
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className={`menu-toggle-item ${allTradePulseLayersEnabled ? "active" : ""}`}
-              aria-pressed={allTradePulseLayersEnabled}
-              onClick={() =>
-                runRateLimitedButtonAction(
-                  "menu-trade-pulse-all",
-                  toggleAllTradePulseLayers,
-                )
-              }
-            >
-              <div className="menu-toggle-copy">
-                <span>All layers</span>
-                <small>Show every radar layer</small>
-              </div>
-              <strong>{allTradePulseLayersEnabled ? "On" : "Mixed"}</strong>
-            </button>
-            <div className="menu-trade-pulse-layers" role="group" aria-label="Trade Pulse layers">
-              {TRADE_PULSE_LAYERS.map((layer) => (
-                <button
-                  type="button"
-                  className={`menu-toggle-item menu-trade-pulse-layer ${
-                    tradePulseLayers[layer] ? "active" : ""
-                  }`}
-                  aria-pressed={tradePulseLayers[layer]}
-                  key={layer}
-                  onClick={() =>
-                    runRateLimitedButtonAction(`menu-trade-pulse-${layer}`, () =>
-                      toggleTradePulseLayer(layer),
-                    )
-                  }
-                >
-                  <div className="menu-toggle-copy">
-                    <span>{TRADE_PULSE_LAYER_SHORT_LABELS[layer]}</span>
-                    <small className="menu-trade-pulse-detail">
-                      {TRADE_PULSE_LAYER_LABELS[layer]}
-                    </small>
-                  </div>
-                  <strong>{tradePulseLayers[layer] ? "On" : "Off"}</strong>
-                </button>
-              ))}
-            </div>
-            <div className="menu-section-meta">
-              {enabledTradePulseLayerCount}/8 pulse layers visible
-            </div>
-          </div>
-          <div className="menu-section">
-            <div className="menu-section-title">UNODC Hotspots</div>
-            <button
-              type="button"
-              className={`menu-toggle-item ${showUnodcPanel ? "active" : ""}`}
-              aria-pressed={showUnodcPanel}
-              onClick={() =>
-                runRateLimitedButtonAction("menu-unodc-panel", () => {
-                  if (showUnodcPanel) {
-                    setIsUnodcPanelMinimized((m) => !m);
-                  } else {
-                    void loadUnodcHotspots(false);
-                  }
-                })
-              }
-            >
-              <div className="menu-toggle-copy">
-                <span>Panel</span>
-                <small>Theme hotspots on globe</small>
-              </div>
-              <strong>
-                {showUnodcPanel
-                  ? isUnodcPanelMinimized
-                    ? "Minimized"
-                    : "Open"
-                  : "Closed"}
-              </strong>
-            </button>
-            {UNODC_THEME_IDS.map((themeId) => {
-              const theme = unodcPreview?.themes.find((t) => t.id === themeId);
-              return (
-                <button
-                  type="button"
-                  key={themeId}
-                  className={`menu-toggle-item ${unodcThemes[themeId] ? "active" : ""}`}
-                  aria-pressed={unodcThemes[themeId]}
-                  onClick={() =>
-                    runRateLimitedButtonAction(`menu-unodc-${themeId}`, () =>
-                      toggleUnodcTheme(themeId),
-                    )
-                  }
-                >
-                  <div className="menu-toggle-copy">
-                    <span>{theme?.label || themeId}</span>
-                    <small>
-                      {theme
-                        ? theme.dataMode === "live"
-                          ? `${theme.hotspotCount} hotspots`
-                          : "Portal tables"
-                        : "Load panel for data"}
-                    </small>
-                  </div>
-                  <strong>{unodcThemes[themeId] ? "On" : "Off"}</strong>
-                </button>
-              );
-            })}
-          </div>
-          <div className="menu-section">
-            <div className="menu-section-title">UN Global Layer</div>
-            <button
-              type="button"
-              className={`menu-toggle-item ${showUnGlobalPanel ? "active" : ""}`}
-              aria-pressed={showUnGlobalPanel}
-              onClick={() =>
-                runRateLimitedButtonAction(
-                  "menu-un-global-panel",
-                  toggleUnGlobalPanelFromMenu,
-                )
-              }
-            >
-              <span>Panel view</span>
-              <strong>
-                {showUnGlobalPanel
-                  ? isUnGlobalPanelMinimized
-                    ? "Minimized"
-                    : "Open"
-                  : "Closed"}
-              </strong>
-            </button>
-            <button
-              type="button"
-              className={`menu-toggle-item ${allUnGlobalSectionsEnabled ? "active" : ""}`}
-              aria-pressed={allUnGlobalSectionsEnabled}
-              onClick={() =>
-                runRateLimitedButtonAction(
-                  "menu-un-global-all",
-                  toggleAllUnGlobalSections,
-                )
-              }
-            >
-              <span>All locations</span>
-              <strong>{allUnGlobalSectionsEnabled ? "On" : "Mixed"}</strong>
-            </button>
-            {(
-              [
-                "offices",
-                "activeMissions",
-                "pastMissions",
-                "memberStates",
-                "affiliates",
-                "embassies",
-              ] as UnGlobalSection[]
-            ).map((section) => (
-              <button
-                type="button"
-                className={`menu-toggle-item ${unGlobalSections[section] ? "active" : ""}`}
-                aria-pressed={unGlobalSections[section]}
-                key={section}
-                onClick={() =>
-                  runRateLimitedButtonAction(`menu-un-global-${section}`, () =>
-                    toggleUnGlobalSection(section),
-                  )
-                }
-              >
-                <span>{UN_GLOBAL_SECTION_LABELS[section]}</span>
-                <strong>{unGlobalSections[section] ? "On" : "Off"}</strong>
-              </button>
-            ))}
-            <div className="menu-section-meta">
-              {enabledUnGlobalSectionCount}/6 global sections visible
+              {[
+                showTradePulsePanel && "Trade Pulse",
+                showUnodcPanel && "UNODC",
+                showUnGlobalPanel && "UN Global",
+              ]
+                .filter(Boolean)
+                .join(" · ") || "No UN layers on globe"}
             </div>
           </div>
 
@@ -7438,7 +8183,7 @@ function App() {
                   <div className="auth-user-meta-status">
                     Signed in
                     {authUser.transitPaid
-                      ? " · Transit + Live Feed paid"
+                      ? " · Transit + Live Feed + support paid"
                       : ""}
                     {authUser.primaryUserId
                       ? ` · ${authUser.primaryUserId}`

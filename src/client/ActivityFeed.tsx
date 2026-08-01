@@ -158,6 +158,15 @@ export function prependActivityEvent(
 /** Live feed is a Stripe-paid feature (same entitlement as Transit). */
 export type LiveFeedAccess = "ok" | "login_required" | "payment_required";
 
+export type LiveChatMessage = {
+  id: string;
+  fromId: string;
+  text: string;
+  displayName: string;
+  ts: number;
+  isSelf?: boolean;
+};
+
 type ActivityFeedProps = {
   open: boolean;
   onToggle: () => void;
@@ -182,6 +191,9 @@ type ActivityFeedProps = {
   onBuyAccess?: () => void;
   /** Manual PartySocket reconnect when link drops */
   onReconnectSocket?: () => void;
+  /** Paid web-support chat in Live Feed (client memory only; server-gated) */
+  chatMessages?: LiveChatMessage[];
+  onSendChat?: (text: string) => boolean;
 };
 
 export function ActivityFeed({
@@ -204,6 +216,8 @@ export function ActivityFeed({
   onSignIn,
   onBuyAccess,
   onReconnectSocket,
+  chatMessages = [],
+  onSendChat,
 }: ActivityFeedProps) {
   const isLocked = access !== "ok";
   const socketStatus: GlobeSocketStatus =
@@ -213,7 +227,10 @@ export function ActivityFeed({
   const isLinkConnecting = socketStatus === "connecting";
   const [now, setNow] = useState(() => Date.now());
   const [copyState, setCopyState] = useState<"idle" | "ok" | "err">("idle");
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatSendHint, setChatSendHint] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
+  const chatListRef = useRef<HTMLDivElement>(null);
   const stickToTopRef = useRef(true);
 
   useEffect(() => {
@@ -237,6 +254,30 @@ export function ActivityFeed({
   useEffect(() => {
     if (!open) setCopyState("idle");
   }, [open]);
+
+  useEffect(() => {
+    // Keep newest chat visible (list is newest-first)
+    const el = chatListRef.current;
+    if (el) el.scrollTop = 0;
+  }, [chatMessages[0]?.id, open]);
+
+  const submitChat = useCallback(() => {
+    if (!onSendChat || isLocked) return;
+    const ok = onSendChat(chatDraft);
+    if (ok) {
+      setChatDraft("");
+      setChatSendHint("");
+    } else {
+      setChatSendHint(
+        !isLinkUp
+          ? "Connect to send support chat"
+          : isLocked
+            ? "Unlock Live Feed for web support chat"
+            : "Could not send — try again",
+      );
+      window.setTimeout(() => setChatSendHint(""), 2000);
+    }
+  }, [onSendChat, chatDraft, isLinkUp, isLocked]);
 
   const joinCount = useMemo(
     () => events.reduce((n, e) => n + (e.type === "connect" ? 1 : 0), 0),
@@ -498,14 +539,13 @@ export function ActivityFeed({
                 {access === "login_required" ? "Sign in required" : "Stripe required"}
               </div>
               <p className="activity-lock-copy">
-                Live Feed details (joins/leaves with city/org) need Stripe access
-                ($20) — same unlock as Transit. This is separate from the globe
-                WebSocket link
+                Live Feed (joins/leaves with city/org) and web support chat need
+                Stripe access ($20) — same unlock as Transit
                 {isLinkUp
-                  ? " (which is connected — markers still work)."
+                  ? " (globe link connected)."
                   : isLinkConnecting
-                    ? " (still connecting)."
-                    : " (currently offline — use Reconnect)."}
+                    ? " (globe link still connecting)."
+                    : " (globe link offline — use Reconnect)."}
               </p>
               <div className="activity-lock-actions">
                 {access === "login_required" ? (
@@ -526,12 +566,99 @@ export function ActivityFeed({
                 )}
               </div>
               <p className="activity-lock-note">
-                Globe markers stay free for everyone. Paid feed geo is
+                Globe markers stay free. Paid feed and support chat are
                 server-gated after payment.
               </p>
             </div>
           ) : (
             <>
+              {/* Paid web-support chat — only unlocked Live Feed sessions */}
+              <div className="live-chat" aria-label="Web support chat">
+                <div className="live-chat-head">
+                  <strong>Web support</strong>
+                  <span>Paid · ephemeral · not stored</span>
+                </div>
+                <div
+                  className="live-chat-list"
+                  ref={chatListRef}
+                  role="log"
+                  aria-live="polite"
+                >
+                  {chatMessages.length === 0 ? (
+                    <div className="live-chat-empty">
+                      {isLinkUp
+                        ? "No support messages yet. Ask for help — messages vanish on refresh."
+                        : "Connect the globe link to use support chat."}
+                    </div>
+                  ) : (
+                    chatMessages.map((m) => (
+                      <div
+                        key={m.id}
+                        className={`live-chat-row ${m.isSelf ? "live-chat-self" : ""}`}
+                      >
+                        {/* Text only — never dangerouslySetInnerHTML */}
+                        <span className="live-chat-name">
+                          {sanitizeDisplayText(m.displayName, 32)}
+                          {m.isSelf ? " (you)" : ""}
+                        </span>
+                        <span className="live-chat-text">
+                          {sanitizeDisplayText(m.text, 200)}
+                        </span>
+                        <time
+                          className="live-chat-time"
+                          dateTime={new Date(m.ts).toISOString()}
+                          title={new Date(m.ts).toLocaleString()}
+                        >
+                          {formatRelativeTime(m.ts, now)}
+                        </time>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <form
+                  className="live-chat-compose"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    submitChat();
+                  }}
+                >
+                  <input
+                    type="text"
+                    value={chatDraft}
+                    maxLength={200}
+                    placeholder={
+                      isLinkUp
+                        ? "Message web support…"
+                        : "Waiting for link…"
+                    }
+                    disabled={!isLinkUp || !onSendChat}
+                    onChange={(e) => {
+                      // Cap draft early; full sanitize runs on send + server
+                      setChatDraft(e.target.value.slice(0, 200));
+                    }}
+                    aria-label="Web support chat message"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    inputMode="text"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!isLinkUp || !chatDraft.trim()}
+                  >
+                    Send
+                  </button>
+                </form>
+                {chatSendHint ? (
+                  <p className="live-chat-hint">{chatSendHint}</p>
+                ) : (
+                  <p className="live-chat-hint">
+                    Support channel for paid Live Feed — relay only, not saved.
+                  </p>
+                )}
+              </div>
+
               <div className="activity-summary" aria-label="Feed summary">
                 <div className="activity-stat">
                   <span>Online</span>

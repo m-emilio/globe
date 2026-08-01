@@ -25,6 +25,118 @@ export type FeedVisitorMeta = {
   ipMasked?: string;
 };
 
+/**
+ * Client → server web-support chat (relay only).
+ * Paid: server accepts only transitPaid (Live Feed) sessions.
+ * Never persisted on the server.
+ */
+export type IncomingMessage = {
+  type: "chat";
+  /** Plain chat body (server strips control chars, max length) */
+  text: string;
+  /** Optional display label (not a verified identity) */
+  displayName?: string;
+};
+
+export type ChatMessage = {
+  type: "chat";
+  /** Server-assigned message id for UI keys */
+  id: string;
+  /** Sender connection id (always server-set) */
+  fromId: string;
+  text: string;
+  displayName: string;
+  /** Server clock ms */
+  ts: number;
+};
+
+/** Wire / display limits for paid Live Feed web-support chat */
+export const CHAT_MAX_TEXT = 200;
+export const CHAT_MAX_NAME = 24;
+/** Max raw JSON frame size we accept on the socket */
+export const CHAT_MAX_WIRE_BYTES = 800;
+export const CHAT_RATE_WINDOW_MS = 8_000;
+export const CHAT_MAX_PER_WINDOW = 5;
+/** Client-side pre-send throttle (server still enforces) */
+export const CHAT_CLIENT_MAX_PER_WINDOW = 4;
+
+/**
+ * Invisible / control / bidi / zero-width characters that enable spoofing
+ * or terminal/log injection if ever logged.
+ */
+const CHAT_STRIP_RE =
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u202F\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/g;
+
+/** Connection / message ids — no spaces, controls, or HTML meta */
+const CHAT_ID_RE = /^[\w.:-]{2,128}$/;
+
+function nfkc(raw: string): string {
+  try {
+    return raw.normalize("NFKC");
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Sanitize chat body for relay + display.
+ * - NFKC normalize
+ * - Strip controls / bidi / zero-width
+ * - Collapse whitespace
+ * - Cap length
+ * React text nodes escape HTML; we never inject as HTML.
+ */
+export function sanitizeChatText(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  let s = nfkc(raw);
+  s = s.replace(CHAT_STRIP_RE, "");
+  // No HTML tags or angle-bracket spoofing in plain text
+  s = s.replace(/[<>]/g, "");
+  s = s.replace(/\s+/g, " ").trim();
+  if (s.length > CHAT_MAX_TEXT) s = s.slice(0, CHAT_MAX_TEXT);
+  // Reject empty / whitespace-only after cleanup
+  if (!s || /^\s*$/.test(s)) return "";
+  return s;
+}
+
+/**
+ * Display name is cosmetic only — not auth.
+ * Letters, numbers, spaces, limited punctuation; no brackets/quotes/slashes.
+ */
+export function sanitizeChatDisplayName(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  let s = nfkc(raw);
+  s = s.replace(CHAT_STRIP_RE, "");
+  try {
+    // Prefer Unicode-aware allowlist when available
+    s = s.replace(/[^\p{L}\p{N}\s._\-]/gu, "");
+  } catch {
+    // Fallback if runtime lacks Unicode property escapes
+    s = s.replace(/[^a-zA-Z0-9\s._\-]/g, "");
+  }
+  s = s.replace(/\s+/g, " ").trim();
+  if (s.length > CHAT_MAX_NAME) s = s.slice(0, CHAT_MAX_NAME);
+  return s;
+}
+
+export function isValidChatId(id: unknown): id is string {
+  if (typeof id !== "string") return false;
+  if (id.length < 2 || id.length > 128) return false;
+  // Allow Party/nanoid/UUID-style ids; block controls and HTML meta
+  if (/[\u0000-\u001F\u007F<>"'`\\]/.test(id)) return false;
+  // Prefer strict charset when it matches; otherwise accept printable safe ids
+  if (CHAT_ID_RE.test(id)) return true;
+  return /^[\x20-\x7E]+$/.test(id) && !/[<>"'`]/.test(id);
+}
+
+export function fallbackChatDisplayName(connectionId: string): string {
+  const safe = (connectionId || "user")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .slice(0, 6);
+  return `User ${safe || "anon"}`;
+}
+
 export type OutgoingMessage =
   | {
       type: "add-marker";
@@ -48,7 +160,8 @@ export type OutgoingMessage =
       /** Whether this connection receives paid feed events */
       type: "feed-access";
       paid: boolean;
-    };
+    }
+  | ChatMessage;
 
 export type ComtradeTradeRecordPreview = {
   flow: string;
@@ -248,6 +361,16 @@ export type PkiVulnCve = {
   kevDateAdded?: string | null;
   nvdUrl: string;
   cisaUrl?: string | null;
+  /**
+   * Vendor HQ / primary origin country for map arcs (ISO3).
+   * Signal map only — not where the exploit occurred.
+   */
+  originIso3?: string | null;
+  /**
+   * Deployment / exposure countries for map arcs (ISO3).
+   * Derived from vendor footprint + TLS residual signal.
+   */
+  exposureIso3s?: string[];
 };
 
 export type PkiCountryHotspot = {

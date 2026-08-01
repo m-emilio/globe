@@ -4,6 +4,7 @@ import {
   createAuthChallenge,
   getMe,
   getSessionUser,
+  getUserById,
   loginUser,
   logoutUser,
   rateLimitDurable,
@@ -66,14 +67,31 @@ import type {
   UnMissionLocationPreview,
   UnOfficeLocationPreview,
 } from "../shared";
+import {
+  CHAT_MAX_PER_WINDOW,
+  CHAT_MAX_WIRE_BYTES,
+  CHAT_RATE_WINDOW_MS,
+  fallbackChatDisplayName,
+  sanitizeChatDisplayName,
+  sanitizeChatText,
+} from "../shared";
 import type { Connection, ConnectionContext } from "partyserver";
 
+/** Signed-in (valid PGP session cookie) — full Live Feed / marker capacity */
 const MAX_ACTIVE_CONNECTIONS = 500;
 const MAX_CONNECTIONS_PER_IP = 8;
 const CONNECTION_RATE_WINDOW_MS = 10_000;
 const MAX_CONNECTIONS_PER_WINDOW = 20;
 const MAX_CONNECTION_ATTEMPT_BUCKETS = 1_000;
 const MAX_REPLAY_MARKERS = MAX_ACTIVE_CONNECTIONS;
+/**
+ * Anonymous (no PGP session) — tighter caps so free-tier DO duration/requests
+ * are not burned by unsigned WebSocket fan-out. Signed-in users keep the limits above.
+ */
+const MAX_ANON_ACTIVE_CONNECTIONS = 80;
+const MAX_ANON_CONNECTIONS_PER_IP = 2;
+const MAX_ANON_CONNECTIONS_PER_WINDOW = 4;
+const MAX_ANON_REPLAY_MARKERS = 40;
 const CLOSE_POLICY_VIOLATION = 1008;
 const CLOSE_TRY_AGAIN_LATER = 1013;
 const COMTRADE_SOURCE = "UN Comtrade Plus";
@@ -363,6 +381,7 @@ const SECURITY_HEADERS = {
 } satisfies Record<string, string>;
 
 // Connection state: public marker + private feed meta (never fully broadcast)
+// Chat is NOT stored here beyond in-memory rate-limit counters for this socket.
 type ConnectionState = {
   /** Public globe marker — no IP/org */
   position: Position;
@@ -371,8 +390,12 @@ type ConnectionState = {
   /** Paid Live Feed enrichment — only sent to transitPaid peers */
   feedMeta: FeedVisitorMeta;
   joinedAt: number;
-  /** Whether this socket may receive feed-* messages */
+  /** Whether this socket may receive feed-* messages / send support chat */
   feedPaid: boolean;
+  /** Valid PGP session (fingerprint user) — higher DO quotas */
+  signedIn: boolean;
+  /** Auth user id for mid-session entitlement re-check (chat revoke) */
+  userId?: string;
 };
 
 /** Mask IPv4/IPv6 for paid feed only — never send full address on the wire. */
@@ -3875,10 +3898,21 @@ async function getUnGlobalPreview() {
   );
 }
 
+type ChatRateBucket = { windowStart: number; count: number };
+
 export class Globe extends Server<Env> {
   private connectionAttempts = new Map<string, ConnectionAttemptBucket>();
+  /**
+   * Chat rate limits live on the DO instance — NOT on connection.setState().
+   * Mutating PartyServer WebSocket attachments for chat counters was risking
+   * state corruption and broken feed/marker delivery after a chat send.
+   */
+  private chatRateByConn = new Map<string, ChatRateBucket>();
 
-  private getConnectionLimitReason(clientKey: string) {
+  private getConnectionLimitReason(
+    clientKey: string,
+    maxPerWindow: number = MAX_CONNECTIONS_PER_WINDOW,
+  ) {
     const now = Date.now();
     this.pruneConnectionAttempts(now);
 
@@ -3898,7 +3932,7 @@ export class Globe extends Server<Env> {
 
     bucket.count += 1;
 
-    if (bucket.count > MAX_CONNECTIONS_PER_WINDOW) {
+    if (bucket.count > maxPerWindow) {
       return "too many connection attempts";
     }
 
@@ -3954,10 +3988,34 @@ export class Globe extends Server<Env> {
       return;
     }
 
+    // Cookie session first — anonymous vs PGP-signed-in drives DO caps
+    let signedIn = false;
+    let feedPaid = false;
+    let userId: string | undefined;
+    try {
+      const session = await getSessionUser(
+        ctx.request,
+        this.env as AuthEnv,
+      );
+      signedIn = Boolean(session?.user.fingerprint);
+      feedPaid = Boolean(session?.user.transitPaid);
+      userId = session?.user.id ? String(session.user.id).slice(0, 128) : undefined;
+    } catch {
+      signedIn = false;
+      feedPaid = false;
+      userId = undefined;
+    }
+
     // Full IP only for server rate limits — never on the wire
     const ip = getClientIp(ctx.request);
     const clientKey = ip ?? "unknown";
-    const rateLimitReason = this.getConnectionLimitReason(clientKey);
+    const maxPerWindow = signedIn
+      ? MAX_CONNECTIONS_PER_WINDOW
+      : MAX_ANON_CONNECTIONS_PER_WINDOW;
+    const rateLimitReason = this.getConnectionLimitReason(
+      clientKey,
+      maxPerWindow,
+    );
 
     if (rateLimitReason) {
       this.closeConnection(conn, CLOSE_TRY_AGAIN_LATER, rateLimitReason);
@@ -3971,12 +4029,31 @@ export class Globe extends Server<Env> {
       return;
     }
 
+    if (!signedIn) {
+      const anonCount = connections.filter((connection) => {
+        const state = connection.state as ConnectionState | undefined;
+        // Treat missing signedIn as anonymous (pre-deploy sockets / race)
+        return state?.signedIn !== true;
+      }).length;
+      if (anonCount >= MAX_ANON_ACTIVE_CONNECTIONS) {
+        this.closeConnection(
+          conn,
+          CLOSE_TRY_AGAIN_LATER,
+          "guest capacity full — sign in with PGP for priority",
+        );
+        return;
+      }
+    }
+
     const matchingIpConnections = connections.filter((connection) => {
       const state = connection.state as ConnectionState | undefined;
       return state?.clientKey === clientKey && clientKey !== "unknown";
     });
+    const maxPerIp = signedIn
+      ? MAX_CONNECTIONS_PER_IP
+      : MAX_ANON_CONNECTIONS_PER_IP;
 
-    if (ip && matchingIpConnections.length >= MAX_CONNECTIONS_PER_IP) {
+    if (ip && matchingIpConnections.length >= maxPerIp) {
       this.closeConnection(conn, CLOSE_TRY_AGAIN_LATER, "too many connections");
       return;
     }
@@ -4002,18 +4079,6 @@ export class Globe extends Server<Env> {
       ipMasked: maskIpForFeed(ip),
     };
 
-    // Cookie session on same-origin WS determines paid feed access
-    let feedPaid = false;
-    try {
-      const session = await getSessionUser(
-        ctx.request,
-        this.env as AuthEnv,
-      );
-      feedPaid = Boolean(session?.user.transitPaid);
-    } catch {
-      feedPaid = false;
-    }
-
     const joinedAt = Date.now();
     conn.setState({
       position,
@@ -4021,18 +4086,39 @@ export class Globe extends Server<Env> {
       feedMeta,
       joinedAt,
       feedPaid,
+      signedIn,
+      userId,
     });
 
     // Tell this client whether it will receive feed events
     this.sendJson(conn, { type: "feed-access", paid: feedPaid });
 
+    // Include self so the client sees its own marker + "You joined" in Live Feed
+    this.sendJson(conn, {
+      type: "add-marker",
+      position,
+    });
+    if (feedPaid) {
+      this.sendJson(conn, { type: "feed-join", meta: feedMeta });
+    }
+
+    const maxReplay = signedIn ? MAX_REPLAY_MARKERS : MAX_ANON_REPLAY_MARKERS;
+
+    // Prefer replaying signed-in markers first so guests still see real users
+    const replayOrder = [...connections].sort((a, b) => {
+      const aIn = (a.state as ConnectionState | undefined)?.signedIn === true ? 0 : 1;
+      const bIn = (b.state as ConnectionState | undefined)?.signedIn === true ? 0 : 1;
+      return aIn - bIn;
+    });
+
     // Replay public markers (+ paid feed meta if entitled)
     let replayedMarkers = 0;
-    for (const connection of connections) {
+    for (const connection of replayOrder) {
       try {
         const state = connection.state as ConnectionState | undefined;
         if (!state?.position) continue;
-        if (replayedMarkers >= MAX_REPLAY_MARKERS) break;
+        if (connection.id === conn.id) continue;
+        if (replayedMarkers >= maxReplay) break;
 
         this.sendJson(conn, {
           type: "add-marker",
@@ -4042,17 +4128,22 @@ export class Globe extends Server<Env> {
           this.sendJson(conn, { type: "feed-join", meta: state.feedMeta });
         }
         replayedMarkers += 1;
+      } catch {
+        this.onCloseOrError(connection);
+      }
+    }
 
-        // Notify other clients of the newcomer
-        if (connection.id !== conn.id) {
-          this.sendJson(connection, {
-            type: "add-marker",
-            position,
-          });
-          const peer = connection.state as ConnectionState | undefined;
-          if (peer?.feedPaid) {
-            this.sendJson(connection, { type: "feed-join", meta: feedMeta });
-          }
+    // Fan-out join markers to everyone (presence). feed-join stays paid-only.
+    for (const connection of connections) {
+      if (connection.id === conn.id) continue;
+      try {
+        const peer = connection.state as ConnectionState | undefined;
+        this.sendJson(connection, {
+          type: "add-marker",
+          position,
+        });
+        if (peer?.feedPaid) {
+          this.sendJson(connection, { type: "feed-join", meta: feedMeta });
         }
       } catch {
         this.onCloseOrError(connection);
@@ -4060,7 +4151,128 @@ export class Globe extends Server<Env> {
     }
   }
 
+  /**
+   * Paid Live Feed web-support chat. Validates + rate-limits, then fans out
+   * only to transitPaid peers. Never writes chat to DO storage, KV, or logs.
+   */
+  onMessage(conn: Connection<ConnectionState>, message: string | ArrayBuffer) {
+    void this.handleChatMessage(conn, message).catch(() => {
+      // Never let chat errors break the socket / DO isolate
+    });
+  }
+
+  private async handleChatMessage(
+    conn: Connection<ConnectionState>,
+    message: string | ArrayBuffer,
+  ) {
+    // Binary frames rejected; hard cap wire size before JSON.parse
+    if (typeof message !== "string") return;
+    if (message.length === 0 || message.length > CHAT_MAX_WIRE_BYTES) return;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(message);
+    } catch {
+      return;
+    }
+    // Plain object only (blocks arrays / null)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return;
+    }
+    // Prefer plain objects; allow null-prototype too (still reject class instances)
+    const proto = Object.getPrototypeOf(parsed);
+    if (proto !== Object.prototype && proto !== null) return;
+
+    const rec = parsed as Record<string, unknown>;
+    if (rec.type !== "chat") return;
+    // Reject unexpected large payloads with extra keys (DoS / smuggling)
+    if (Object.keys(rec).length > 4) return;
+
+    const state = conn.state as ConnectionState | undefined;
+    // Only fully connected sockets with map state may chat
+    if (!state?.position?.id) return;
+    // Fast path: paid flag from connect (updated below if entitlement revoked)
+    if (!state.feedPaid) return;
+
+    // Mid-session revoke: re-check transitPaid from KV when we have a user id
+    if (state.userId) {
+      try {
+        const user = await getUserById(this.env as AuthEnv, state.userId);
+        if (!user?.transitPaid) {
+          conn.setState({ ...state, feedPaid: false });
+          this.sendJson(conn, { type: "feed-access", paid: false });
+          return;
+        }
+      } catch {
+        // KV blip: keep connect-time entitlement (already required feedPaid above)
+      }
+    }
+
+    const text = sanitizeChatText(rec.text);
+    if (!text) return;
+
+    const now = Date.now();
+    let bucket = this.chatRateByConn.get(conn.id);
+    if (!bucket || now - bucket.windowStart >= CHAT_RATE_WINDOW_MS) {
+      bucket = { windowStart: now, count: 0 };
+    }
+    bucket.count += 1;
+    this.chatRateByConn.set(conn.id, bucket);
+    // Cap map growth (stale ids after disconnect)
+    if (this.chatRateByConn.size > 2_000) {
+      const cutoff = now - CHAT_RATE_WINDOW_MS * 2;
+      for (const [id, b] of this.chatRateByConn) {
+        if (b.windowStart < cutoff) this.chatRateByConn.delete(id);
+      }
+    }
+    if (bucket.count > CHAT_MAX_PER_WINDOW) return;
+
+    let name = "";
+    try {
+      name = sanitizeChatDisplayName(rec.displayName);
+    } catch {
+      name = "";
+    }
+    if (!name) name = fallbackChatDisplayName(conn.id);
+
+    // fromId + id always server-authored — never trust client
+    const safeConnId = String(conn.id).replace(/[^\w.:-]/g, "").slice(0, 32) || "peer";
+    const out: OutgoingMessage = {
+      type: "chat",
+      id: `${safeConnId}-${now.toString(36)}-${bucket.count}`,
+      fromId: String(conn.id).slice(0, 128),
+      text,
+      displayName: name,
+      ts: now,
+    };
+
+    // Relay only to paid peers — no persistence, no console.log of body
+    const payload = JSON.stringify(out);
+    if (payload.length > CHAT_MAX_WIRE_BYTES + 256) return;
+
+    try {
+      for (const peer of this.getConnections<ConnectionState>()) {
+        const peerState = peer.state as ConnectionState | undefined;
+        if (!peerState?.feedPaid) continue;
+        try {
+          peer.send(payload);
+        } catch {
+          // peer may be closing
+        }
+      }
+    } catch {
+      // ignore broadcast failures
+    }
+  }
+
   onCloseOrError(connection: Connection) {
+    // Drop chat rate bucket for this socket (ephemeral)
+    try {
+      this.chatRateByConn.delete(connection.id);
+    } catch {
+      // ignore
+    }
+
     const state = connection.state as ConnectionState | undefined;
 
     if (!state?.position) {
@@ -4068,14 +4280,13 @@ export class Globe extends Server<Env> {
     }
 
     const sessionMs = Math.max(0, Date.now() - (state.joinedAt || Date.now()));
+    const removePayload = JSON.stringify({
+      type: "remove-marker",
+      id: connection.id,
+    } satisfies OutgoingMessage);
 
-    this.broadcast(
-      JSON.stringify({
-        type: "remove-marker",
-        id: connection.id,
-      } satisfies OutgoingMessage),
-      [connection.id],
-    );
+    // Always remove markers for all peers (matches full join fan-out)
+    this.broadcast(removePayload, [connection.id]);
 
     // Paid feed leave (no full IP)
     this.broadcastFeed(

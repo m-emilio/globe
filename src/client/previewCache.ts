@@ -3,6 +3,8 @@
  * Stops repeat panel opens from re-downloading large JSON (main-thread lag).
  */
 
+import { assertSameOriginApiPath } from "./safeUrl";
+
 type CacheEntry = {
   at: number;
   data: unknown;
@@ -18,16 +20,17 @@ const STALE_MS = 6 * 60 * 60 * 1000;
 const STORAGE_PREFIX = "globe:preview:v3:";
 
 function storageKey(url: string) {
-  return `${STORAGE_PREFIX}${url}`;
+  return `${STORAGE_PREFIX}${assertSameOriginApiPath(url)}`;
 }
 
 /** Drop a cached preview so the next fetch hits the network. */
 export function clearPreviewCache(url: string) {
-  memory.delete(url);
   try {
-    sessionStorage.removeItem(storageKey(url));
+    const key = assertSameOriginApiPath(url);
+    memory.delete(key);
+    sessionStorage.removeItem(storageKey(key));
   } catch {
-    // ignore
+    // ignore invalid keys
   }
 }
 
@@ -63,11 +66,17 @@ export function getPreviewCache<T>(url: string): {
   fresh: boolean;
   stale: boolean;
 } | null {
+  let key: string;
+  try {
+    key = assertSameOriginApiPath(url);
+  } catch {
+    return null;
+  }
   const now = Date.now();
-  const entry = memory.get(url) ?? readSession(url);
+  const entry = memory.get(key) ?? readSession(key);
   if (!entry) return null;
-  if (!memory.has(url)) {
-    memory.set(url, entry);
+  if (!memory.has(key)) {
+    memory.set(key, entry);
   }
   const ageMs = now - entry.at;
   if (ageMs > STALE_MS) return null;
@@ -80,9 +89,10 @@ export function getPreviewCache<T>(url: string): {
 }
 
 export function setPreviewCache(url: string, data: unknown) {
+  const key = assertSameOriginApiPath(url);
   const entry: CacheEntry = { at: Date.now(), data };
-  memory.set(url, entry);
-  writeSession(url, entry);
+  memory.set(key, entry);
+  writeSession(key, entry);
 }
 
 /**
@@ -99,28 +109,29 @@ export async function fetchPreviewJson<T>(
     forceNetwork?: boolean;
   },
 ): Promise<T> {
+  const key = assertSameOriginApiPath(url);
   const validate =
     options?.validate ??
     ((data: unknown): data is T => data != null && typeof data === "object");
 
   if (!options?.forceNetwork) {
-    const hit = getPreviewCache<T>(url);
+    const hit = getPreviewCache<T>(key);
     if (hit?.fresh && validate(hit.data)) {
       return hit.data;
     }
     if (hit?.stale && validate(hit.data)) {
-      void revalidate(url, validate);
+      void revalidate(key, validate);
       return hit.data;
     }
   }
 
-  const response = await fetch(url, {
+  const response = await fetch(key, {
     headers: { accept: "application/json" },
     // forceNetwork must bypass browser HTTP cache (stale 7/12 UNODC payloads).
     cache: options?.forceNetwork ? "reload" : "force-cache",
     credentials: "same-origin",
   }).catch(() =>
-    fetch(url, {
+    fetch(key, {
       headers: { accept: "application/json" },
       cache: options?.forceNetwork ? "no-store" : "default",
       credentials: "same-origin",
@@ -129,7 +140,7 @@ export async function fetchPreviewJson<T>(
 
   if (!response.ok) {
     // Last resort: serve stale on network error
-    const stale = getPreviewCache<T>(url);
+    const stale = getPreviewCache<T>(key);
     if (stale && validate(stale.data)) return stale.data;
     throw new Error(`Preview request failed (${response.status})`);
   }
@@ -138,7 +149,7 @@ export async function fetchPreviewJson<T>(
   if (!validate(data)) {
     throw new Error("Preview response incomplete");
   }
-  setPreviewCache(url, data);
+  setPreviewCache(key, data);
   return data;
 }
 
@@ -147,7 +158,8 @@ async function revalidate<T>(
   validate: (data: unknown) => data is T,
 ) {
   try {
-    const response = await fetch(url, {
+    const key = assertSameOriginApiPath(url);
+    const response = await fetch(key, {
       headers: { accept: "application/json" },
       cache: "default",
       credentials: "same-origin",
@@ -155,7 +167,7 @@ async function revalidate<T>(
     if (!response.ok) return;
     const data = (await response.json()) as unknown;
     if (validate(data)) {
-      setPreviewCache(url, data);
+      setPreviewCache(key, data);
     }
   } catch {
     // ignore background revalidate errors
@@ -164,7 +176,13 @@ async function revalidate<T>(
 
 /** Warm browser/edge caches without updating React state. */
 export function warmPreviewUrl(url: string) {
-  void fetch(url, {
+  let key: string;
+  try {
+    key = assertSameOriginApiPath(url);
+  } catch {
+    return;
+  }
+  void fetch(key, {
     headers: { accept: "application/json" },
     cache: "force-cache",
     credentials: "same-origin",
@@ -174,7 +192,7 @@ export function warmPreviewUrl(url: string) {
       try {
         const data = await response.json();
         if (data && typeof data === "object") {
-          setPreviewCache(url, data);
+          setPreviewCache(key, data);
         }
       } catch {
         // ignore

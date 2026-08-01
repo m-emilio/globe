@@ -21,8 +21,8 @@ const NVD_CVE_URL = (id: string) => `https://nvd.nist.gov/vuln/detail/${id}`;
 const CACHE_SECONDS = 6 * 60 * 60;
 const BROWSER_CACHE =
   "public, max-age=1800, s-maxage=21600, stale-while-revalidate=86400";
-const KV_KEY = "pki-vulns-preview:v1";
-export const PKI_EDGE_CACHE_VERSION = "v1";
+const KV_KEY = "pki-vulns-preview:v2";
+export const PKI_EDGE_CACHE_VERSION = "v2";
 
 const CENTROIDS_URL =
   "https://gist.githubusercontent.com/tadast/8827699/raw/" +
@@ -548,6 +548,35 @@ function vendorWeights(cve: PkiVulnCve): Array<{ iso3: string; weight: number }>
   return [...weights.entries()].map(([iso3, weight]) => ({ iso3, weight }));
 }
 
+/** Attach origin + full exposure ISO3 list for client arc fan-out. */
+function annotateCveGeography(cves: PkiVulnCve[]): PkiVulnCve[] {
+  return cves.map((cve) => {
+    const points = vendorWeights(cve)
+      .slice()
+      .sort((a, b) => b.weight - a.weight);
+    if (points.length === 0) {
+      return {
+        ...cve,
+        originIso3: "USA",
+        exposureIso3s: GLOBAL_TLS_BASE.map((c) => c.iso3).filter(
+          (iso) => iso !== "USA",
+        ),
+      };
+    }
+    const originIso3 = points[0].iso3;
+    let exposureIso3s = points
+      .filter((p) => p.iso3 !== originIso3)
+      .map((p) => p.iso3);
+    // Single-country vendor still gets residual global TLS destinations
+    if (exposureIso3s.length === 0) {
+      exposureIso3s = GLOBAL_TLS_BASE.map((c) => c.iso3).filter(
+        (iso) => iso !== originIso3,
+      );
+    }
+    return { ...cve, originIso3, exposureIso3s };
+  });
+}
+
 function buildHotspots(
   cves: PkiVulnCve[],
   centroids: Map<string, Centroid>,
@@ -561,6 +590,7 @@ function buildHotspots(
     categories: Set<PkiVulnCategory>;
   };
   const byIso = new Map<string, Acc>();
+  const cveById = new Map(cves.map((c) => [c.id, c] as const));
 
   for (const cve of cves) {
     const base = severityWeight(cve.severity) * (cve.knownExploited ? 1.75 : 1);
@@ -592,6 +622,18 @@ function buildHotspots(
   const rows = [...byIso.entries()]
     .map(([iso3, acc]) => {
       const c = centroids.get(iso3)!;
+      // Rank linked CVEs by exploit status + severity (not insertion order)
+      const rankedIds = [...acc.cveIds].sort((a, b) => {
+        const ca = cveById.get(a);
+        const cb = cveById.get(b);
+        if (!ca || !cb) return 0;
+        if (ca.knownExploited !== cb.knownExploited) {
+          return ca.knownExploited ? -1 : 1;
+        }
+        const sw = severityWeight(cb.severity) - severityWeight(ca.severity);
+        if (sw !== 0) return sw;
+        return (cb.cvss || 0) - (ca.cvss || 0);
+      });
       return {
         iso3,
         name: c.name,
@@ -602,7 +644,7 @@ function buildHotspots(
         criticalCount: acc.critical,
         highCount: acc.high,
         kevCount: acc.kev,
-        topCves: [...acc.cveIds].slice(0, 6),
+        topCves: rankedIds.slice(0, 48),
         categories: [...acc.categories],
       };
     })
@@ -721,9 +763,15 @@ export async function getPkiVulnsPreview(env?: PkiKvEnv): Promise<Response> {
     if (cve) kevCves.push(cve);
   }
 
-  const cves = mergeCves([kevCves, ...nvdLists]).slice(0, 120);
+  const cves = annotateCveGeography(
+    mergeCves([kevCves, ...nvdLists]).slice(0, 120),
+  );
   const hotspots = buildHotspots(cves, centroids);
   const kevCount = cves.filter((c) => c.knownExploited).length;
+  const arcCount = cves.reduce(
+    (n, c) => n + (c.exposureIso3s?.length || 0),
+    0,
+  );
   const dataMode: PkiVulnsPreview["dataMode"] =
     cves.length === 0
       ? "unavailable"
@@ -732,21 +780,22 @@ export async function getPkiVulnsPreview(env?: PkiKvEnv): Promise<Response> {
         : "live";
 
   const payload: PkiVulnsPreview = {
-    source: "CISA KEV + NVD (PKI / TLS / certificate filter)",
+    source: "CISA KEV + NVD · certificate, TLS & crypto-key filter",
     sourceUrl: CISA_KEV_PAGE,
     cisaKevUrl: CISA_KEV_PAGE,
     nvdUrl: "https://nvd.nist.gov/",
     updatedAt: new Date().toISOString(),
-    queryLabel: `PKI vulns · ${cves.length} CVEs · ${kevCount} KEV · ${hotspots.length} countries`,
+    queryLabel: `${cves.length} CVEs · ${kevCount} known-exploited · ${arcCount} exposure arcs · ${hotspots.length} countries`,
     dataMode,
     cveCount: cves.length,
     hotspotCount: hotspots.length,
     cves,
     hotspots,
     notes: [
-      "Map intensity is a vendor→country exposure signal for visualization — not confirmed exploit geolocation.",
-      "CISA KEV entries are known-exploited; NVD rows add recent PKI/TLS/certificate-related CVEs.",
-      "Filters: certificate, X.509, OpenSSL, TLS/SSL, hard-coded crypto keys, CNG/public-key issues.",
+      "Each arc runs from the vendor’s primary origin country to deployment/exposure countries weighted by product footprint.",
+      "Solid arcs = CISA Known Exploited Vulnerabilities (KEV). Dashed arcs = NVD catalog entries matching the PKI/TLS filter.",
+      "Color encodes severity (critical → low). This is a signal map for situational awareness — not exploit geolocation or attribution.",
+      "Filter keywords: certificate, X.509, OpenSSL, TLS/SSL, hard-coded crypto keys, CNG / public-key issues.",
     ],
   };
 

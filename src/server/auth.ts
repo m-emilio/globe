@@ -316,6 +316,8 @@ function sessionCookie(
   maxAge = SESSION_TTL_SECONDS,
 ) {
   const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  // HttpOnly + SameSite=Lax: blocks JS theft and most CSRF; Secure on HTTPS.
+  // Path=/ only — never Domain= (limits host-only scope).
   return `${SESSION_COOKIE}=${encodeURIComponent(sessionId)}; Path=/; Max-Age=${maxAge}; SameSite=Lax; HttpOnly${secure}`;
 }
 
@@ -1465,7 +1467,7 @@ export async function requireTransitAccess(
       {
         error: "payment_required",
         code: "payment_required",
-        message: `${featureName} is locked until you complete Stripe checkout. Use Menu → Buy Stripe access ($20). Unlocks Transit, Nearby maps, and Live Feed after payment.`,
+        message: `${featureName} is locked until you complete Stripe checkout. Use Menu → Buy Stripe access ($20). Unlocks Transit, Nearby maps, Live Feed, and web support chat after payment.`,
       },
       { status: 402 },
       applySecurityHeaders,
