@@ -1174,7 +1174,7 @@ a.nav-title:focus-visible {
   user-select: none;
 }
 
-/* Globe sphere only — controls live in the top chrome next to Live Feed */
+/* Globe sphere only — controls live in the top nav next to MENU */
 .globe-cobe-root {
   position: relative;
   width: min(400px, calc(100vw - 24px));
@@ -1207,34 +1207,41 @@ a.nav-title:focus-visible {
   border: 0;
 }
 
-/* Top chrome: GLOBE CTRL + Live Feed under the nav */
-.top-chrome {
-  position: fixed;
-  top: var(--nav-offset, calc(70px + env(safe-area-inset-top, 0px)));
-  left: max(12px, env(safe-area-inset-left, 0px));
-  right: max(12px, env(safe-area-inset-right, 0px));
-  z-index: 1100;
-  display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  justify-content: flex-start;
-  gap: 10px;
-  pointer-events: none;
-  max-width: calc(100vw - 24px);
-}
-
-.top-chrome > * {
-  pointer-events: auto;
-}
-
-.globe-controls-slot {
+/* Globe controls slot — lives in the top nav, next to MENU */
+.globe-controls-slot,
+.nav-globe-controls-slot {
   display: flex;
   flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
+  position: relative;
+  z-index: 20;
 }
 
-/* Panel expands downward from the top chrome */
+.nav-globe-controls-slot {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+/* Live Feed app window host (opened from dock) */
+.live-feed-app-host {
+  position: fixed;
+  left: max(12px, env(safe-area-inset-left, 0px));
+  bottom: max(88px, calc(env(safe-area-inset-bottom, 0px) + 78px));
+  z-index: 1140;
+  pointer-events: none;
+  max-width: min(380px, calc(100vw - 24px));
+}
+
+.live-feed-app-host .activity-floating {
+  pointer-events: none;
+}
+
+.live-feed-app-host .activity-floating > * {
+  pointer-events: auto;
+}
+
+/* Compact controls in the heading; panel drops below the nav bar */
 .globe-controls {
   position: relative;
   left: auto;
@@ -1245,21 +1252,73 @@ a.nav-title:focus-visible {
   align-items: stretch;
   gap: 6px;
   width: max-content;
-  max-width: min(200px, 52vw);
-  min-width: 148px;
-  padding: 8px;
-  border: 1px solid rgba(0, 217, 255, 0.62);
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.94);
-  box-shadow: 0 0 18px rgba(0, 217, 255, 0.14);
+  max-width: min(220px, 70vw);
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   font-family: var(--font-ui);
   pointer-events: auto;
   box-sizing: border-box;
 }
 
+.nav-globe-controls-slot .globe-controls-compact,
+.nav-globe-controls-slot .globe-controls-open {
+  min-width: 0;
+  width: auto;
+}
+
+.nav-globe-controls-slot .globe-controls-toggle {
+  height: 36px;
+  min-height: 36px;
+  min-width: 72px;
+  padding: 0 12px;
+  border: 1.5px solid #00d9ff;
+  border-radius: 2px;
+  background: transparent;
+  color: #00d9ff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  box-shadow: none;
+}
+
+.nav-globe-controls-slot .globe-controls-toggle:hover,
+.nav-globe-controls-slot .globe-controls-toggle.active {
+  background: #00d9ff;
+  color: #0a0e27;
+  box-shadow: 0 0 10px #00d9ff;
+}
+
+.nav-globe-controls-slot .globe-controls-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  left: auto;
+  width: min(200px, calc(100vw - 24px));
+  min-width: 160px;
+  padding: 8px;
+  border: 1px solid rgba(0, 217, 255, 0.62);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.96);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 18px rgba(0, 217, 255, 0.14);
+  max-height: min(360px, calc(100dvh - var(--nav-offset, 70px) - 24px));
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .globe-controls-compact,
 .globe-controls-open {
   width: max-content;
+  min-width: 0;
+}
+
+/* Non-nav fallback (if slot is used outside the header) */
+.globe-controls-slot:not(.nav-globe-controls-slot) .globe-controls-compact,
+.globe-controls-slot:not(.nav-globe-controls-slot) .globe-controls-open {
   min-width: 148px;
 }
 
@@ -1573,6 +1632,28 @@ a.nav-title:focus-visible {
 /* Keep loading pulse on dock weather/transit/nearby */
 .mac-dock-item.weather-icon-loading .mac-dock-icon {
   animation: weather-pulse 1s ease-in-out infinite;
+}
+
+/* Live Feed dock app status accents */
+.mac-dock-icon {
+  position: relative;
+}
+
+.mac-dock-pulse {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  z-index: 1;
+}
+
+.live-feed-dock-locked {
+  color: #ffd166;
+}
+
+.live-feed-dock-offline {
+  color: #ff8a8a;
 }
 
 /* Draggable + resizable popup chrome (position/size reset on close/unmount) */
@@ -4928,12 +5009,13 @@ button[aria-busy="true"],
 
 .transit-panel {
   position: fixed;
-  top: 82px;
+  top: calc(var(--nav-offset, 70px) + 12px);
   left: 30px;
   width: min(460px, calc(100vw - 40px));
-  max-height: calc(100vh - 104px);
-  max-height: calc(100dvh - 104px);
-  z-index: 1013;
+  /* Bounded height so flex body scrolls; leave room for macOS dock */
+  height: min(720px, calc(100dvh - var(--nav-offset, 70px) - 96px));
+  max-height: calc(100dvh - var(--nav-offset, 70px) - 96px);
+  z-index: 1205;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -4944,6 +5026,14 @@ button[aria-busy="true"],
   box-shadow: 0 0 30px rgba(124, 106, 247, 0.25);
   font-family: var(--font-ui);
   text-align: left;
+}
+
+/* FloatingChrome adds position:relative — keep panels fixed overlays */
+.transit-panel.floating-chrome,
+.nearby-panel.floating-chrome {
+  position: fixed !important;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .transit-panel .nearby-panel-header {
@@ -5228,15 +5318,41 @@ button[aria-busy="true"],
   border: 1px solid rgba(124, 106, 247, 0.35);
   border-radius: 4px;
   overflow: hidden;
+  /* Prevent 0-height collapse inside flex scroll body */
+  min-height: 220px;
+  width: auto;
+  flex-shrink: 0;
 }
 
 .transit-nearby-map-wrap .nearby-map {
   border-bottom: none;
+  width: 100%;
+  min-height: 220px;
+}
+
+.transit-nearby-map-wrap .nearby-map-canvas {
+  width: 100%;
+  min-height: 200px;
+  aspect-ratio: 1 / 1;
 }
 
 .transit-map-status {
   margin: 4px 12px 10px;
   padding: 12px !important;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.transit-map-note {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #b8b0d8;
+  background: rgba(20, 14, 36, 0.85);
+  border-top: 1px solid rgba(124, 106, 247, 0.25);
 }
 
 .transit-show-more {
@@ -5261,15 +5377,20 @@ button[aria-busy="true"],
 
 @media (max-width: 768px) {
   .transit-panel {
-    top: calc(var(--mobile-nav-height, 92px) + 8px);
+    top: calc(var(--nav-offset, var(--mobile-nav-height, 58px)) + 8px);
     left: 8px;
     right: 8px;
     width: auto;
-    max-height: calc(100dvh - var(--mobile-nav-height, 92px) - 16px);
+    height: min(640px, calc(100dvh - var(--nav-offset, var(--mobile-nav-height, 58px)) - 88px));
+    max-height: calc(100dvh - var(--nav-offset, var(--mobile-nav-height, 58px)) - 88px);
   }
 
   .transit-toggle-item {
     min-height: 44px;
+  }
+
+  .transit-nearby-map-wrap {
+    min-height: 180px;
   }
 
   .nav-center {
@@ -5290,12 +5411,12 @@ button[aria-busy="true"],
 
 .nearby-panel {
   position: fixed;
-  top: 82px;
+  top: calc(var(--nav-offset, 70px) + 12px);
   right: 30px;
   width: min(440px, calc(100vw - 40px));
-  max-height: calc(100vh - 104px);
-  max-height: calc(100dvh - 104px);
-  z-index: 1012;
+  height: min(720px, calc(100dvh - var(--nav-offset, 70px) - 96px));
+  max-height: calc(100dvh - var(--nav-offset, 70px) - 96px);
+  z-index: 1204;
   display: flex;
   flex-direction: column;
   /* Clip panel; body scrolls so map can stay full size without burying actions */
@@ -5786,11 +5907,12 @@ button[aria-busy="true"],
 
 @media (max-width: 768px) {
   .nearby-panel {
-    top: calc(var(--mobile-nav-height, 92px) + 8px);
+    top: calc(var(--nav-offset, var(--mobile-nav-height, 58px)) + 8px);
     left: 8px;
     right: 8px;
     width: auto;
-    max-height: calc(100dvh - var(--mobile-nav-height, 92px) - 16px);
+    height: min(640px, calc(100dvh - var(--nav-offset, var(--mobile-nav-height, 58px)) - 88px));
+    max-height: calc(100dvh - var(--nav-offset, var(--mobile-nav-height, 58px)) - 88px);
   }
 
   .nearby-metrics {
@@ -5798,11 +5920,11 @@ button[aria-busy="true"],
   }
 }
 
-/* Live Feed — stable top-chrome panel (expands downward, no FloatingChrome drag glitches) */
+/* Live Feed — dock app window (panel only when opened from Feed app) */
 .activity-floating {
   position: relative;
   width: auto;
-  max-width: min(360px, calc(100vw - 140px));
+  max-width: min(360px, calc(100vw - 24px));
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -5814,6 +5936,22 @@ button[aria-busy="true"],
 
 .activity-floating > * {
   pointer-events: auto;
+}
+
+.activity-floating-app {
+  max-width: min(380px, calc(100vw - 24px));
+}
+
+.activity-floating-app:not(.activity-floating-open) {
+  display: none;
+}
+
+.activity-menu-app {
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(640px, calc(100dvh - var(--nav-offset, 70px) - 120px));
+  box-shadow:
+    0 16px 48px rgba(0, 0, 0, 0.55),
+    0 0 28px rgba(0, 217, 255, 0.2);
 }
 
 .activity-launcher {
@@ -6773,11 +6911,30 @@ button[aria-busy="true"],
     margin: 12px auto 72px;
   }
 
-  .top-chrome {
-    top: var(--nav-offset, var(--mobile-nav-height, 58px));
+  .live-feed-app-host {
     left: max(8px, env(safe-area-inset-left, 0px));
     right: max(8px, env(safe-area-inset-right, 0px));
-    gap: 8px;
+    bottom: max(78px, calc(env(safe-area-inset-bottom, 0px) + 70px));
+    max-width: none;
+  }
+
+  .activity-floating-app,
+  .activity-menu-app {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .nav-globe-controls-slot .globe-controls-toggle {
+    height: 34px;
+    min-height: 34px;
+    min-width: 64px;
+    padding: 0 10px;
+    font-size: 11px;
+  }
+
+  .nav-globe-controls-slot .globe-controls-panel {
+    right: 0;
+    width: min(190px, calc(100vw - 16px));
   }
 
   .mac-dock {

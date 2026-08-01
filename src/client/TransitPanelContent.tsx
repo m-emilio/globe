@@ -166,29 +166,46 @@ export function TransitPanelContent({
     setStopsShown(LIST_PAGE);
   }, [preview.lat, preview.lng, preview.maxDistanceM, preview.updatedAt]);
 
-  // Load street map for the full transit search radius (server tiles OSM)
+  // Load street map for the transit search radius (shared Nearby OSM engine)
   useEffect(() => {
     if (!view.showMap) return;
     let cancelled = false;
     setMapStatus("loading");
-    void (async () => {
-      const streetR = Math.min(1500, Math.max(250, preview.maxDistanceM));
+    setMapData(null);
+
+    const streetR = Math.min(1500, Math.max(250, preview.maxDistanceM));
+    const load = async (attempt: number): Promise<void> => {
       try {
         const data = await fetchNearbyMap(preview.lat, preview.lng, streetR);
         if (cancelled) return;
         // Prefer server radius; fall back to transit radius for the ring
+        const radiusM =
+          typeof data.radiusM === "number" &&
+          Number.isFinite(data.radiusM) &&
+          data.radiusM > 0
+            ? data.radiusM
+            : preview.maxDistanceM;
         setMapData({
           ...data,
-          radiusM: data.radiusM || preview.maxDistanceM,
+          lat: Number.isFinite(data.lat) ? data.lat : preview.lat,
+          lng: Number.isFinite(data.lng) ? data.lng : preview.lng,
+          radiusM,
         });
         setMapStatus("ready");
       } catch {
-        if (!cancelled) {
-          setMapData(null);
-          setMapStatus("error");
+        if (cancelled) return;
+        // One automatic retry for cold KV / edge blips
+        if (attempt < 1) {
+          await new Promise((r) => setTimeout(r, 450));
+          if (!cancelled) await load(attempt + 1);
+          return;
         }
+        setMapData(null);
+        setMapStatus("error");
       }
-    })();
+    };
+
+    void load(0);
     return () => {
       cancelled = true;
     };
@@ -333,7 +350,16 @@ export function TransitPanelContent({
 
         {view.showMap && (
           <>
-            <div className="transit-section-title">Street map</div>
+            <div className="transit-section-title">
+              Street map
+              <span className="transit-section-count">
+                {mapStatus === "ready" && mapData
+                  ? `${mapData.pathCount ?? mapData.paths.length} ways`
+                  : mapStatus === "loading"
+                    ? "…"
+                    : ""}
+              </span>
+            </div>
             {mapStatus === "loading" && (
               <div className="nearby-loading transit-map-status">
                 Loading street traces…
@@ -341,7 +367,21 @@ export function TransitPanelContent({
             )}
             {mapStatus === "error" && (
               <div className="nearby-error transit-map-status">
-                Street map unavailable
+                <span>Street map unavailable</span>
+                <button
+                  type="button"
+                  className="transit-text-btn"
+                  style={{ marginLeft: 10 }}
+                  onClick={() => {
+                    // Nudge effect by toggling map off/on via view state
+                    setView((v) => ({ ...v, showMap: false }));
+                    window.setTimeout(() => {
+                      setView((v) => ({ ...v, showMap: true }));
+                    }, 40);
+                  }}
+                >
+                  Retry map
+                </button>
               </div>
             )}
             {mapStatus === "ready" && mapData && (
@@ -349,9 +389,21 @@ export function TransitPanelContent({
                 <NearbyMap
                   data={mapData}
                   defaultShowOverlay={true}
-                  title={`Transit streets · ${preview.maxDistanceM}m`}
-                  stops={preview.stops}
+                  title={`Transit streets · ${mapData.radiusM}m`}
+                  stops={preview.stops.filter(
+                    (s) =>
+                      s.lat != null &&
+                      s.lng != null &&
+                      Number.isFinite(s.lat) &&
+                      Number.isFinite(s.lng),
+                  )}
                 />
+                {mapData.stale || mapData.paths.length === 0 ? (
+                  <p className="transit-map-note">
+                    {mapData.note ||
+                      "No live streets for this radius — try another location or radius."}
+                  </p>
+                ) : null}
               </div>
             )}
           </>

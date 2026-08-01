@@ -3248,8 +3248,9 @@ function App() {
   const fetchNearbyMapForTransit = useCallback(
     (lat: number, lng: number, radiusM: number) =>
       fetchNearbyPathsAt(lat, lng, radiusM, { allowCache: true }),
+    // Rebind when auth identity changes so cookie session is always current.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [authUser?.id, authUser?.transitPaid],
   );
 
   const loadWeatherFeed = async () => {
@@ -5619,6 +5620,11 @@ function App() {
         </div>
 
         <div className="nav-right">
+          {/* Globe view controls — portaled from CobeGlobe into this slot */}
+          <div
+            id="globe-controls-slot"
+            className="globe-controls-slot nav-globe-controls-slot"
+          />
           <button
             className="nav-menu-btn"
             onClick={() =>
@@ -5633,11 +5639,11 @@ function App() {
         </div>
       </nav>
 
-      {/* Top chrome: globe controls + Live Feed (tutorial is also top-fixed) */}
-      <div className="top-chrome" aria-label="Globe and live feed controls">
-        <div id="globe-controls-slot" className="globe-controls-slot" />
+      {/* Live Feed app window — launched from the bottom dock */}
+      <div className="live-feed-app-host" aria-live="polite">
         <ActivityFeed
           open={showActivityMenu}
+          showLauncher={false}
           onToggle={() =>
             runRateLimitedButtonAction("activity-toggle", () =>
               setShowActivityMenu((open) => !open),
@@ -7905,10 +7911,65 @@ function App() {
         </div>
       </div>
 
-      {/* macOS-style dock — feature tools (MENU stays in the top nav) */}
+      {/* macOS-style dock — apps (MENU + globe controls stay in the top nav) */}
       <nav className="mac-dock" aria-label="App tools dock">
         <div className="mac-dock-shelf" aria-hidden="true" />
         <div className="mac-dock-inner">
+          <button
+            type="button"
+            className={`mac-dock-item live-feed-dock-item ${
+              showActivityMenu ? "mac-dock-item-open" : ""
+            } ${
+              liveFeedAccess === "ok" && socketStatus === "connected"
+                ? "mac-dock-item-active"
+                : liveFeedAccess !== "ok"
+                  ? "live-feed-dock-locked"
+                  : socketStatus !== "connected"
+                    ? "live-feed-dock-offline"
+                    : ""
+            }`}
+            onClick={() =>
+              runRateLimitedButtonAction("activity-toggle", () =>
+                setShowActivityMenu((open) => !open),
+              )
+            }
+            aria-label="Live Feed app"
+            title={
+              liveFeedAccess === "ok"
+                ? "Live Feed — visitor signals & web support"
+                : liveFeedAccess === "login_required"
+                  ? "Live Feed — sign in, then Stripe ($20)"
+                  : "Live Feed — Stripe unlock required ($20)"
+            }
+            aria-pressed={showActivityMenu}
+            aria-controls="live-feed-menu"
+            aria-expanded={showActivityMenu}
+          >
+            <span className="mac-dock-icon" aria-hidden="true">
+              <span
+                className={`pulse-dot mac-dock-pulse ${
+                  liveFeedAccess !== "ok"
+                    ? "pulse-dot-locked"
+                    : socketStatus === "connecting"
+                      ? "pulse-dot-connecting"
+                      : socketStatus !== "connected"
+                        ? "pulse-dot-offline"
+                        : isFeedPaused
+                          ? "pulse-dot-paused"
+                          : ""
+                }`}
+              />
+              <svg viewBox="0 0 24 24">
+                <path d="M4 6h16" />
+                <path d="M4 12h10" />
+                <path d="M4 18h13" />
+                <circle cx="18.5" cy="12" r="2" />
+                <circle cx="20" cy="18" r="1.5" />
+              </svg>
+            </span>
+            <span className="mac-dock-label">Feed</span>
+          </button>
+          <span className="mac-dock-separator" aria-hidden="true" />
           <button
             type="button"
             className={`mac-dock-item pki-hub-icon-btn ${
@@ -8097,60 +8158,8 @@ function App() {
         <FloatingChrome className="menu-dropdown" aria-label="Global controls menu">
           <div className="menu-dropdown-scroll">
           <div className="menu-dropdown-inner">
-          <div className="menu-section menu-section-un-hub">
-            <div className="menu-section-title">UN Data Hub</div>
-            <button
-              type="button"
-              className={`menu-toggle-item ${showUnHub ? "active" : ""}`}
-              aria-pressed={showUnHub}
-              onClick={() =>
-                runRateLimitedButtonAction("menu-un-hub", () => openUnHub())
-              }
-            >
-              <div className="menu-toggle-copy">
-                <span>🇺🇳 UN hub</span>
-                <small>Trade Pulse · UNODC · UN Global</small>
-              </div>
-              <strong>Open</strong>
-            </button>
-            <div className="menu-section-meta">
-              {[
-                showTradePulsePanel && "Trade Pulse",
-                showUnodcPanel && "UNODC",
-                showUnGlobalPanel && "UN Global",
-              ]
-                .filter(Boolean)
-                .join(" · ") || "No UN layers on globe"}
-            </div>
-          </div>
-
-          <div className="menu-section menu-section-links" aria-label="App links">
-            <a
-              href="https://federalkey.org"
-              className="menu-item"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Federalkey
-            </a>
-            <button
-              type="button"
-              className={`menu-item menu-item-button ${showTransitPanel ? "active" : ""}`}
-              onClick={() => {
-                void loadLocalTransit(false);
-              }}
-            >
-              Local transit
-            </button>
-            <button
-              type="button"
-              className={`menu-item menu-item-button ${showNearbyPanel ? "active" : ""}`}
-              onClick={() => {
-                void loadNearbyPaths(false);
-              }}
-            >
-              Nearby traces
-            </button>
+          {/* UN hub, Federalkey, Transit, Nearby — available via top nav / bottom dock */}
+          <div className="menu-section menu-section-links" aria-label="Account and links">
             <button
               type="button"
               className="menu-item menu-item-button billing-menu-item"

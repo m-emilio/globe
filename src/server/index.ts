@@ -3101,15 +3101,40 @@ function parseTransitStops(raw: unknown): TransitStopPreview[] {
     if (stops.length >= TRANSIT_MAX_STOPS) break;
     const stop = asRecord(item);
     if (!stop) continue;
-    const name = asString(stop.stop_name, 80);
+    const name =
+      asString(stop.stop_name, 80) ||
+      asString(stop.name, 80) ||
+      asString(stop.stop_code, 24);
     if (!name) continue;
+
+    // Transit App / GTFS field variants — coords optional for list, required for map pins
+    const lat =
+      asNumber(stop.stop_lat) ??
+      asNumber(stop.lat) ??
+      asNumber(stop.latitude) ??
+      asNumber(asRecord(stop.location)?.lat) ??
+      asNumber(asRecord(stop.geometry)?.lat);
+    const lng =
+      asNumber(stop.stop_lon) ??
+      asNumber(stop.stop_lng) ??
+      asNumber(stop.lon) ??
+      asNumber(stop.lng) ??
+      asNumber(stop.longitude) ??
+      asNumber(asRecord(stop.location)?.lon) ??
+      asNumber(asRecord(stop.location)?.lng) ??
+      asNumber(asRecord(stop.geometry)?.lon) ??
+      asNumber(asRecord(stop.geometry)?.lng);
+
     stops.push({
-      id: asString(stop.global_stop_id, 80) || `stop-${stops.length}`,
+      id:
+        asString(stop.global_stop_id, 80) ||
+        asString(stop.stop_id, 80) ||
+        `stop-${stops.length}`,
       name,
       code: asString(stop.stop_code, 24),
-      distanceM: asNumber(stop.distance),
-      lat: asNumber(stop.stop_lat),
-      lng: asNumber(stop.stop_lon),
+      distanceM: asNumber(stop.distance) ?? asNumber(stop.distance_m),
+      lat,
+      lng,
       routeType: asNumber(stop.route_type),
     });
   }
@@ -3230,7 +3255,8 @@ async function getTransitNearbyPreview(request: Request, url: URL, env: Env) {
 
   const stopsParams = new URLSearchParams(shared);
   stopsParams.set("stop_filter", "Routable");
-  stopsParams.set("stop_detailed", "false");
+  // Detailed so lat/lon are present for the transit street-map stop pins
+  stopsParams.set("stop_detailed", "true");
 
   try {
     const [routesRaw, stopsRaw] = await Promise.all([

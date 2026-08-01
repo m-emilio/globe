@@ -194,6 +194,11 @@ type ActivityFeedProps = {
   /** Paid web-support chat in Live Feed (client memory only; server-gated) */
   chatMessages?: LiveChatMessage[];
   onSendChat?: (text: string) => boolean;
+  /**
+   * When false, the built-in launcher is hidden (e.g. opened from the dock app).
+   * Panel still renders when `open` is true.
+   */
+  showLauncher?: boolean;
 };
 
 export function ActivityFeed({
@@ -218,6 +223,7 @@ export function ActivityFeed({
   onReconnectSocket,
   chatMessages = [],
   onSendChat,
+  showLauncher = true,
 }: ActivityFeedProps) {
   const isLocked = access !== "ok";
   const socketStatus: GlobeSocketStatus =
@@ -405,51 +411,57 @@ export function ActivityFeed({
         : "Globe socket disconnected — reconnect to resume feed events";
 
   return (
-    <div className="activity-floating">
-      <button
-        type="button"
-        className={`activity-launcher ${open ? "activity-launcher-open" : ""} ${
-          isLocked
-            ? "activity-launcher-locked"
-            : !isLinkUp
-              ? "activity-launcher-offline"
-              : ""
-        }`}
-        onClick={onToggle}
-        aria-controls="live-feed-menu"
-        aria-expanded={open}
-        title={launcherTitle}
-      >
-        <span
-          className={`pulse-dot ${
+    <div
+      className={`activity-floating ${showLauncher ? "" : "activity-floating-app"} ${
+        open ? "activity-floating-open" : ""
+      }`}
+    >
+      {showLauncher ? (
+        <button
+          type="button"
+          className={`activity-launcher ${open ? "activity-launcher-open" : ""} ${
             isLocked
-              ? "pulse-dot-locked"
+              ? "activity-launcher-locked"
               : !isLinkUp
-                ? isLinkConnecting
-                  ? "pulse-dot-connecting"
-                  : "pulse-dot-offline"
+                ? "activity-launcher-offline"
                 : ""
-          } ${isPaused && !isLocked && isLinkUp ? "pulse-dot-paused" : ""}`}
-        />
-        <span className="launcher-copy">
-          <span className="launcher-label">Live Feed</span>
-          <span className="launcher-meta">
-            {launcherMeta}
-            {!isLocked && isPaused && isLinkUp ? " · paused" : ""}
-            {!isLocked && isLinkUp && leaveCount > 0
-              ? ` · ${leaveCount} left`
-              : ""}
+          }`}
+          onClick={onToggle}
+          aria-controls="live-feed-menu"
+          aria-expanded={open}
+          title={launcherTitle}
+        >
+          <span
+            className={`pulse-dot ${
+              isLocked
+                ? "pulse-dot-locked"
+                : !isLinkUp
+                  ? isLinkConnecting
+                    ? "pulse-dot-connecting"
+                    : "pulse-dot-offline"
+                  : ""
+            } ${isPaused && !isLocked && isLinkUp ? "pulse-dot-paused" : ""}`}
+          />
+          <span className="launcher-copy">
+            <span className="launcher-label">Live Feed</span>
+            <span className="launcher-meta">
+              {launcherMeta}
+              {!isLocked && isPaused && isLinkUp ? " · paused" : ""}
+              {!isLocked && isLinkUp && leaveCount > 0
+                ? ` · ${leaveCount} left`
+                : ""}
+            </span>
           </span>
-        </span>
-        <span className="launcher-action">{open ? "Hide" : "Open"}</span>
-      </button>
+          <span className="launcher-action">{open ? "Hide" : "Open"}</span>
+        </button>
+      ) : null}
 
       {open && (
         <section
           id="live-feed-menu"
           className={`activity-menu ${isCompact ? "activity-menu-compact" : ""} ${
             isLocked ? "activity-menu-locked" : ""
-          }`}
+          } ${showLauncher ? "" : "activity-menu-app"}`}
           role="dialog"
           aria-label="Live activity feed"
           aria-modal="false"

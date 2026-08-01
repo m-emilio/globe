@@ -27,18 +27,23 @@ const TOUR_STEPS: SiteTourStep[] = [
   },
   {
     title: "Menu",
-    body: "MENU opens UN hub entry, billing, auth, and app links. Buy Stripe access here after you sign in with a PGP key.",
-    hint: "Top-right · MENU stays in the nav.",
+    body: "MENU opens billing, auth, admin, and app links. Buy Stripe access here after you sign in with a PGP key.",
+    hint: "Top-right · MENU in the nav.",
   },
   {
-    title: "Globe controls & Live Feed",
-    body: "Top chrome has globe zoom/motion controls and Live Feed. After Stripe unlock, open Live Feed for join/leave detail and paid web support chat.",
-    hint: "Top of the screen · under the nav.",
+    title: "Globe controls",
+    body: "The Globe button next to MENU zooms, toggles auto-rotate, and resets the view.",
+    hint: "Top-right nav · next to MENU.",
   },
   {
     title: "App dock",
-    body: "PKI, UN hub, Transit, Nearby, and Weather live in the macOS-style dock at the bottom of the screen.",
+    body: "Live Feed, PKI, UN hub, Transit, Nearby, and Weather live in the macOS-style dock at the bottom of the screen.",
     hint: "Bottom center · hover to magnify.",
+  },
+  {
+    title: "Live Feed app",
+    body: "Open Feed from the dock for paid join/leave detail and web support chat after Stripe unlock. Globe markers stay free.",
+    hint: "Bottom dock · Feed.",
   },
   {
     title: "PKI / CVE hub",
@@ -63,7 +68,7 @@ const TOUR_STEPS: SiteTourStep[] = [
   {
     title: "Web support chat",
     body: "Paid Live Feed includes an ephemeral web support channel for help while you browse. Relay only — not stored on the server.",
-    hint: "Top · Live Feed → Web support (Stripe).",
+    hint: "Dock · Feed → Web support (Stripe).",
   },
   {
     title: "PGP sign-in",
@@ -72,7 +77,7 @@ const TOUR_STEPS: SiteTourStep[] = [
   },
   {
     title: "You’re set",
-    body: "Explore hubs from the dock, watch the globe, and open Live Feed for presence or paid support chat. Finish the tour or skip when you’re ready.",
+    body: "Explore apps from the dock, use Globe next to MENU for view controls, and open Feed for presence or paid support chat.",
     hint: "Use ← → or the dots to revisit any step.",
   },
 ];

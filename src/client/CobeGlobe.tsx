@@ -1530,7 +1530,7 @@ export function Cobe({
         }
         title="Globe view controls"
       >
-        {isGlobeControlsOpen ? "Globe ▴" : "Globe ▾"}
+        {isGlobeControlsOpen ? "Globe ▲" : "Globe"}
       </button>
       {isGlobeControlsOpen && (
         <div id="globe-controls-panel" className="globe-controls-panel">
