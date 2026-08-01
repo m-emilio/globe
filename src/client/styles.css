@@ -16,6 +16,8 @@
   --safe-right: env(safe-area-inset-right, 0px);
   --text-primary: #e8eef5;
   --text-muted: #9aa7b5;
+  /* Bottom mac-dock: bottom offset + shelf padding + icons + gap above dock */
+  --dock-clearance: calc(96px + env(safe-area-inset-bottom, 0px));
 }
 
 html {
@@ -2130,10 +2132,10 @@ a.nav-title:focus-visible {
   }
 }
 
-/* Menu Dropdown */
+/* Menu Dropdown — height stops short of the bottom dock so it never sits under it */
 .menu-dropdown {
   position: fixed;
-  top: 70px;
+  top: var(--nav-offset, 70px);
   right: 30px;
   display: flex;
   flex-direction: column;
@@ -2143,8 +2145,13 @@ a.nav-title:focus-visible {
   z-index: 1004;
   width: min(460px, calc(100vw - 24px));
   max-width: min(460px, calc(100vw - 24px));
-  max-height: calc(100vh - 90px);
-  max-height: calc(100dvh - 90px);
+  /* Viewport − nav − dock clearance (icons + safe area + gap) */
+  max-height: calc(
+    100vh - var(--nav-offset, 70px) - var(--dock-clearance, 96px)
+  );
+  max-height: calc(
+    100dvh - var(--nav-offset, 70px) - var(--dock-clearance, 96px)
+  );
   box-shadow: 0 0 20px rgba(0, 217, 255, 0.3);
   overflow: hidden;
   font-size: 14px;
@@ -7204,16 +7211,20 @@ button[aria-busy="true"],
 
   /* Sit directly under the compact nav — not mid-screen */
   .menu-dropdown {
-    top: calc(var(--mobile-nav-height) + 4px);
+    top: calc(var(--nav-offset, var(--mobile-nav-height)) + 4px);
     right: 8px;
     left: 8px;
     width: auto;
     max-width: none;
+    /* Compact dock is slightly shorter; keep a clear gap above it */
+    --dock-clearance: calc(88px + env(safe-area-inset-bottom, 0px));
     max-height: calc(
-      100vh - var(--mobile-nav-height) - 12px - env(safe-area-inset-bottom, 0px)
+      100vh - var(--nav-offset, var(--mobile-nav-height)) -
+        var(--dock-clearance)
     );
     max-height: calc(
-      100dvh - var(--mobile-nav-height) - 12px - env(safe-area-inset-bottom, 0px)
+      100dvh - var(--nav-offset, var(--mobile-nav-height)) -
+        var(--dock-clearance)
     );
     font-size: 14px;
   }
@@ -7614,9 +7625,11 @@ button[aria-busy="true"],
   }
 
   .menu-dropdown {
-    top: calc(var(--mobile-nav-height) + 6px);
+    top: calc(var(--nav-offset, var(--mobile-nav-height)) + 6px);
+    --dock-clearance: calc(84px + env(safe-area-inset-bottom, 0px));
     max-height: calc(
-      100dvh - var(--mobile-nav-height) - 12px - env(safe-area-inset-bottom, 0px)
+      100dvh - var(--nav-offset, var(--mobile-nav-height)) -
+        var(--dock-clearance)
     );
     font-size: 13px;
   }

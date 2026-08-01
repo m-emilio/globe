@@ -215,11 +215,62 @@ function looksLikePublicKey(armored: string): boolean {
   return /BEGIN PGP PUBLIC KEY BLOCK/i.test(armored);
 }
 
+/**
+ * Client IP for rate-limit keys. Prefer Cloudflare edge identity only —
+ * never trust X-Forwarded-For (clients can spoof it and bypass limits).
+ */
 export function clientIp(request: Request): string {
-  return (
-    request.headers.get("cf-connecting-ip") ||
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "unknown"
+  const cf =
+    request.headers.get("cf-connecting-ip")?.trim() ||
+    (typeof request.cf?.clientIp === "string"
+      ? request.cf.clientIp.trim()
+      : "");
+  if (cf && cf.length <= 64) return cf;
+  // Intentionally ignore X-Forwarded-For / X-Real-IP
+  return "unknown";
+}
+
+/** Default max JSON body for auth/admin/billing POSTs (public key is ≤32k). */
+export const MAX_JSON_BODY_BYTES = 48_000;
+
+/**
+ * Read and parse a JSON body with a hard size cap (Content-Length + actual bytes).
+ * Prevents isolate memory pressure from multi‑MB POSTs.
+ */
+export async function readJsonBody(
+  request: Request,
+  maxBytes = MAX_JSON_BODY_BYTES,
+): Promise<unknown> {
+  const cl = request.headers.get("content-length");
+  if (cl) {
+    const n = Number(cl);
+    if (Number.isFinite(n) && n > maxBytes) {
+      throw new Error("body_too_large");
+    }
+  }
+  const buf = await request.arrayBuffer();
+  if (buf.byteLength > maxBytes) {
+    throw new Error("body_too_large");
+  }
+  if (buf.byteLength === 0) return {};
+  const text = new TextDecoder("utf-8").decode(buf);
+  // Reject obvious non-JSON / binary spam early
+  if (text.length > maxBytes) {
+    throw new Error("body_too_large");
+  }
+  return JSON.parse(text) as unknown;
+}
+
+function bodyTooLargeResponse(
+  applySecurityHeaders?: SecurityHeadersFn,
+): Response {
+  return json(
+    {
+      error: "body_too_large",
+      message: "Request body exceeds size limit.",
+    },
+    { status: 413 },
+    applySecurityHeaders,
   );
 }
 
@@ -660,9 +711,19 @@ export async function registerUser(
 
   let body: { publicKeyArmored?: string } = {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return json(
+        { error: "invalid_json" },
+        { status: 400 },
+        applySecurityHeaders,
+      );
+    }
     assertNoPrivateKeyMaterial(body);
   } catch (error) {
+    if (error instanceof Error && error.message === "body_too_large") {
+      return bodyTooLargeResponse(applySecurityHeaders);
+    }
     if (error instanceof Error && error.message === "private_key_rejected") {
       return json(
         {
@@ -793,9 +854,19 @@ export async function createAuthChallenge(
 
   let body: { fingerprint?: string; publicKeyArmored?: string } = {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return json(
+        { error: "invalid_json" },
+        { status: 400 },
+        applySecurityHeaders,
+      );
+    }
     assertNoPrivateKeyMaterial(body);
   } catch (error) {
+    if (error instanceof Error && error.message === "body_too_large") {
+      return bodyTooLargeResponse(applySecurityHeaders);
+    }
     if (error instanceof Error && error.message === "private_key_rejected") {
       return json(
         {
@@ -925,9 +996,19 @@ export async function loginUser(
     signatureArmored?: string;
   } = {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return json(
+        { error: "invalid_json" },
+        { status: 400 },
+        applySecurityHeaders,
+      );
+    }
     assertNoPrivateKeyMaterial(body);
   } catch (error) {
+    if (error instanceof Error && error.message === "body_too_large") {
+      return bodyTooLargeResponse(applySecurityHeaders);
+    }
     if (error instanceof Error && error.message === "private_key_rejected") {
       return json(
         {
@@ -1154,11 +1235,18 @@ export async function adoptSessionToken(
   let bodyToken: string | null = null;
   try {
     if (request.method === "POST") {
-      const body = (await request.json()) as { sessionToken?: string };
-      assertNoPrivateKeyMaterial(body);
-      bodyToken = parseSessionTokenCandidate(body.sessionToken);
+      const body = (await readJsonBody(request, 4_096)) as {
+        sessionToken?: string;
+      };
+      if (body && typeof body === "object" && !Array.isArray(body)) {
+        assertNoPrivateKeyMaterial(body);
+        bodyToken = parseSessionTokenCandidate(body.sessionToken);
+      }
     }
   } catch (error) {
+    if (error instanceof Error && error.message === "body_too_large") {
+      return bodyTooLargeResponse(applySecurityHeaders);
+    }
     if (error instanceof Error && error.message === "private_key_rejected") {
       return json(
         { error: "private_key_rejected" },
@@ -1429,7 +1517,9 @@ export async function requireTransitAccess(
   const rateLimit = options?.rateLimit ?? 30;
   const featureName = options?.featureName ?? "Local Transit";
 
-  const limited = rateLimitOrNull(
+  // Durable when KV is present so multi-isolate spam cannot bypass in-memory only
+  const limited = await rateLimitDurable(
+    env,
     `${rateKey}:${clientIp(request)}`,
     rateLimit,
     60_000,

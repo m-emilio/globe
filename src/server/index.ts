@@ -1028,6 +1028,7 @@ function limitText(value: string | undefined, maxLength: number) {
 }
 
 function getClientIp(request: Request) {
+  // Cloudflare-only — never X-Forwarded-For (spoofable by clients)
   return limitText(
     request.headers.get("cf-connecting-ip") ??
       (request.cf?.clientIp as string | undefined),
@@ -1038,6 +1039,17 @@ function getClientIp(request: Request) {
 /** Alias for rate-limit keys on public preview routes */
 function clientIpFromRequest(request: Request): string {
   return getClientIp(request) || "unknown";
+}
+
+/** Reject weird /api path tricks before handlers (null bytes, encoded dots, etc.) */
+function isSuspiciousApiPath(pathname: string): boolean {
+  if (!pathname.startsWith("/api/")) return false;
+  if (pathname.length > 256) return true;
+  if (pathname.includes("\0") || pathname.includes("\\")) return true;
+  if (pathname.includes("..")) return true;
+  // Double-slash /api//foo can confuse caches
+  if (pathname.includes("//")) return true;
+  return false;
 }
 
 function limitApiText(value: unknown, maxLength: number) {
@@ -4342,6 +4354,20 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
+
+    // Harden API routing surface against path-confusion probes
+    if (url.pathname.startsWith("/api/") && isSuspiciousApiPath(url.pathname)) {
+      return withSecurityHeaders(
+        new Response(JSON.stringify({ error: "not_found" }), {
+          status: 404,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store",
+          },
+        }),
+        request,
+      );
+    }
 
     // Path A: Comtrade + Trade Pulse stay free/public (not Stripe-gated).
     // Monetization is Transit / Live Feed only. Do not expose or resell UN API keys.

@@ -12,8 +12,10 @@ import Stripe from "stripe";
 import {
   getSessionUser,
   rateLimitOrNull,
+  rateLimitDurable,
   setUserTransitPaid,
   clientIp,
+  readJsonBody,
   type AuthEnv,
 } from "./auth";
 
@@ -22,6 +24,10 @@ const DEFAULT_PAYMENT_LINK_URL =
 const PAYMENT_LINK_KV_KEY = "stripe:payment_link_url";
 const CATALOG_KV_KEY = "stripe:catalog";
 const CLAIMED_SESSION_PREFIX = "payment:claimed:";
+const STRIPE_CHECKOUT_HOSTS = new Set([
+  "buy.stripe.com",
+  "checkout.stripe.com",
+]);
 
 export type BillingEnv = AuthEnv & {
   STRIPE_SECRET_KEY?: string;
@@ -117,8 +123,33 @@ function createStripeClient(secretKey: string) {
   } as ConstructorParameters<typeof Stripe>[1]);
 }
 
+/**
+ * Only https://buy.stripe.com or checkout.stripe.com Payment Links.
+ * Rejects poisoned KV / misconfigured env values that would open-redirect.
+ */
+function isAllowedStripePaymentUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw.trim());
+    if (u.protocol !== "https:") return false;
+    if (u.username || u.password) return false;
+    const host = u.hostname.toLowerCase();
+    if (!STRIPE_CHECKOUT_HOSTS.has(host)) return false;
+    // No path tricks that leave the hosted Checkout surface
+    if (u.pathname.includes("..")) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function resolvePaymentLinkUrl(env: BillingEnv): string {
-  return env.STRIPE_PAYMENT_LINK_URL?.trim() || DEFAULT_PAYMENT_LINK_URL;
+  const fromEnv = env.STRIPE_PAYMENT_LINK_URL?.trim() || "";
+  if (fromEnv && isAllowedStripePaymentUrl(fromEnv)) return fromEnv;
+  if (isAllowedStripePaymentUrl(DEFAULT_PAYMENT_LINK_URL)) {
+    return DEFAULT_PAYMENT_LINK_URL;
+  }
+  // Fail closed — never return an unvalidated URL
+  return "https://buy.stripe.com/";
 }
 
 function entitlementUserKey(userId: string) {
@@ -142,7 +173,8 @@ export async function getPaymentLink(
   env: BillingEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const limited = rateLimitOrNull(
+  const limited = await rateLimitDurable(
+    env,
     `billing:link:${clientIp(request)}`,
     20,
     60_000,
@@ -175,17 +207,46 @@ export async function getPaymentLink(
     );
   }
 
-  let paymentLinkUrl =
-    (env.BILLING_KV && (await env.BILLING_KV.get(PAYMENT_LINK_KV_KEY))) ||
-    resolvePaymentLinkUrl(env);
+  // Prefer env-validated default; only use KV if host still allow-listed
+  let paymentLinkUrl = resolvePaymentLinkUrl(env);
+  if (env.BILLING_KV) {
+    const fromKv = (await env.BILLING_KV.get(PAYMENT_LINK_KV_KEY))?.trim();
+    if (fromKv && isAllowedStripePaymentUrl(fromKv)) {
+      paymentLinkUrl = fromKv;
+    }
+  }
+
+  if (!isAllowedStripePaymentUrl(paymentLinkUrl)) {
+    return json(
+      {
+        error: "payment_link_invalid",
+        message: "Payment link is misconfigured.",
+      },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
 
   // Always bind checkout to the authenticated user id (never client-supplied).
   try {
     const link = new URL(paymentLinkUrl);
+    // Drop any previously stored query noise; re-set only server-owned params
+    link.search = "";
     link.searchParams.set("client_reference_id", session.user.id);
-    // Strip any client-tampered params that might have been stored in KV.
     paymentLinkUrl = link.toString();
   } catch {
+    return json(
+      {
+        error: "payment_link_invalid",
+        message: "Payment link is misconfigured.",
+      },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+
+  // Final host check after re-serialization
+  if (!isAllowedStripePaymentUrl(paymentLinkUrl)) {
     return json(
       {
         error: "payment_link_invalid",
@@ -324,7 +385,8 @@ export async function claimCheckoutSession(
   env: BillingEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const limited = rateLimitOrNull(
+  const limited = await rateLimitDurable(
+    env,
     `billing:claim:${clientIp(request)}`,
     10,
     60_000,
@@ -363,16 +425,29 @@ export async function claimCheckoutSession(
 
   let body: { session_id?: string } = {};
   try {
-    body = (await request.json()) as typeof body;
-  } catch {
+    const parsed = await readJsonBody(request, 4_096);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      body = parsed as typeof body;
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "body_too_large") {
+      return json(
+        { error: "body_too_large", message: "Request body exceeds size limit." },
+        { status: 413 },
+        applySecurityHeaders,
+      );
+    }
     body = {};
   }
 
   const url = new URL(request.url);
   const sessionId =
-    body.session_id?.trim() || url.searchParams.get("session_id")?.trim();
+    (typeof body.session_id === "string" ? body.session_id.trim() : "") ||
+    url.searchParams.get("session_id")?.trim() ||
+    "";
 
-  if (!sessionId || !/^cs_[a-zA-Z0-9_]+$/.test(sessionId)) {
+  // Stripe Checkout session ids only — reject injection / path probes
+  if (!sessionId || !/^cs_(test_|live_)?[a-zA-Z0-9]{8,200}$/.test(sessionId)) {
     return json(
       { error: "session_id_required" },
       { status: 400 },
@@ -552,7 +627,8 @@ export async function ensureBillingCatalog(
   env: BillingEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const limited = rateLimitOrNull(
+  const limited = await rateLimitDurable(
+    env,
     `billing:catalog:${clientIp(request)}`,
     20,
     60_000,
@@ -573,6 +649,17 @@ export async function ensureBillingCatalog(
   }
 
   const paymentLinkUrl = resolvePaymentLinkUrl(env);
+  if (!isAllowedStripePaymentUrl(paymentLinkUrl)) {
+    return json(
+      {
+        error: "payment_link_invalid",
+        message: "Payment link is misconfigured.",
+      },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+
   const catalog: BillingCatalog = {
     paymentLinkUrl,
     label: "Transit + Live Feed + support chat",
@@ -581,6 +668,7 @@ export async function ensureBillingCatalog(
   };
 
   if (env.BILLING_KV) {
+    // Only persist allow-listed Stripe hosts into KV
     await env.BILLING_KV.put(PAYMENT_LINK_KV_KEY, paymentLinkUrl);
     await env.BILLING_KV.put(CATALOG_KV_KEY, JSON.stringify(catalog));
   }
