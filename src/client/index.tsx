@@ -957,6 +957,170 @@ const DEFAULT_WEATHER_LOCATION = {
   label: "New York, NY",
 };
 
+/** v2: hardened parse (plain object only, capped payload, strong label sanitize). */
+const LOCATION_PREF_KEY = "globe:location-pref:v2";
+const LOCATION_PREF_LEGACY_KEY = "globe:location-pref:v1";
+const LOCATION_PREF_MAX_BYTES = 512;
+/** Min interval between browser geolocation prompts/calls (anti-spam / battery). */
+const GEO_REQUEST_MIN_MS = 4_000;
+const NEARBY_SESSION_MAX_PATHS = 400;
+const NEARBY_SESSION_MAX_POINTS = 80;
+const NEARBY_SESSION_MAX_RAW = 450_000;
+
+type LocationMode = "browser" | "manual";
+
+type LocationPreference = {
+  mode: LocationMode;
+  latitude: number;
+  longitude: number;
+  label: string;
+};
+
+const DEFAULT_LOCATION_PREF: LocationPreference = {
+  mode: "browser",
+  latitude: DEFAULT_WEATHER_LOCATION.latitude,
+  longitude: DEFAULT_WEATHER_LOCATION.longitude,
+  label: DEFAULT_WEATHER_LOCATION.label,
+};
+
+function clampCoord(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Display-only location label. Strip controls, bidi spoofing, and zero-widths
+ * (same class of issues as chat display names).
+ */
+function sanitizeLocationLabel(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  return raw
+    // eslint-disable-next-line no-control-regex
+    .replace(
+      /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u202F\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/g,
+      "",
+    )
+    .replace(/[<>`"\\]/g, "")
+    .trim()
+    .slice(0, 64);
+}
+
+function parseFiniteCoord(raw: unknown, min: number, max: number): number | null {
+  // Numbers only from storage — reject objects/arrays that Number() coerces to NaN/0
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    if (raw < min || raw > max) return null;
+    return raw;
+  }
+  if (typeof raw === "string" && raw.trim().length > 0 && raw.trim().length <= 24) {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < min || n > max) return null;
+    return n;
+  }
+  return null;
+}
+
+function isPlainLocationObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function normalizeLocationPreference(
+  raw: unknown,
+): LocationPreference {
+  if (!isPlainLocationObject(raw)) return { ...DEFAULT_LOCATION_PREF };
+  const mode: LocationMode = raw.mode === "manual" ? "manual" : "browser";
+  const latitude =
+    parseFiniteCoord(raw.latitude, -90, 90) ??
+    DEFAULT_WEATHER_LOCATION.latitude;
+  const longitude =
+    parseFiniteCoord(raw.longitude, -180, 180) ??
+    DEFAULT_WEATHER_LOCATION.longitude;
+  const label =
+    sanitizeLocationLabel(raw.label) ||
+    (mode === "manual" ? "Custom location" : DEFAULT_WEATHER_LOCATION.label);
+  return { mode, latitude, longitude, label };
+}
+
+function loadLocationPreference(): LocationPreference {
+  try {
+    let raw = localStorage.getItem(LOCATION_PREF_KEY);
+    if (!raw) {
+      raw = localStorage.getItem(LOCATION_PREF_LEGACY_KEY);
+    }
+    if (!raw || raw.length > LOCATION_PREF_MAX_BYTES) {
+      return { ...DEFAULT_LOCATION_PREF };
+    }
+    const parsed: unknown = JSON.parse(raw);
+    const pref = normalizeLocationPreference(parsed);
+    // Migrate legacy key to v2 once
+    if (localStorage.getItem(LOCATION_PREF_LEGACY_KEY)) {
+      saveLocationPreference(pref);
+      try {
+        localStorage.removeItem(LOCATION_PREF_LEGACY_KEY);
+      } catch {
+        // ignore
+      }
+    }
+    return pref;
+  } catch {
+    return { ...DEFAULT_LOCATION_PREF };
+  }
+}
+
+function saveLocationPreference(pref: LocationPreference): void {
+  try {
+    const safe = normalizeLocationPreference(pref);
+    const payload = JSON.stringify({
+      mode: safe.mode,
+      latitude: safe.latitude,
+      longitude: safe.longitude,
+      label: safe.label,
+    });
+    if (payload.length > LOCATION_PREF_MAX_BYTES) return;
+    localStorage.setItem(LOCATION_PREF_KEY, payload);
+  } catch {
+    // private mode / blocked storage
+  }
+}
+
+function formatCoordPair(lat: number, lng: number): string {
+  const safeLat = clampCoord(lat, -90, 90);
+  const safeLng = clampCoord(lng, -180, 180);
+  const ns = safeLat >= 0 ? "N" : "S";
+  const ew = safeLng >= 0 ? "E" : "W";
+  return `${Math.abs(safeLat).toFixed(4)}°${ns}, ${Math.abs(safeLng).toFixed(4)}°${ew}`;
+}
+
+/** Validate a nearby-paths session cache blob before trusting geometry. */
+function isValidNearbyPathsCache(data: unknown): data is NearbyPathsPreview {
+  if (!isPlainLocationObject(data)) return false;
+  if (data.stale === true) return false;
+  if (typeof data.lat !== "number" || !Number.isFinite(data.lat)) return false;
+  if (typeof data.lng !== "number" || !Number.isFinite(data.lng)) return false;
+  if (data.lat < -90 || data.lat > 90 || data.lng < -180 || data.lng > 180) {
+    return false;
+  }
+  if (typeof data.radiusM !== "number" || !Number.isFinite(data.radiusM)) {
+    return false;
+  }
+  if (data.radiusM < 50 || data.radiusM > 5000) return false;
+  if (!Array.isArray(data.paths) || data.paths.length === 0) return false;
+  if (data.paths.length > NEARBY_SESSION_MAX_PATHS) return false;
+  // Spot-check structure without walking every point on huge valid caches
+  const sample = data.paths.slice(0, 8);
+  for (const path of sample) {
+    if (!isPlainLocationObject(path)) return false;
+    if (typeof path.id !== "string" || path.id.length > 80) return false;
+    if (!Array.isArray(path.points) || path.points.length < 2) return false;
+    if (path.points.length > NEARBY_SESSION_MAX_POINTS * 4) return false;
+    const p0 = path.points[0];
+    if (!isPlainLocationObject(p0)) return false;
+    if (typeof p0.lat !== "number" || typeof p0.lng !== "number") return false;
+  }
+  return true;
+}
+
 const WEATHER_CODE_LABELS: Record<number, string> = {
   0: "Clear",
   1: "Mostly clear",
@@ -1147,25 +1311,41 @@ function describeWeatherCode(code: number) {
   return WEATHER_CODE_LABELS[code] ?? `Weather code ${code}`;
 }
 
+/** Shared throttle so UI + automatic resolve cannot spam the Geolocation API. */
+let lastGeoRequestAt = 0;
+
 function getBrowserPosition(timeoutMs = 5000) {
   return new Promise<GeolocationPosition>((resolve, reject) => {
     if (!navigator.geolocation) {
       reject(new Error("Geolocation unavailable"));
       return;
     }
+    const now = Date.now();
+    if (now - lastGeoRequestAt < GEO_REQUEST_MIN_MS) {
+      reject(new Error("Location request throttled — try again in a moment."));
+      return;
+    }
+    lastGeoRequestAt = now;
 
     navigator.geolocation.getCurrentPosition(resolve, reject, {
       enableHighAccuracy: false,
-      timeout: timeoutMs,
+      timeout: Math.min(Math.max(timeoutMs, 1_000), 15_000),
+      // Prefer a recent cached fix to reduce permission churn / battery
       maximumAge: 10 * 60 * 1000,
     });
   });
 }
 
 function buildWeatherUrl(latitude: number, longitude: number) {
+  const lat = clampCoord(latitude, -90, 90);
+  const lng = clampCoord(longitude, -180, 180);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    throw new Error("Invalid weather coordinates");
+  }
   const params = new URLSearchParams({
-    latitude: String(latitude),
-    longitude: String(longitude),
+    // Fixed precision — no raw untrusted strings in query
+    latitude: lat.toFixed(5),
+    longitude: lng.toFixed(5),
     current: "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
     daily:
       "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max",
@@ -1566,6 +1746,20 @@ function App() {
   }, []);
   const [showAbout, setShowAbout] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [locationPref, setLocationPref] = useState<LocationPreference>(() =>
+    loadLocationPreference(),
+  );
+  const [locationDraftLat, setLocationDraftLat] = useState(() =>
+    String(loadLocationPreference().latitude),
+  );
+  const [locationDraftLng, setLocationDraftLng] = useState(() =>
+    String(loadLocationPreference().longitude),
+  );
+  const [locationDraftLabel, setLocationDraftLabel] = useState(() =>
+    loadLocationPreference().label,
+  );
+  const [locationBusy, setLocationBusy] = useState(false);
+  const [locationMessage, setLocationMessage] = useState("");
   const [showWeatherPanel, setShowWeatherPanel] = useState(false);
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>("idle");
   const [weatherFeed, setWeatherFeed] = useState<WeatherFeed | null>(null);
@@ -2745,19 +2939,19 @@ function App() {
           data.message || data.error || "Payment link unavailable",
         );
       }
-      // Only allow same-origin-configured Stripe Payment Link hosts.
+      // Only allow known Stripe Checkout hosts (open-redirect hard block).
       let checkoutUrl: URL;
       try {
         checkoutUrl = new URL(data.url);
       } catch {
         throw new Error("Invalid payment link from server");
       }
+      const host = checkoutUrl.hostname.toLowerCase();
       if (
         checkoutUrl.protocol !== "https:" ||
-        !(
-          checkoutUrl.hostname === "buy.stripe.com" ||
-          checkoutUrl.hostname === "checkout.stripe.com"
-        )
+        checkoutUrl.username ||
+        checkoutUrl.password ||
+        !(host === "buy.stripe.com" || host === "checkout.stripe.com")
       ) {
         throw new Error("Unexpected payment link host");
       }
@@ -2975,25 +3169,161 @@ function App() {
     setActivityFilter(filter);
   }, []);
 
-  const resolveUserCoordinates = async (timeoutMs = 5000) => {
+  const applyLocationPreference = useCallback((next: LocationPreference) => {
+    const pref = normalizeLocationPreference(next);
+    setLocationPref(pref);
+    saveLocationPreference(pref);
+    setLocationDraftLat(String(pref.latitude));
+    setLocationDraftLng(String(pref.longitude));
+    setLocationDraftLabel(pref.label);
+    return pref;
+  }, []);
+
+  const resolveUserCoordinates = useCallback(
+    async (timeoutMs = 5000) => {
+      // Manual override always wins for transit / nearby / weather
+      if (locationPref.mode === "manual") {
+        return {
+          latitude: locationPref.latitude,
+          longitude: locationPref.longitude,
+          label: locationPref.label || "Custom location",
+        };
+      }
+
+      try {
+        const position = await getBrowserPosition(timeoutMs);
+        const latitude = clampCoord(position.coords.latitude, -90, 90);
+        const longitude = clampCoord(position.coords.longitude, -180, 180);
+        // Remember last successful browser fix for menu display / fallback
+        // (avoid setState churn when coordinates did not change)
+        setLocationPref((prev) => {
+          if (
+            prev.mode === "browser" &&
+            Math.abs(prev.latitude - latitude) < 1e-5 &&
+            Math.abs(prev.longitude - longitude) < 1e-5
+          ) {
+            return prev;
+          }
+          const next: LocationPreference = {
+            mode: "browser",
+            latitude,
+            longitude,
+            label: "Your location",
+          };
+          saveLocationPreference(next);
+          return next;
+        });
+        return {
+          latitude,
+          longitude,
+          label: "Your location",
+        };
+      } catch {
+        // Prefer last known coords over hard-coded NYC when available
+        if (
+          Number.isFinite(locationPref.latitude) &&
+          Number.isFinite(locationPref.longitude) &&
+          !(
+            locationPref.latitude === DEFAULT_WEATHER_LOCATION.latitude &&
+            locationPref.longitude === DEFAULT_WEATHER_LOCATION.longitude
+          )
+        ) {
+          return {
+            latitude: locationPref.latitude,
+            longitude: locationPref.longitude,
+            label: locationPref.label || "Last known location",
+          };
+        }
+        return {
+          latitude: DEFAULT_WEATHER_LOCATION.latitude,
+          longitude: DEFAULT_WEATHER_LOCATION.longitude,
+          label: DEFAULT_WEATHER_LOCATION.label,
+        };
+      }
+    },
+    [locationPref],
+  );
+
+  const requestBrowserLocation = useCallback(async () => {
+    setLocationBusy(true);
+    setLocationMessage("");
     try {
-      const position = await getBrowserPosition(timeoutMs);
-      return {
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
+      if (!navigator.geolocation) {
+        throw new Error("This browser does not support geolocation.");
+      }
+      const position = await getBrowserPosition(10_000);
+      const latitude = clampCoord(position.coords.latitude, -90, 90);
+      const longitude = clampCoord(position.coords.longitude, -180, 180);
+      applyLocationPreference({
+        mode: "browser",
+        latitude,
+        longitude,
         label: "Your location",
-      };
-    } catch {
-      return {
-        latitude: DEFAULT_WEATHER_LOCATION.latitude,
-        longitude: DEFAULT_WEATHER_LOCATION.longitude,
-        label: DEFAULT_WEATHER_LOCATION.label,
-      };
+      });
+      setLocationMessage(
+        `Browser location set · ${formatCoordPair(latitude, longitude)}`,
+      );
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? Number((error as GeolocationPositionError).code)
+          : 0;
+      let message =
+        error instanceof Error ? error.message : "Could not read location";
+      if (code === 1) {
+        message =
+          "Location permission denied. Allow location in browser settings, or set coordinates manually.";
+      } else if (code === 2) {
+        message = "Position unavailable. Try again or set coordinates manually.";
+      } else if (code === 3) {
+        message = "Location request timed out. Try again or set manually.";
+      }
+      setLocationMessage(message);
+    } finally {
+      setLocationBusy(false);
     }
-  };
+  }, [applyLocationPreference]);
+
+  const applyManualLocation = useCallback(() => {
+    setLocationMessage("");
+    // Reject oversized draft strings before Number() (DoS / weird coercion)
+    if (
+      locationDraftLat.trim().length > 24 ||
+      locationDraftLng.trim().length > 24
+    ) {
+      setLocationMessage("Coordinates are too long.");
+      return;
+    }
+    const latitude = parseFiniteCoord(locationDraftLat.trim(), -90, 90);
+    const longitude = parseFiniteCoord(locationDraftLng.trim(), -180, 180);
+    if (latitude === null) {
+      setLocationMessage("Latitude must be a number between −90 and 90.");
+      return;
+    }
+    if (longitude === null) {
+      setLocationMessage("Longitude must be a number between −180 and 180.");
+      return;
+    }
+    const label =
+      sanitizeLocationLabel(locationDraftLabel) || "Custom location";
+    applyLocationPreference({
+      mode: "manual",
+      latitude,
+      longitude,
+      label,
+    });
+    setLocationMessage(
+      `Manual location saved · ${formatCoordPair(latitude, longitude)}`,
+    );
+  }, [
+    locationDraftLat,
+    locationDraftLng,
+    locationDraftLabel,
+    applyLocationPreference,
+  ]);
 
   const nearbySessionKey = (latitude: number, longitude: number, radiusM: number) =>
-    `globe-nearby-v8:${latitude.toFixed(4)}:${longitude.toFixed(4)}:${radiusM}`;
+    `globe-nearby-v8:${clampCoord(latitude, -90, 90).toFixed(4)}:${clampCoord(longitude, -180, 180).toFixed(4)}:${Math.round(radiusM)}`;
 
   const readNearbySessionCache = (
     latitude: number,
@@ -3004,10 +3334,18 @@ function App() {
       const raw = sessionStorage.getItem(
         nearbySessionKey(latitude, longitude, radiusM),
       );
-      if (!raw) return null;
-      const data = JSON.parse(raw) as NearbyPathsPreview;
-      // Never restore empty/stale frames from session cache
-      if (!data?.paths?.length || data.stale) return null;
+      if (!raw || raw.length > NEARBY_SESSION_MAX_RAW) return null;
+      const data: unknown = JSON.parse(raw);
+      // Structural validation — never restore empty/stale/poisoned geometry
+      if (!isValidNearbyPathsCache(data)) return null;
+      // Cache key must match stored center (prevents cross-location reuse)
+      if (
+        Math.abs(data.lat - latitude) > 0.00015 ||
+        Math.abs(data.lng - longitude) > 0.00015 ||
+        Math.abs(data.radiusM - radiusM) > 1
+      ) {
+        return null;
+      }
       return data;
     } catch {
       return null;
@@ -3020,11 +3358,13 @@ function App() {
     radiusM: number,
     data: NearbyPathsPreview,
   ) => {
-    if (!data.paths?.length || data.stale) return;
+    if (!isValidNearbyPathsCache(data)) return;
     try {
+      const payload = JSON.stringify(data);
+      if (payload.length > NEARBY_SESSION_MAX_RAW) return;
       sessionStorage.setItem(
         nearbySessionKey(latitude, longitude, radiusM),
-        JSON.stringify(data),
+        payload,
       );
     } catch {
       // quota / private mode — ignore
@@ -8158,7 +8498,156 @@ function App() {
         <FloatingChrome className="menu-dropdown" aria-label="Global controls menu">
           <div className="menu-dropdown-scroll">
           <div className="menu-dropdown-inner">
-          {/* UN hub, Federalkey, Transit, Nearby — available via top nav / bottom dock */}
+          <div
+            className="menu-section menu-section-location"
+            aria-label="Location settings"
+          >
+            <div className="menu-section-title">Location</div>
+            <div className="menu-section-meta location-pref-summary">
+              <strong>
+                {locationPref.mode === "browser"
+                  ? "Browser GPS"
+                  : "Manual coordinates"}
+              </strong>
+              <span>
+                {locationPref.label || "—"} ·{" "}
+                {formatCoordPair(locationPref.latitude, locationPref.longitude)}
+              </span>
+              <span className="location-pref-hint">
+                Used by Transit, Nearby, and Weather. Globe visitor dots still
+                use network-edge location.
+              </span>
+            </div>
+
+            <div
+              className="location-mode-row"
+              role="group"
+              aria-label="Location source"
+            >
+              <button
+                type="button"
+                className={`location-mode-btn ${
+                  locationPref.mode === "browser" ? "active" : ""
+                }`}
+                aria-pressed={locationPref.mode === "browser"}
+                disabled={locationBusy}
+                onClick={() => {
+                  void requestBrowserLocation();
+                }}
+              >
+                {locationBusy ? "Locating…" : "Use browser"}
+              </button>
+              <button
+                type="button"
+                className={`location-mode-btn ${
+                  locationPref.mode === "manual" ? "active" : ""
+                }`}
+                aria-pressed={locationPref.mode === "manual"}
+                disabled={locationBusy}
+                onClick={() => {
+                  setLocationMessage("");
+                  setLocationDraftLat(String(locationPref.latitude));
+                  setLocationDraftLng(String(locationPref.longitude));
+                  setLocationDraftLabel(
+                    locationPref.mode === "manual"
+                      ? locationPref.label
+                      : "Custom location",
+                  );
+                  applyLocationPreference({
+                    mode: "manual",
+                    latitude: locationPref.latitude,
+                    longitude: locationPref.longitude,
+                    label:
+                      locationPref.mode === "manual"
+                        ? locationPref.label
+                        : "Custom location",
+                  });
+                  setLocationMessage(
+                    "Manual mode on — edit coordinates below and Apply.",
+                  );
+                }}
+              >
+                Set manually
+              </button>
+            </div>
+
+            {locationPref.mode === "manual" && (
+              <form
+                className="location-manual-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  applyManualLocation();
+                }}
+              >
+                <label className="location-field">
+                  <span>Latitude</span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    min={-90}
+                    max={90}
+                    value={locationDraftLat}
+                    onChange={(e) => setLocationDraftLat(e.target.value)}
+                    placeholder="40.7128"
+                    autoComplete="off"
+                    aria-label="Latitude"
+                  />
+                </label>
+                <label className="location-field">
+                  <span>Longitude</span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    min={-180}
+                    max={180}
+                    value={locationDraftLng}
+                    onChange={(e) => setLocationDraftLng(e.target.value)}
+                    placeholder="-74.0060"
+                    autoComplete="off"
+                    aria-label="Longitude"
+                  />
+                </label>
+                <label className="location-field location-field-full">
+                  <span>Label (optional)</span>
+                  <input
+                    type="text"
+                    maxLength={64}
+                    value={locationDraftLabel}
+                    onChange={(e) =>
+                      setLocationDraftLabel(e.target.value.slice(0, 64))
+                    }
+                    placeholder="Custom location"
+                    autoComplete="off"
+                    aria-label="Location label"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  className="location-apply-btn"
+                  disabled={locationBusy}
+                >
+                  Apply location
+                </button>
+              </form>
+            )}
+
+            {locationPref.mode === "browser" && (
+              <p className="location-pref-note">
+                Tap <strong>Use browser</strong> to request permission and
+                refresh GPS. If denied, set coordinates manually.
+              </p>
+            )}
+
+            {locationMessage ? (
+              <p className="location-pref-message" role="status">
+                {locationMessage}
+              </p>
+            ) : null}
+          </div>
+
+          {/* UN hub, Federalkey, Transit, Nearby — available via dock / nav */}
           <div className="menu-section menu-section-links" aria-label="Account and links">
             <button
               type="button"

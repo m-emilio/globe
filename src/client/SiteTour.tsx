@@ -27,8 +27,13 @@ const TOUR_STEPS: SiteTourStep[] = [
   },
   {
     title: "Menu",
-    body: "MENU opens billing, auth, admin, and app links. Buy Stripe access here after you sign in with a PGP key.",
+    body: "MENU opens location settings, billing, auth, admin, and app links. Buy Stripe access here after you sign in with a PGP key.",
     hint: "Top-right · MENU in the nav.",
+  },
+  {
+    title: "Location",
+    body: "Choose browser GPS or set latitude/longitude manually. Transit, Nearby, and Weather use this preference.",
+    hint: "MENU → Location.",
   },
   {
     title: "Globe controls",

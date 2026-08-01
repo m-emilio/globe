@@ -34,19 +34,30 @@ export function clearPreviewCache(url: string) {
   }
 }
 
+const SESSION_CACHE_MAX_RAW = 1_200_000;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 function readSession(url: string): CacheEntry | null {
   try {
     const raw = sessionStorage.getItem(storageKey(url));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as CacheEntry;
-    if (
-      !parsed ||
-      typeof parsed.at !== "number" ||
-      parsed.data === undefined
-    ) {
+    if (!raw || raw.length > SESSION_CACHE_MAX_RAW) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isPlainObject(parsed)) return null;
+    if (typeof parsed.at !== "number" || !Number.isFinite(parsed.at)) {
       return null;
     }
-    return parsed;
+    // Reject absurd future timestamps / epoch abuse
+    const now = Date.now();
+    if (parsed.at > now + 60_000 || parsed.at < now - 7 * 24 * 60 * 60 * 1000) {
+      return null;
+    }
+    if (parsed.data === undefined || parsed.data === null) return null;
+    return { at: parsed.at, data: parsed.data };
   } catch {
     return null;
   }
@@ -54,7 +65,9 @@ function readSession(url: string): CacheEntry | null {
 
 function writeSession(url: string, entry: CacheEntry) {
   try {
-    sessionStorage.setItem(storageKey(url), JSON.stringify(entry));
+    const payload = JSON.stringify(entry);
+    if (payload.length > SESSION_CACHE_MAX_RAW) return;
+    sessionStorage.setItem(storageKey(url), payload);
   } catch {
     // quota / private mode — memory still works
   }
