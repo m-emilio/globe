@@ -967,7 +967,7 @@ const NEARBY_SESSION_MAX_PATHS = 400;
 const NEARBY_SESSION_MAX_POINTS = 80;
 const NEARBY_SESSION_MAX_RAW = 450_000;
 
-type LocationMode = "browser" | "manual";
+type LocationMode = "browser" | "manual" | "address";
 
 type LocationPreference = {
   mode: LocationMode;
@@ -975,6 +975,13 @@ type LocationPreference = {
   longitude: number;
   label: string;
 };
+
+/** Fixed Open-Meteo geocoder host — never build from user input. */
+const GEOCODE_API_ORIGIN = "https://geocoding-api.open-meteo.com";
+const GEOCODE_PATH = "/v1/search";
+const GEOCODE_MAX_QUERY = 120;
+const GEOCODE_MIN_MS = 2_500;
+const GEOCODE_TIMEOUT_MS = 10_000;
 
 const DEFAULT_LOCATION_PREF: LocationPreference = {
   mode: "browser",
@@ -1029,7 +1036,12 @@ function normalizeLocationPreference(
   raw: unknown,
 ): LocationPreference {
   if (!isPlainLocationObject(raw)) return { ...DEFAULT_LOCATION_PREF };
-  const mode: LocationMode = raw.mode === "manual" ? "manual" : "browser";
+  const mode: LocationMode =
+    raw.mode === "manual"
+      ? "manual"
+      : raw.mode === "address"
+        ? "address"
+        : "browser";
   const latitude =
     parseFiniteCoord(raw.latitude, -90, 90) ??
     DEFAULT_WEATHER_LOCATION.latitude;
@@ -1038,8 +1050,116 @@ function normalizeLocationPreference(
     DEFAULT_WEATHER_LOCATION.longitude;
   const label =
     sanitizeLocationLabel(raw.label) ||
-    (mode === "manual" ? "Custom location" : DEFAULT_WEATHER_LOCATION.label);
+    (mode === "manual"
+      ? "Custom location"
+      : mode === "address"
+        ? "Address location"
+        : DEFAULT_WEATHER_LOCATION.label);
   return { mode, latitude, longitude, label };
+}
+
+/** Sanitize free-text address before sending as a query parameter. */
+function sanitizeAddressQuery(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  return raw
+    // eslint-disable-next-line no-control-regex
+    .replace(
+      /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u202F\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/g,
+      "",
+    )
+    .replace(/[<>`"'\\]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, GEOCODE_MAX_QUERY);
+}
+
+function buildGeocodeLabel(result: Record<string, unknown>): string {
+  const name = sanitizeLocationLabel(result.name);
+  const admin1 = sanitizeLocationLabel(result.admin1);
+  const country = sanitizeLocationLabel(result.country);
+  const bits = [name, admin1, country].filter(Boolean);
+  const joined = bits.join(", ").slice(0, 64);
+  return sanitizeLocationLabel(joined) || "Address location";
+}
+
+/**
+ * Resolve a place name via Open-Meteo geocoding (HTTPS, fixed host, no credentials).
+ * Returns validated WGS84 coordinates only — never follows redirects to other hosts.
+ */
+async function geocodeAddressQuery(
+  query: string,
+): Promise<{ latitude: number; longitude: number; label: string }> {
+  const name = sanitizeAddressQuery(query);
+  if (name.length < 2) {
+    throw new Error("Enter at least 2 characters for an address or place.");
+  }
+
+  const params = new URLSearchParams({
+    name,
+    count: "1",
+    language: "en",
+    format: "json",
+  });
+  // Host is constant; query is URLSearchParams-encoded only
+  const url = `${GEOCODE_API_ORIGIN}${GEOCODE_PATH}?${params.toString()}`;
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), GEOCODE_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "error",
+      signal: controller.signal,
+      headers: { accept: "application/json" },
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Address lookup timed out. Try a simpler query.");
+    }
+    throw new Error("Address lookup failed. Check your network and try again.");
+  } finally {
+    window.clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    throw new Error(`Address lookup failed (${response.status}).`);
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("json")) {
+    throw new Error("Unexpected address lookup response.");
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("Could not parse address lookup response.");
+  }
+  if (!isPlainLocationObject(payload)) {
+    throw new Error("Invalid address lookup response.");
+  }
+  const results = payload.results;
+  if (!Array.isArray(results) || results.length === 0) {
+    throw new Error("No places found for that address. Try another query.");
+  }
+  const first = results[0];
+  if (!isPlainLocationObject(first)) {
+    throw new Error("Invalid place result.");
+  }
+  const latitude = parseFiniteCoord(first.latitude, -90, 90);
+  const longitude = parseFiniteCoord(first.longitude, -180, 180);
+  if (latitude === null || longitude === null) {
+    throw new Error("Place result had invalid coordinates.");
+  }
+  return {
+    latitude,
+    longitude,
+    label: buildGeocodeLabel(first),
+  };
 }
 
 function loadLocationPreference(): LocationPreference {
@@ -1758,8 +1878,10 @@ function App() {
   const [locationDraftLabel, setLocationDraftLabel] = useState(() =>
     loadLocationPreference().label,
   );
+  const [locationDraftAddress, setLocationDraftAddress] = useState("");
   const [locationBusy, setLocationBusy] = useState(false);
   const [locationMessage, setLocationMessage] = useState("");
+  const lastGeocodeAtRef = useRef(0);
   const [showWeatherPanel, setShowWeatherPanel] = useState(false);
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>("idle");
   const [weatherFeed, setWeatherFeed] = useState<WeatherFeed | null>(null);
@@ -3181,12 +3303,16 @@ function App() {
 
   const resolveUserCoordinates = useCallback(
     async (timeoutMs = 5000) => {
-      // Manual override always wins for transit / nearby / weather
-      if (locationPref.mode === "manual") {
+      // Manual / address override always wins for transit / nearby / weather
+      if (locationPref.mode === "manual" || locationPref.mode === "address") {
         return {
           latitude: locationPref.latitude,
           longitude: locationPref.longitude,
-          label: locationPref.label || "Custom location",
+          label:
+            locationPref.label ||
+            (locationPref.mode === "address"
+              ? "Address location"
+              : "Custom location"),
         };
       }
 
@@ -3321,6 +3447,41 @@ function App() {
     locationDraftLabel,
     applyLocationPreference,
   ]);
+
+  const lookupAddressLocation = useCallback(async () => {
+    setLocationMessage("");
+    const q = sanitizeAddressQuery(locationDraftAddress);
+    if (q.length < 2) {
+      setLocationMessage("Enter a city, address, or place name (2+ characters).");
+      return;
+    }
+    const now = Date.now();
+    if (now - lastGeocodeAtRef.current < GEOCODE_MIN_MS) {
+      setLocationMessage("Please wait a moment before another address lookup.");
+      return;
+    }
+    lastGeocodeAtRef.current = now;
+    setLocationBusy(true);
+    try {
+      const hit = await geocodeAddressQuery(q);
+      applyLocationPreference({
+        mode: "address",
+        latitude: hit.latitude,
+        longitude: hit.longitude,
+        label: hit.label,
+      });
+      setLocationDraftAddress(q);
+      setLocationMessage(
+        `Address set · ${hit.label} · ${formatCoordPair(hit.latitude, hit.longitude)}`,
+      );
+    } catch (error) {
+      setLocationMessage(
+        error instanceof Error ? error.message : "Address lookup failed",
+      );
+    } finally {
+      setLocationBusy(false);
+    }
+  }, [locationDraftAddress, applyLocationPreference]);
 
   const nearbySessionKey = (latitude: number, longitude: number, radiusM: number) =>
     `globe-nearby-v8:${clampCoord(latitude, -90, 90).toFixed(4)}:${clampCoord(longitude, -180, 180).toFixed(4)}:${Math.round(radiusM)}`;
@@ -8507,7 +8668,9 @@ function App() {
               <strong>
                 {locationPref.mode === "browser"
                   ? "Browser GPS"
-                  : "Manual coordinates"}
+                  : locationPref.mode === "address"
+                    ? "Address lookup"
+                    : "Manual coordinates"}
               </strong>
               <span>
                 {locationPref.label || "—"} ·{" "}
@@ -8520,7 +8683,7 @@ function App() {
             </div>
 
             <div
-              className="location-mode-row"
+              className="location-mode-row location-mode-row-3"
               role="group"
               aria-label="Location source"
             >
@@ -8535,7 +8698,9 @@ function App() {
                   void requestBrowserLocation();
                 }}
               >
-                {locationBusy ? "Locating…" : "Use browser"}
+                {locationBusy && locationPref.mode === "browser"
+                  ? "Locating…"
+                  : "Browser"}
               </button>
               <button
                 type="button"
@@ -8567,7 +8732,32 @@ function App() {
                   );
                 }}
               >
-                Set manually
+                Coords
+              </button>
+              <button
+                type="button"
+                className={`location-mode-btn ${
+                  locationPref.mode === "address" ? "active" : ""
+                }`}
+                aria-pressed={locationPref.mode === "address"}
+                disabled={locationBusy}
+                onClick={() => {
+                  setLocationMessage("");
+                  applyLocationPreference({
+                    mode: "address",
+                    latitude: locationPref.latitude,
+                    longitude: locationPref.longitude,
+                    label:
+                      locationPref.mode === "address"
+                        ? locationPref.label
+                        : locationPref.label || "Address location",
+                  });
+                  setLocationMessage(
+                    "Enter a city or address, then Look up.",
+                  );
+                }}
+              >
+                Address
               </button>
             </div>
 
@@ -8633,10 +8823,50 @@ function App() {
               </form>
             )}
 
+            {locationPref.mode === "address" && (
+              <form
+                className="location-address-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void lookupAddressLocation();
+                }}
+              >
+                <label className="location-field location-field-full">
+                  <span>City, address, or place</span>
+                  <input
+                    type="text"
+                    inputMode="search"
+                    maxLength={GEOCODE_MAX_QUERY}
+                    value={locationDraftAddress}
+                    onChange={(e) =>
+                      setLocationDraftAddress(
+                        e.target.value.slice(0, GEOCODE_MAX_QUERY),
+                      )
+                    }
+                    placeholder="e.g. Brooklyn, NY or 1600 Amphitheatre Pkwy"
+                    autoComplete="street-address"
+                    aria-label="Address or place name"
+                    spellCheck={false}
+                  />
+                </label>
+                <button
+                  type="submit"
+                  className="location-apply-btn"
+                  disabled={locationBusy || sanitizeAddressQuery(locationDraftAddress).length < 2}
+                >
+                  {locationBusy ? "Looking up…" : "Look up address"}
+                </button>
+                <p className="location-pref-note">
+                  Uses Open-Meteo geocoding (HTTPS). Results become your saved
+                  location for Transit, Nearby, and Weather.
+                </p>
+              </form>
+            )}
+
             {locationPref.mode === "browser" && (
               <p className="location-pref-note">
-                Tap <strong>Use browser</strong> to request permission and
-                refresh GPS. If denied, set coordinates manually.
+                Tap <strong>Browser</strong> to request permission and refresh
+                GPS. If denied, use Coords or Address instead.
               </p>
             )}
 

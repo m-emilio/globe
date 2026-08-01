@@ -358,7 +358,7 @@ const CONTENT_SECURITY_POLICY = [
   "img-src 'self' data: blob:",
   "font-src 'self'",
   // 'self' covers same-origin fetch + WebSocket (PartyKit). No open ws:/wss: wildcards.
-  "connect-src 'self' https://api.open-meteo.com",
+  "connect-src 'self' https://api.open-meteo.com https://geocoding-api.open-meteo.com",
   "form-action 'self'",
   // No upgrade-insecure-requests: breaks local http://127.0.0.1 wrangler dev.
   // Production is HTTPS at the edge.

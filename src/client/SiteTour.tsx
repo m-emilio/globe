@@ -32,7 +32,7 @@ const TOUR_STEPS: SiteTourStep[] = [
   },
   {
     title: "Location",
-    body: "Choose browser GPS or set latitude/longitude manually. Transit, Nearby, and Weather use this preference.",
+    body: "Choose browser GPS, enter latitude/longitude, or look up a city/address. Transit, Nearby, and Weather use this preference.",
     hint: "MENU → Location.",
   },
   {

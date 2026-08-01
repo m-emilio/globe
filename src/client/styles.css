@@ -2277,6 +2277,17 @@ a.nav-title:focus-visible {
   margin-bottom: 10px;
 }
 
+.location-mode-row-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.location-address-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .location-mode-btn {
   min-height: 40px;
   padding: 8px 10px;
