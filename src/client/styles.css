@@ -877,6 +877,227 @@ a.nav-title:focus-visible {
   background: rgba(255, 45, 85, 0.28);
 }
 
+/* Contracting hub (SAM.gov) */
+.contracts-hub-icon-btn-open,
+.contracts-hub-icon-btn-active {
+  background-color: rgba(245, 196, 48, 0.16);
+  box-shadow: 0 0 10px rgba(245, 196, 48, 0.35);
+}
+
+.contracts-hub {
+  background:
+    radial-gradient(120% 80% at 50% -10%, rgba(140, 100, 20, 0.38), transparent 55%),
+    #0a0d14;
+}
+
+.contracts-hub .un-hub-globe-btn {
+  border-color: rgba(245, 196, 48, 0.55);
+  background: rgba(245, 196, 48, 0.14);
+  color: #ffe8a3;
+}
+
+.contracts-hub .un-hub-globe-btn:hover {
+  background: rgba(245, 196, 48, 0.28);
+}
+
+.contracts-hub-scroll {
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
+}
+
+.contracts-search-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.contracts-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #9aa4b2;
+}
+
+.contracts-field span {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.contracts-field input,
+.contracts-field select {
+  appearance: none;
+  min-height: 44px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.28);
+  color: #e8edf4;
+  padding: 10px 12px;
+  font-size: 15px;
+}
+
+.contracts-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.contracts-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #d5dbe3;
+  min-height: 44px;
+}
+
+.contracts-check input {
+  width: 18px;
+  height: 18px;
+}
+
+.contracts-quick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.contracts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.contracts-count {
+  font-weight: 600;
+  color: #f5c430;
+  font-size: 0.9em;
+}
+
+.contracts-opp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.contracts-opp-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.contracts-opp-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.contracts-opp-head h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  font-weight: 650;
+  color: #f0f3f7;
+}
+
+.contracts-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 4px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #d5dbe3;
+}
+
+.contracts-badge-sb {
+  border-color: rgba(245, 196, 48, 0.45);
+  background: rgba(245, 196, 48, 0.12);
+  color: #ffe8a3;
+}
+
+.contracts-opp-meta,
+.contracts-opp-dept {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #8b949e;
+  line-height: 1.4;
+}
+
+.contracts-opp-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.contracts-tag {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #c5ccd6;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.contracts-tag-geo {
+  border-color: rgba(77, 171, 247, 0.35);
+  color: #a5d8ff;
+}
+
+.contracts-tag.muted {
+  opacity: 0.7;
+}
+
+.contracts-opp-desc {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #b0b8c4;
+}
+
+.contracts-opp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.contracts-notes {
+  margin: 14px 0 0;
+  padding-left: 18px;
+  font-size: 11px;
+  color: #6e7681;
+  line-height: 1.45;
+}
+
+.contracts-source {
+  margin: 12px 0 0;
+  font-size: 11px;
+  color: #6e7681;
+}
+
+.contracts-source a {
+  color: #f5c430;
+}
+
+.contracts-error {
+  margin: 0;
+  color: #ff8a9a;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+@media (max-width: 420px) {
+  .contracts-field-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .pki-hub .un-hub-master.on {
   border-color: rgba(255, 90, 130, 0.55);
   background: rgba(255, 45, 85, 0.16);

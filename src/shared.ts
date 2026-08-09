@@ -560,3 +560,75 @@ export type TransitNearbyPreview = {
   stops: TransitStopPreview[];
   note?: string;
 };
+
+/** SAM.gov set-aside code (subset used by FederalKey filters). */
+export type SamSetAsideCode = string;
+
+/** Normalized contract opportunity for Contracts hub + globe pins. */
+export type SamOpportunityPreview = {
+  id: string;
+  noticeId: string;
+  solicitationNumber: string;
+  title: string;
+  type: string;
+  postedDate: string;
+  responseDeadline: string;
+  department: string;
+  naics: string;
+  naicsLabel: string;
+  setAside: string;
+  setAsideCode: string;
+  url: string;
+  descriptionExcerpt: string;
+  active: string;
+  placeLabel: string;
+  state: string;
+  city: string;
+  /** Approximate place-of-performance coordinates (null if unknown). */
+  lat: number | null;
+  lng: number | null;
+};
+
+export type SamContractMarker = {
+  id: string;
+  lat: number;
+  lng: number;
+  title: string;
+  setAsideCode: string;
+  naics: string;
+  placeLabel: string;
+  size: number;
+};
+
+export type SamContractsPreview = {
+  source: string;
+  sourceUrl: string;
+  updatedAt: string;
+  queryLabel: string;
+  preset: string;
+  presetLabel: string;
+  dataMode: "live" | "partial" | "unavailable";
+  opportunityCount: number;
+  markerCount: number;
+  opportunities: SamOpportunityPreview[];
+  markers: SamContractMarker[];
+  notes: string[];
+  filters: {
+    q: string;
+    days: number;
+    setAside: string;
+    setAsideLabel: string;
+    ptype: string;
+    naics: string[];
+    naicsGroup: string;
+    activeOnly: boolean;
+    includeAwards: boolean;
+  };
+  catalog: {
+    naics: Record<string, string>;
+    groups: Record<string, { label: string; codes: string[] }>;
+    setAsides: Record<string, string>;
+    presets: Record<string, string>;
+  };
+  error?: string;
+};

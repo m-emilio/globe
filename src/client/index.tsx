@@ -20,6 +20,7 @@ import {
 import { FloatingChrome } from "./FloatingChrome";
 import { UnHubPage } from "./UnHubPage";
 import { PkiHubPage } from "./PkiHubPage";
+import { ContractsHubPage } from "./ContractsHubPage";
 import { safeGlobeHref } from "./safeUrl";
 import {
   SiteTour,
@@ -50,6 +51,7 @@ import type {
   PkiVulnCve,
   PkiVulnSeverity,
   PkiVulnsPreview,
+  SamContractsPreview,
   TradePulseLayer,
   TradePulsePreview,
   TradePulseRoutePreview,
@@ -221,6 +223,7 @@ type UnodcStatus = "idle" | "loading" | "ready" | "error";
 type PkiVulnsStatus = "idle" | "loading" | "ready" | "error";
 
 const PKI_PREVIEW_URL = "/api/pki-vulns-preview?v=2";
+const SAM_CONTRACTS_PREVIEW_URL = "/api/sam-contracts-preview";
 
 const PKI_SEVERITY_COLORS: Record<PkiVulnSeverity, string> = {
   critical: "#ff2d55",
@@ -1647,6 +1650,40 @@ function closePkiHubRoute() {
   window.history.pushState({ pkiHub: false }, "", url.toString());
 }
 
+/** Dedicated mobile Contracting hub: /contracts, #contracts, or ?view=contracts */
+function getIsContractsHubRoute() {
+  if (typeof window === "undefined") return false;
+  const url = new URL(window.location.href);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  return (
+    path === "/contracts" ||
+    url.hash === "#contracts" ||
+    url.hash === "#/contracts" ||
+    url.searchParams.get("view") === "contracts"
+  );
+}
+
+function openContractsHubRoute() {
+  const url = new URL(window.location.href);
+  url.pathname = "/contracts";
+  url.hash = "";
+  url.searchParams.delete("view");
+  window.history.pushState({ contractsHub: true }, "", url.toString());
+}
+
+function closeContractsHubRoute() {
+  const url = new URL(window.location.href);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/contracts") {
+    url.pathname = "/";
+  }
+  if (url.hash === "#contracts" || url.hash === "#/contracts") {
+    url.hash = "";
+  }
+  url.searchParams.delete("view");
+  window.history.pushState({ contractsHub: false }, "", url.toString());
+}
+
 function getRoutePulseLayer(
   route: TradePulseRoutePreview,
   layers: Record<TradePulseLayer, boolean>,
@@ -1897,6 +1934,24 @@ function App() {
     useState<ComtradeValueMode>("compact");
   const [showUnHub, setShowUnHub] = useState(() => getIsUnHubRoute());
   const [showPkiHub, setShowPkiHub] = useState(() => getIsPkiHubRoute());
+  const [showContractsHub, setShowContractsHub] = useState(() =>
+    getIsContractsHubRoute(),
+  );
+  type ContractsStatus = "idle" | "loading" | "ready" | "error";
+  const [contractsStatus, setContractsStatus] =
+    useState<ContractsStatus>("idle");
+  const [contractsPreview, setContractsPreview] =
+    useState<SamContractsPreview | null>(null);
+  const [contractsError, setContractsError] = useState("");
+  const [contractsLayerOn, setContractsLayerOn] = useState(true);
+  const [contractsQuery, setContractsQuery] = useState({
+    preset: "pki",
+    q: "",
+    days: 30,
+    setAside: "",
+    naicsGroup: "fk_pki",
+    includeAwards: true,
+  });
   const [showTradePulsePanel, setShowTradePulsePanel] = useState(isTradePulsePreview);
   /** Start minimized so the globe (and point + popups) stay primary */
   const [isTradePulsePanelMinimized, setIsTradePulsePanelMinimized] =
@@ -3970,7 +4025,9 @@ function App() {
 
   const openUnHub = useCallback(() => {
     closePkiHubRoute();
+    closeContractsHubRoute();
     setShowPkiHub(false);
+    setShowContractsHub(false);
     openUnHubRoute();
     setShowUnHub(true);
     setShowMenu(false);
@@ -3983,7 +4040,9 @@ function App() {
 
   const openPkiHub = useCallback(() => {
     closeUnHubRoute();
+    closeContractsHubRoute();
     setShowUnHub(false);
+    setShowContractsHub(false);
     openPkiHubRoute();
     setShowPkiHub(true);
     setShowMenu(false);
@@ -3994,10 +4053,26 @@ function App() {
     setShowPkiHub(false);
   }, []);
 
+  const openContractsHub = useCallback(() => {
+    closeUnHubRoute();
+    closePkiHubRoute();
+    setShowUnHub(false);
+    setShowPkiHub(false);
+    openContractsHubRoute();
+    setShowContractsHub(true);
+    setShowMenu(false);
+  }, []);
+
+  const closeContractsHub = useCallback(() => {
+    closeContractsHubRoute();
+    setShowContractsHub(false);
+  }, []);
+
   useEffect(() => {
     const syncRoute = () => {
       setShowUnHub(getIsUnHubRoute());
       setShowPkiHub(getIsPkiHubRoute());
+      setShowContractsHub(getIsContractsHubRoute());
     };
     window.addEventListener("popstate", syncRoute);
     window.addEventListener("hashchange", syncRoute);
@@ -4008,13 +4083,13 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!showUnHub && !showPkiHub) return;
+    if (!showUnHub && !showPkiHub && !showContractsHub) return;
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
       document.body.style.overflow = prev;
     };
-  }, [showUnHub, showPkiHub]);
+  }, [showUnHub, showPkiHub, showContractsHub]);
 
   const toggleUnGlobalSection = (section: UnGlobalSection) => {
     setUnGlobalSections((current) => ({
@@ -4212,6 +4287,93 @@ function App() {
       void loadPkiVulns(false);
     }
   }, [showPkiHub]);
+
+  const buildSamContractsUrl = (opts: {
+    preset: string;
+    q: string;
+    days: number;
+    setAside: string;
+    naicsGroup: string;
+    includeAwards: boolean;
+    force?: boolean;
+  }) => {
+    const params = new URLSearchParams();
+    params.set("preset", opts.preset || "pki");
+    if (opts.q.trim()) params.set("q", opts.q.trim().slice(0, 120));
+    params.set("days", String(Math.max(1, Math.min(180, opts.days || 30))));
+    if (opts.setAside) params.set("set_aside", opts.setAside);
+    if (opts.naicsGroup) params.set("naics_group", opts.naicsGroup);
+    if (opts.includeAwards) params.set("awards", "1");
+    params.set("limit", "30");
+    if (opts.force) params.set("force", "1");
+    return `${SAM_CONTRACTS_PREVIEW_URL}?${params.toString()}`;
+  };
+
+  const loadSamContracts = async (
+    opts?: Partial<{
+      preset: string;
+      q: string;
+      days: number;
+      setAside: string;
+      naicsGroup: string;
+      includeAwards: boolean;
+      force: boolean;
+    }>,
+  ) => {
+    const next = {
+      ...contractsQuery,
+      ...opts,
+    };
+    setContractsQuery({
+      preset: next.preset,
+      q: next.q,
+      days: next.days,
+      setAside: next.setAside,
+      naicsGroup: next.naicsGroup,
+      includeAwards: next.includeAwards,
+    });
+    setContractsError("");
+    setContractsStatus("loading");
+
+    const url = buildSamContractsUrl({
+      ...next,
+      force: Boolean(opts?.force),
+    });
+    if (opts?.force) {
+      clearPreviewCache(url);
+    }
+
+    try {
+      const data = await fetchPreviewJson<SamContractsPreview>(url, {
+        validate: (v): v is SamContractsPreview =>
+          Boolean(
+            v &&
+              typeof v === "object" &&
+              Array.isArray((v as SamContractsPreview).opportunities) &&
+              Array.isArray((v as SamContractsPreview).markers),
+          ),
+        forceNetwork: true,
+      });
+      setContractsPreview(data);
+      setContractsStatus("ready");
+      setContractsLayerOn(true);
+      if (data.error && data.dataMode === "unavailable") {
+        setContractsError(data.error);
+        setContractsStatus("error");
+      }
+    } catch {
+      setContractsError("SAM.gov contracts feed unavailable");
+      setContractsStatus("error");
+    }
+  };
+
+  // Open Contracts hub → default PKI search
+  useEffect(() => {
+    if (!showContractsHub) return;
+    if (contractsStatus === "idle") {
+      void loadSamContracts({ force: false });
+    }
+  }, [showContractsHub]);
 
   const setUnodcFocusMode = (mode: "focus" | "all-live" | "none") => {
     if (!unodcPreview) return;
@@ -4856,14 +5018,26 @@ function App() {
           };
         })
       : [];
+  const contractsGlobeMarkers =
+    contractsLayerOn &&
+    contractsStatus === "ready" &&
+    contractsPreview?.markers?.length
+      ? contractsPreview.markers.map((m) => ({
+          location: [m.lat, m.lng] as [number, number],
+          size: Math.max(0.04, Math.min(0.12, m.size || 0.07)),
+        }))
+      : [];
   const globeOverlayMarkers = [
     ...unGlobalOverlayMarkers,
     ...tradePulseGlobeMarkers,
+    ...contractsGlobeMarkers,
   ];
   const globeMarkerColor =
-    tradePulseGlobeMarkers.length > 0
-      ? ([1, 0.24, 0.18] as [number, number, number])
-      : unGlobalMarkerColor;
+    contractsGlobeMarkers.length > 0
+      ? ([0.95, 0.72, 0.12] as [number, number, number])
+      : tradePulseGlobeMarkers.length > 0
+        ? ([1, 0.24, 0.18] as [number, number, number])
+        : unGlobalMarkerColor;
   const globeHeatZones = unodcHeatZones;
   const globeChoroplethRegions = unodcChoroplethRegions;
   const globeOverlayRoutes: GlobeArc[] = [
@@ -7287,6 +7461,22 @@ function App() {
         </FloatingChrome>
       )}
 
+      {showContractsHub && (
+        <ContractsHubPage
+          onClose={closeContractsHub}
+          onViewGlobe={closeContractsHub}
+          status={contractsStatus}
+          error={contractsError}
+          preview={contractsPreview}
+          layerOn={contractsLayerOn}
+          onToggleLayer={() => setContractsLayerOn((v) => !v)}
+          onSearch={(opts) => {
+            void loadSamContracts(opts);
+          }}
+          formatUpdatedAt={formatPreviewDate}
+        />
+      )}
+
       {showPkiHub && (
         <PkiHubPage
           onClose={closePkiHub}
@@ -8502,6 +8692,40 @@ function App() {
               </svg>
             </span>
             <span className="mac-dock-label">PKI</span>
+          </button>
+          <button
+            type="button"
+            className={`mac-dock-item contracts-hub-icon-btn ${
+              showContractsHub
+                ? "contracts-hub-icon-btn-open mac-dock-item-open"
+                : ""
+            } ${
+              contractsLayerOn && (contractsPreview?.markerCount ?? 0) > 0
+                ? "contracts-hub-icon-btn-active mac-dock-item-active"
+                : ""
+            }`}
+            onClick={() =>
+              runRateLimitedButtonAction("contracts-hub-open", () => {
+                if (showContractsHub) {
+                  closeContractsHub();
+                } else {
+                  openContractsHub();
+                }
+              })
+            }
+            aria-label="Federal contracting — SAM.gov PKI and small business opportunities"
+            title="Contracting · SAM.gov"
+            aria-pressed={showContractsHub}
+          >
+            <span className="mac-dock-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M7 4h10a1 1 0 0 1 1 1v14l-3-2-3 2-3-2-3 2V5a1 1 0 0 1 1-1Z" />
+                <path d="M9 8h6" />
+                <path d="M9 11h6" />
+                <path d="M9 14h3.5" />
+              </svg>
+            </span>
+            <span className="mac-dock-label">Contracts</span>
           </button>
           <button
             type="button"

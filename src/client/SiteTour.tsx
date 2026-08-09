@@ -42,7 +42,7 @@ const TOUR_STEPS: SiteTourStep[] = [
   },
   {
     title: "App dock",
-    body: "Live Feed, PKI, UN hub, Transit, Nearby, and Weather live in the macOS-style dock at the bottom of the screen.",
+    body: "Live Feed, PKI, Contracts, UN hub, Transit, Nearby, and Weather live in the macOS-style dock at the bottom of the screen.",
     hint: "Bottom center · hover to magnify.",
   },
   {
@@ -54,6 +54,11 @@ const TOUR_STEPS: SiteTourStep[] = [
     title: "PKI / CVE hub",
     body: "The lock icon opens Certificate & PKI exposure: CISA KEV and NVD vulns as severity-colored arcs. Filter, page, and focus a CVE on the map.",
     hint: "Bottom dock · padlock.",
+  },
+  {
+    title: "Contracting hub",
+    body: "The document icon opens SAM.gov contract search for PKI, FederalKey NAICS, and small business set-asides. Results plot as gold pins on the globe.",
+    hint: "Bottom dock · Contracts.",
   },
   {
     title: "UN Data Hub",

@@ -30,5 +30,10 @@ ADMIN_FINGERPRINTS=
 # Optional UN Comtrade Free APIs key (comtrade - v1 from comtradedeveloper.un.org).
 # Server-only: enables /data/v1; without it the Worker uses public /public/v1/preview.
 # Never commit a real key. Prefer:
-#   npx wrangler secret put COMTRADE_SUBSCRIPTION_KEY --name globe-security-test
+#   npx wrangler secret put COMTRADE_SUBSCRIPTION_KEY --name globe
 # COMTRADE_SUBSCRIPTION_KEY=
+
+# SAM.gov Opportunities Public API key (Contracting dock).
+# Server-only Worker secret — never commit or ship to the client.
+#   npx wrangler secret put SAM_API_KEY --name globe
+# SAM_API_KEY=

@@ -30,6 +30,11 @@ declare namespace Cloudflare {
 		 * with Ocp-Apim-Subscription-Key; otherwise public /public/v1/preview.
 		 */
 		COMTRADE_SUBSCRIPTION_KEY?: string;
+		/**
+		 * SAM.gov Opportunities Public API key.
+		 * Worker secret only — never client, git, or logs. Create at sam.gov → Account Details.
+		 */
+		SAM_API_KEY?: string;
 		/** KV for auth users/sessions, entitlements, and catalog */
 		BILLING_KV: KVNamespace;
 	}

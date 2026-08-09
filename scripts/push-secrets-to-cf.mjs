@@ -12,7 +12,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
-const workerName = process.argv[2] || "globe-security-test";
+const workerName = process.argv[2] || "globe";
 const varsPath = resolve(process.cwd(), ".dev.vars");
 
 if (!existsSync(varsPath)) {
@@ -65,6 +65,8 @@ const KEYS = [
   "ADMIN_ACTION_SECRET",
   "ADMIN_FINGERPRINTS",
   "ADMIN_USER_IDS",
+  "COMTRADE_SUBSCRIPTION_KEY",
+  "SAM_API_KEY",
 ];
 
 const vars = parseDevVars(readFileSync(varsPath, "utf8"));

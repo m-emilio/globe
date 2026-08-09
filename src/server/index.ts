@@ -41,6 +41,10 @@ import {
   getPkiVulnsPreview,
   PKI_EDGE_CACHE_VERSION,
 } from "./pkiVulns";
+import {
+  getSamContractsPreview,
+  SAM_EDGE_CACHE_VERSION,
+} from "./samContracts";
 
 import type {
   ComtradeAvailabilityPreview,
@@ -1593,7 +1597,7 @@ function collectWorkerSecrets(env: Env): string[] {
 
 /** Property names that must never appear on Comtrade client payloads. */
 const COMTRADE_SECRET_PROPERTY_RE =
-  /^(ocp-?apim-?subscription-?key|subscription[-_]?key|api[-_]?key|apikey|comtrade[-_]?subscription[-_]?key|primary[-_]?key|secondary[-_]?key|access[-_]?token|bearer|authorization|stripe[-_]?secret|webhook[-_]?secret|admin[-_]?action[-_]?secret)$/i;
+  /^(ocp-?apim-?subscription-?key|subscription[-_]?key|api[-_]?key|apikey|sam[-_]?api[-_]?key|comtrade[-_]?subscription[-_]?key|primary[-_]?key|secondary[-_]?key|access[-_]?token|bearer|authorization|stripe[-_]?secret|webhook[-_]?secret|admin[-_]?action[-_]?secret)$/i;
 
 const COMTRADE_REDACTED = "[redacted]";
 
@@ -1612,6 +1616,7 @@ function redactSensitiveText(text: string, secrets: string[] = []): string {
     .replace(/\b(pk_(?:live|test)_[A-Za-z0-9]+)\b/g, COMTRADE_REDACTED)
     .replace(/\b(whsec_[A-Za-z0-9]+)\b/g, COMTRADE_REDACTED)
     .replace(/\b(rk_live_[A-Za-z0-9]+)\b/g, COMTRADE_REDACTED)
+    .replace(/\bSAM-[A-Fa-f0-9-]{20,}\b/gi, COMTRADE_REDACTED)
     .slice(0, 400);
 }
 
@@ -4484,6 +4489,35 @@ export default {
             return withSecurityHeaders(await getPkiVulnsPreview(env), request);
           },
           { cacheVersion: PKI_EDGE_CACHE_VERSION },
+        ),
+      );
+    }
+
+    // SAM.gov contracting search — API key is Worker secret only (never client)
+    if (url.pathname === "/api/sam-contracts-preview") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await withPublicEdgeCache(
+          request,
+          ctx,
+          async () => {
+            const limited = await rateLimitDurable(
+              env,
+              `preview:sam:${clientIpFromRequest(request)}`,
+              12,
+              60_000,
+              applySecurityHeaders,
+            );
+            if (limited) return limited;
+            return withSecurityHeaders(
+              await getSamContractsPreview(request, env),
+              request,
+            );
+          },
+          { cacheVersion: SAM_EDGE_CACHE_VERSION },
         ),
       );
     }
