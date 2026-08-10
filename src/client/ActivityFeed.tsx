@@ -158,6 +158,106 @@ export function prependActivityEvent(
 /** Live feed is a Stripe-paid feature (same entitlement as Transit). */
 export type LiveFeedAccess = "ok" | "login_required" | "payment_required";
 
+/**
+ * Free UN Web TV / UNTV channel catalog (static allow-list only).
+ * Embeds must match CSP frame-src hosts. Never build iframe URLs from user input.
+ */
+type UnTvChannel =
+  | {
+      id: string;
+      label: string;
+      blurb: string;
+      kind: "youtube";
+      videoId: string;
+      pageUrl: string;
+    }
+  | {
+      id: string;
+      label: string;
+      blurb: string;
+      kind: "kaltura";
+      entryId: string;
+      partnerId: string;
+      uiconfId: string;
+      pageUrl: string;
+    }
+  | {
+      id: string;
+      label: string;
+      blurb: string;
+      kind: "link";
+      pageUrl: string;
+    };
+
+/** Official public streams — stable IDs from UN / UNTV. */
+const UN_TV_CHANNELS: readonly UnTvChannel[] = [
+  {
+    id: "untv-yt",
+    label: "UNTV 24/7",
+    blurb: "United Nations YouTube live channel",
+    kind: "youtube",
+    // Official UNTV 24/7 live stream (youtube.com/unitednations/live)
+    videoId: "vYRfQo6JMxc",
+    pageUrl: "https://www.youtube.com/unitednations/live",
+  },
+  {
+    id: "webtv-24h",
+    label: "UN Web TV 24h",
+    blurb: "24-hour live & pre-recorded programming",
+    kind: "kaltura",
+    // webtv.un.org continuous channel (Kaltura partner 2503451)
+    partnerId: "2503451",
+    uiconfId: "49754663",
+    entryId: "1_gb6tjmle",
+    pageUrl: "https://webtv.un.org/en/asset/k1g/k1gb6tjmle",
+  },
+  {
+    id: "webtv-home",
+    label: "Web TV site",
+    blurb: "Browse live meetings on webtv.un.org",
+    kind: "link",
+    pageUrl: "https://webtv.un.org/en",
+  },
+  {
+    id: "webtv-schedule",
+    label: "Schedule",
+    blurb: "Live schedule of UN meetings",
+    kind: "link",
+    pageUrl: "https://webtv.un.org/en/schedule",
+  },
+];
+
+function unTvEmbedSrc(channel: UnTvChannel): string | null {
+  if (channel.kind === "youtube") {
+    // Allow-list video id shape
+    if (!/^[A-Za-z0-9_-]{6,20}$/.test(channel.videoId)) return null;
+    return (
+      `https://www.youtube-nocookie.com/embed/${channel.videoId}` +
+      "?autoplay=0&rel=0&modestbranding=1&playsinline=1"
+    );
+  }
+  if (channel.kind === "kaltura") {
+    if (
+      !/^\d{4,10}$/.test(channel.partnerId) ||
+      !/^\d{6,12}$/.test(channel.uiconfId) ||
+      !/^[0-9a-z_]{6,24}$/i.test(channel.entryId)
+    ) {
+      return null;
+    }
+    const params = new URLSearchParams({
+      iframeembed: "true",
+      playerId: "kaltura_player",
+      entry_id: channel.entryId,
+    });
+    return (
+      `https://cdnapisec.kaltura.com/p/${channel.partnerId}` +
+      `/sp/${channel.partnerId}00/embedIframeJs/uiconf_id/${channel.uiconfId}` +
+      `/partner_id/${channel.partnerId}?${params.toString()}`
+    );
+  }
+  return null;
+}
+
 export type LiveChatMessage = {
   id: string;
   fromId: string;
@@ -235,9 +335,21 @@ export function ActivityFeed({
   const [copyState, setCopyState] = useState<"idle" | "ok" | "err">("idle");
   const [chatDraft, setChatDraft] = useState("");
   const [chatSendHint, setChatSendHint] = useState("");
+  /** Free UN Web TV / UNTV selection — never gated by Stripe */
+  const [unTvChannelId, setUnTvChannelId] = useState<string | null>(null);
+  const [unTvPlaying, setUnTvPlaying] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const chatListRef = useRef<HTMLDivElement>(null);
   const stickToTopRef = useRef(true);
+
+  const activeUnTv = useMemo(
+    () => UN_TV_CHANNELS.find((c) => c.id === unTvChannelId) ?? null,
+    [unTvChannelId],
+  );
+  const unTvEmbed = useMemo(
+    () => (activeUnTv && unTvPlaying ? unTvEmbedSrc(activeUnTv) : null),
+    [activeUnTv, unTvPlaying],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -542,6 +654,105 @@ export function ActivityFeed({
               >
                 Reconnect
               </button>
+            )}
+          </div>
+
+          {/* Free UN Web TV / UNTV — always available, not behind Stripe */}
+          <div className="un-tv-panel" aria-label="UN Web TV and UNTV">
+            <div className="un-tv-head">
+              <strong>UN Web TV · UNTV</strong>
+              <span className="un-tv-free-badge">Free</span>
+            </div>
+            <p className="un-tv-blurb">
+              Official United Nations webcasts from{" "}
+              <a
+                href="https://webtv.un.org/en"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                webtv.un.org
+              </a>{" "}
+              and UNTV. Select a channel to embed — free for everyone.
+            </p>
+            <div
+              className="un-tv-channels"
+              role="tablist"
+              aria-label="UN TV channels"
+            >
+              {UN_TV_CHANNELS.map((ch) => {
+                const selected = unTvChannelId === ch.id;
+                return (
+                  <button
+                    key={ch.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    className={`un-tv-chip ${selected ? "active" : ""}`}
+                    title={ch.blurb}
+                    onClick={() => {
+                      if (ch.kind === "link") {
+                        // External browse only — no iframe
+                        setUnTvChannelId(ch.id);
+                        setUnTvPlaying(false);
+                        window.open(
+                          ch.pageUrl,
+                          "_blank",
+                          "noopener,noreferrer",
+                        );
+                        return;
+                      }
+                      if (selected && unTvPlaying) {
+                        setUnTvPlaying(false);
+                        return;
+                      }
+                      setUnTvChannelId(ch.id);
+                      setUnTvPlaying(true);
+                    }}
+                  >
+                    {ch.label}
+                  </button>
+                );
+              })}
+            </div>
+            {activeUnTv && unTvPlaying && unTvEmbed ? (
+              <div className="un-tv-player-wrap">
+                <iframe
+                  key={activeUnTv.id}
+                  className="un-tv-player"
+                  title={`${activeUnTv.label} player`}
+                  src={unTvEmbed}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+                  allowFullScreen
+                  loading="lazy"
+                  referrerPolicy="strict-origin-when-cross-origin"
+                />
+                <div className="un-tv-player-actions">
+                  <button
+                    type="button"
+                    className="un-tv-stop"
+                    onClick={() => setUnTvPlaying(false)}
+                  >
+                    Stop embed
+                  </button>
+                  <a
+                    href={activeUnTv.pageUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="un-tv-open-link"
+                  >
+                    Open on UN site
+                  </a>
+                </div>
+              </div>
+            ) : activeUnTv && activeUnTv.kind === "link" ? (
+              <p className="un-tv-hint">
+                Opened {activeUnTv.label} in a new tab.
+              </p>
+            ) : (
+              <p className="un-tv-hint">
+                Tap <strong>UNTV 24/7</strong> or <strong>UN Web TV 24h</strong>{" "}
+                to watch here. Schedule opens webtv.un.org.
+              </p>
             )}
           </div>
 

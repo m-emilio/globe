@@ -47,8 +47,8 @@ const TOUR_STEPS: SiteTourStep[] = [
   },
   {
     title: "Live Feed app",
-    body: "Open Feed from the dock for paid join/leave detail and web support chat after Stripe unlock. Globe markers stay free.",
-    hint: "Bottom dock · Feed.",
+    body: "Open Feed for free UN Web TV / UNTV channel embeds, plus paid join/leave detail and web support chat after Stripe unlock. Globe markers stay free.",
+    hint: "Bottom dock · Feed · UN TV free.",
   },
   {
     title: "PKI / CVE hub",

@@ -6541,6 +6541,144 @@ button[aria-busy="true"],
   contain: layout paint;
 }
 
+/* Free UN Web TV / UNTV embeds inside Live Feed (not paywalled) */
+.un-tv-panel {
+  flex: 0 0 auto;
+  margin: 0 0 2px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid rgba(77, 171, 247, 0.28);
+  background:
+    linear-gradient(145deg, rgba(33, 89, 168, 0.22), rgba(0, 16, 24, 0.55));
+}
+
+.un-tv-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.un-tv-head strong {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #7ee0ff;
+}
+
+.un-tv-free-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(105, 219, 123, 0.45);
+  background: rgba(105, 219, 123, 0.12);
+  color: #b2f2bb;
+}
+
+.un-tv-blurb {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #9aa4b2;
+}
+
+.un-tv-blurb a {
+  color: #74c0fc;
+  text-decoration: none;
+}
+
+.un-tv-blurb a:hover {
+  text-decoration: underline;
+}
+
+.un-tv-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.un-tv-chip {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #d5dbe3;
+  border-radius: 999px;
+  padding: 7px 11px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.un-tv-chip:hover {
+  border-color: rgba(77, 171, 247, 0.45);
+  background: rgba(77, 171, 247, 0.12);
+}
+
+.un-tv-chip.active {
+  border-color: rgba(77, 171, 247, 0.65);
+  background: rgba(77, 171, 247, 0.22);
+  color: #e7f5ff;
+  box-shadow: 0 0 10px rgba(77, 171, 247, 0.25);
+}
+
+.un-tv-player-wrap {
+  margin-top: 6px;
+}
+
+.un-tv-player {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 150px;
+  max-height: 220px;
+  border: 0;
+  border-radius: 10px;
+  background: #000;
+}
+
+.un-tv-player-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.un-tv-stop {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8edf4;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 34px;
+}
+
+.un-tv-open-link {
+  font-size: 11px;
+  color: #74c0fc;
+  text-decoration: none;
+}
+
+.un-tv-open-link:hover {
+  text-decoration: underline;
+}
+
+.un-tv-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #6e7681;
+  line-height: 1.35;
+}
+
 /* Paid web-support chat in Live Feed (client-only history) */
 .live-chat {
   flex: 0 0 auto;

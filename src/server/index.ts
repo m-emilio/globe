@@ -345,8 +345,9 @@ const CONTENT_SECURITY_POLICY = [
   "base-uri 'none'",
   "object-src 'none'",
   "frame-ancestors 'none'",
-  "frame-src 'none'",
-  "child-src 'none'",
+  // Free Live Feed embeds only: UNTV (YouTube) + UN Web TV (Kaltura). No wildcards.
+  "frame-src https://www.youtube.com https://www.youtube-nocookie.com https://cdnapisec.kaltura.com",
+  "child-src https://www.youtube.com https://www.youtube-nocookie.com https://cdnapisec.kaltura.com",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
   // First-party JS only. 'wasm-unsafe-eval' required for OpenPGP Argon2 WASM.
