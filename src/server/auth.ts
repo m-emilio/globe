@@ -1498,7 +1498,7 @@ export async function deleteUserAccount(
 }
 
 /**
- * Gate for paid / sensitive features (transit, nearby maps, etc.):
+ * Gate for paid / sensitive features (transit, nearby maps, contracting, etc.):
  * 1. Rate limit
  * 2. Must be logged in
  * 3. If TRANSIT_REQUIRE_PAYMENT, must have transitPaid
@@ -1557,7 +1557,7 @@ export async function requireTransitAccess(
       {
         error: "payment_required",
         code: "payment_required",
-        message: `${featureName} is locked until you complete Stripe checkout. Use Menu → Buy Stripe access ($20). Unlocks Transit, Nearby maps, Live Feed, and web support chat after payment.`,
+        message: `${featureName} is locked until you complete Stripe checkout. Use Menu → Buy Stripe access ($20). Unlocks Transit, Nearby maps, Live Feed, Contracting (SAM.gov search), and web support chat after payment.`,
       },
       { status: 402 },
       applySecurityHeaders,

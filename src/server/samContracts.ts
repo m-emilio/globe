@@ -23,8 +23,8 @@ const SAM_UI = "https://sam.gov";
 
 export const SAM_EDGE_CACHE_VERSION = "v1";
 const CACHE_SECONDS = 30 * 60;
-const BROWSER_CACHE =
-  "public, max-age=120, s-maxage=1800, stale-while-revalidate=3600";
+/** Paid feature: never public CDN cache; server memory/KV still OK for SAM quota. */
+const BROWSER_CACHE = "private, no-store";
 const KV_KEY_PREFIX = "sam-contracts-preview:v1:";
 const MAX_RESULTS = 60;
 const MAX_REMOTE_QUERIES = 5;
@@ -931,6 +931,9 @@ async function pullLive(
   notes.push(
     "Map pins use place-of-performance city/state centroids (approximate).",
   );
+  notes.push(
+    "FederalKey Contracting is a paid app feature (login + Stripe when enforced). Opportunity data remains public on SAM.gov.",
+  );
 
   return {
     ...baseMeta,
@@ -946,7 +949,8 @@ async function pullLive(
 }
 
 /**
- * Public GET handler for /api/sam-contracts-preview
+ * Authenticated GET handler for /api/sam-contracts-preview
+ * (caller must enforce login + paid gate; never edge-cache publicly).
  */
 export async function getSamContractsPreview(
   request: Request,

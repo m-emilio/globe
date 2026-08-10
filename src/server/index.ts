@@ -41,10 +41,7 @@ import {
   getPkiVulnsPreview,
   PKI_EDGE_CACHE_VERSION,
 } from "./pkiVulns";
-import {
-  getSamContractsPreview,
-  SAM_EDGE_CACHE_VERSION,
-} from "./samContracts";
+import { getSamContractsPreview } from "./samContracts";
 
 import type {
   ComtradeAvailabilityPreview,
@@ -4493,32 +4490,41 @@ export default {
       );
     }
 
-    // SAM.gov contracting search — API key is Worker secret only (never client)
+    // SAM.gov contracting search — paid gate (login + Stripe when enforced).
+    // API key is Worker secret only. Never public edge-cache (cookie-auth data).
     if (url.pathname === "/api/sam-contracts-preview") {
       if (!isReadApiMethod(request)) {
         return methodNotAllowedResponse();
       }
+      const gate = await requireTransitAccess(
+        request,
+        env,
+        applySecurityHeaders,
+        {
+          rateKey: "sam",
+          rateLimit: 12,
+          featureName: "Contracting",
+        },
+      );
+      if (gate) {
+        return withoutResponseBodyForHead(
+          request,
+          withSecurityHeaders(gate, request),
+        );
+      }
+      // Private response only — no Cache API / shared edge cache for paid pulls
+      const samRes = await getSamContractsPreview(request, env);
+      const privateHeaders = new Headers(samRes.headers);
+      privateHeaders.set("cache-control", "private, no-store");
+      privateHeaders.set("vary", "Cookie");
+      const privateRes = new Response(samRes.body, {
+        status: samRes.status,
+        statusText: samRes.statusText,
+        headers: privateHeaders,
+      });
       return withoutResponseBodyForHead(
         request,
-        await withPublicEdgeCache(
-          request,
-          ctx,
-          async () => {
-            const limited = await rateLimitDurable(
-              env,
-              `preview:sam:${clientIpFromRequest(request)}`,
-              12,
-              60_000,
-              applySecurityHeaders,
-            );
-            if (limited) return limited;
-            return withSecurityHeaders(
-              await getSamContractsPreview(request, env),
-              request,
-            );
-          },
-          { cacheVersion: SAM_EDGE_CACHE_VERSION },
-        ),
+        withSecurityHeaders(privateRes, request),
       );
     }
 

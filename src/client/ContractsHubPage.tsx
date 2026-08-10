@@ -3,6 +3,8 @@ import type { SamContractsPreview, SamOpportunityPreview } from "../shared";
 import { safeGlobeHref } from "./safeUrl";
 
 export type ContractsHubStatus = "idle" | "loading" | "ready" | "error";
+/** Same entitlement as Transit / Live Feed (login + Stripe when enforced). */
+export type ContractsAccess = "ok" | "login_required" | "payment_required";
 
 export type ContractsHubProps = {
   onClose: () => void;
@@ -11,6 +13,10 @@ export type ContractsHubProps = {
   error: string;
   preview: SamContractsPreview | null;
   layerOn: boolean;
+  access: ContractsAccess;
+  checkoutBusy?: boolean;
+  onSignIn: () => void;
+  onBuyAccess: () => void;
   onToggleLayer: () => void;
   onSearch: (opts: {
     preset: string;
@@ -113,10 +119,15 @@ export function ContractsHubPage(props: ContractsHubProps) {
     error,
     preview,
     layerOn,
+    access,
+    checkoutBusy = false,
+    onSignIn,
+    onBuyAccess,
     onToggleLayer,
     onSearch,
     formatUpdatedAt,
   } = props;
+  const locked = access !== "ok";
 
   const catalog = preview?.catalog;
   const presets = catalog?.presets ?? {
@@ -221,14 +232,67 @@ export function ContractsHubPage(props: ContractsHubProps) {
             <strong>SAM.gov contract opportunities</strong> for PKI, cyber, and
             FederalKey-aligned NAICS. Small business set-asides and awards are
             first-class filters. Results plot on the globe by place of
-            performance. Your API key stays in Cloudflare secrets only.
+            performance. Notices remain public on SAM.gov — you pay for
+            FederalKey search, map pins, and workflow (same unlock as Transit /
+            Live Feed). API keys stay in Cloudflare secrets only.
           </p>
         </section>
+
+        {locked ? (
+          <section className="un-hub-card contracts-gate-card">
+            <div className="un-hub-card-head">
+              <h2>Paid unlock required</h2>
+              <span className="un-hub-status">
+                {access === "login_required" ? "Sign in" : "Payment"}
+              </span>
+            </div>
+            <p className="un-hub-card-desc">
+              {access === "login_required"
+                ? "Sign in with your device-local OpenPGP key, then unlock with Stripe ($20) to use Contracting."
+                : "Stripe access ($20) unlocks Contracting, Transit, Nearby maps, Live Feed, and support chat. Source data is public SAM.gov opportunities."}
+            </p>
+            <div className="contracts-actions">
+              {access === "login_required" ? (
+                <button
+                  type="button"
+                  className="un-hub-master on"
+                  onClick={onSignIn}
+                >
+                  Sign in
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="un-hub-master on"
+                  disabled={checkoutBusy}
+                  onClick={onBuyAccess}
+                >
+                  {checkoutBusy ? "Opening Stripe…" : "Buy Stripe access ($20)"}
+                </button>
+              )}
+              <a
+                className="un-hub-linkish"
+                href="https://sam.gov/opportunities"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Browse free on SAM.gov
+              </a>
+            </div>
+            {error ? (
+              <p className="contracts-error" role="alert" style={{ marginTop: 12 }}>
+                {error}
+              </p>
+            ) : null}
+          </section>
+        ) : null}
 
         <section className="un-hub-card">
           <div className="un-hub-card-head">
             <h2>Search</h2>
-            <span className="un-hub-status">{statusLabel(status, error)}</span>
+            <span className="un-hub-status">
+              {locked ? "Locked" : statusLabel(status, error)}
+            </span>
           </div>
           <div className="un-hub-card-body contracts-search-form">
             <label className="contracts-field">
@@ -340,7 +404,7 @@ export function ContractsHubPage(props: ContractsHubProps) {
               <button
                 type="button"
                 className="un-hub-master on"
-                disabled={status === "loading"}
+                disabled={locked || status === "loading"}
                 onClick={() => runSearch(false)}
               >
                 {status === "loading" ? "Searching…" : "Search SAM.gov"}
@@ -348,7 +412,7 @@ export function ContractsHubPage(props: ContractsHubProps) {
               <button
                 type="button"
                 className="un-hub-chip"
-                disabled={status === "loading"}
+                disabled={locked || status === "loading"}
                 onClick={() => runSearch(true)}
               >
                 Force refresh

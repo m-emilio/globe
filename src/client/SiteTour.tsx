@@ -57,8 +57,8 @@ const TOUR_STEPS: SiteTourStep[] = [
   },
   {
     title: "Contracting hub",
-    body: "The document icon opens SAM.gov contract search for PKI, FederalKey NAICS, and small business set-asides. Results plot as gold pins on the globe.",
-    hint: "Bottom dock · Contracts.",
+    body: "The document icon opens SAM.gov contract search for PKI, FederalKey NAICS, and small business set-asides. Same Stripe unlock as Transit/Live Feed. Results plot as gold pins on the globe. Notices stay free on sam.gov.",
+    hint: "Bottom dock · Contracts · paid unlock.",
   },
   {
     title: "UN Data Hub",

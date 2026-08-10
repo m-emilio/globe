@@ -3078,7 +3078,8 @@ function App() {
   };
 
   /**
-   * Stripe Payment Link checkout for paid API access (Transit + Live Feed + support chat).
+   * Stripe Payment Link checkout for paid API access
+   * (Transit + Nearby + Live Feed + Contracting + support chat).
    * Requires an active session so the server can bind client_reference_id.
    * Guests never receive a payment URL — only a sign-in prompt.
    */
@@ -3095,7 +3096,7 @@ function App() {
     }
     if (authUser.transitPaid) {
       setAuthMessage(
-        "Stripe access already unlocked (Transit + Live Feed + support chat).",
+        "Stripe access already unlocked (Transit, Nearby, Live Feed, Contracting, support chat).",
       );
       return;
     }
@@ -3239,7 +3240,7 @@ function App() {
           const user = await refreshAuth();
           if (user?.transitPaid) {
             setAuthMessage(
-              "Payment confirmed — Transit, Nearby maps, Live Feed, and web support chat unlocked. Refreshing…",
+              "Payment confirmed — Transit, Nearby maps, Live Feed, Contracting, and web support chat unlocked. Refreshing…",
             );
             // Reconnect WebSocket so server re-evaluates feedPaid from session cookie
             window.setTimeout(() => {
@@ -4335,6 +4336,26 @@ function App() {
     setContractsError("");
     setContractsStatus("loading");
 
+    // Paid feature: session cookie required (never public preview cache)
+    if (!authUser) {
+      setContractsPreview(null);
+      setContractsLayerOn(false);
+      setContractsStatus("error");
+      setContractsError(
+        "Sign in with your PGP key to use Contracting (public SAM.gov opportunities via FederalKey).",
+      );
+      return;
+    }
+    if (liveFeedAccess !== "ok") {
+      setContractsPreview(null);
+      setContractsLayerOn(false);
+      setContractsStatus("error");
+      setContractsError(
+        "Contracting requires Stripe unlock ($20). Unlocks Transit, Nearby, Live Feed, Contracting, and support chat. Data source remains public SAM.gov.",
+      );
+      return;
+    }
+
     const url = buildSamContractsUrl({
       ...next,
       force: Boolean(opts?.force),
@@ -4344,16 +4365,58 @@ function App() {
     }
 
     try {
-      const data = await fetchPreviewJson<SamContractsPreview>(url, {
-        validate: (v): v is SamContractsPreview =>
-          Boolean(
-            v &&
-              typeof v === "object" &&
-              Array.isArray((v as SamContractsPreview).opportunities) &&
-              Array.isArray((v as SamContractsPreview).markers),
-          ),
-        forceNetwork: true,
-      });
+      const response = await authFetch(url);
+      const payload = (await response.json()) as
+        | SamContractsPreview
+        | {
+            error?: string;
+            message?: string;
+            code?: string;
+          };
+
+      if (
+        response.status === 401 ||
+        response.status === 402 ||
+        response.status === 503
+      ) {
+        const errPayload = payload as {
+          message?: string;
+          error?: string;
+          code?: string;
+        };
+        setContractsPreview(null);
+        setContractsLayerOn(false);
+        setContractsStatus("error");
+        if (response.status === 401) {
+          setShowAuthPanel(true);
+          setAuthMode("login");
+        }
+        setContractsError(
+          errPayload.message ||
+            (response.status === 401
+              ? "Sign in with your device key to use Contracting."
+              : response.status === 402
+                ? "Contracting requires a paid unlock on this deployment."
+                : errPayload.error || "Contracting is not fully configured yet."),
+        );
+        return;
+      }
+
+      if (!response.ok) {
+        const errPayload = payload as { message?: string; error?: string };
+        throw new Error(
+          errPayload.message || errPayload.error || "SAM.gov contracts unavailable",
+        );
+      }
+
+      const data = payload as SamContractsPreview;
+      if (
+        !Array.isArray(data.opportunities) ||
+        !Array.isArray(data.markers)
+      ) {
+        throw new Error("Contracting response incomplete");
+      }
+
       setContractsPreview(data);
       setContractsStatus("ready");
       setContractsLayerOn(true);
@@ -4361,19 +4424,39 @@ function App() {
         setContractsError(data.error);
         setContractsStatus("error");
       }
-    } catch {
-      setContractsError("SAM.gov contracts feed unavailable");
+    } catch (error) {
+      setContractsError(
+        error instanceof Error
+          ? error.message
+          : "SAM.gov contracts feed unavailable",
+      );
       setContractsStatus("error");
     }
   };
 
-  // Open Contracts hub → default PKI search
+  // Open Contracts hub → default PKI search when entitled
   useEffect(() => {
     if (!showContractsHub) return;
     if (contractsStatus === "idle") {
       void loadSamContracts({ force: false });
     }
-  }, [showContractsHub]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showContractsHub, authUser?.id, authUser?.transitPaid]);
+
+  // Drop paid contract data if session loses unlock
+  useEffect(() => {
+    if (liveFeedAccess === "ok") return;
+    setContractsPreview(null);
+    setContractsLayerOn(false);
+    if (showContractsHub && contractsStatus === "ready") {
+      setContractsStatus("error");
+      setContractsError(
+        !authUser
+          ? "Sign in to use Contracting."
+          : "Contracting requires Stripe unlock ($20).",
+      );
+    }
+  }, [liveFeedAccess, authUser, showContractsHub, contractsStatus]);
 
   const setUnodcFocusMode = (mode: "focus" | "all-live" | "none") => {
     if (!unodcPreview) return;
@@ -7469,6 +7552,16 @@ function App() {
           error={contractsError}
           preview={contractsPreview}
           layerOn={contractsLayerOn}
+          access={liveFeedAccess}
+          checkoutBusy={checkoutBusy}
+          onSignIn={() => {
+            setShowAuthPanel(true);
+            setAuthMode("login");
+            setAuthMessage("Sign in, then unlock Contracting with Stripe ($20).");
+          }}
+          onBuyAccess={() => {
+            void startTransitCheckout();
+          }}
           onToggleLayer={() => setContractsLayerOn((v) => !v)}
           onSearch={(opts) => {
             void loadSamContracts(opts);
