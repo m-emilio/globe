@@ -42,6 +42,7 @@ import {
   PKI_EDGE_CACHE_VERSION,
 } from "./pkiVulns";
 import { getSamContractsPreview } from "./samContracts";
+import { UN_WEBTV_24H_HTML } from "./unWebTvPlayerHtml";
 
 import type {
   ComtradeAvailabilityPreview,
@@ -345,9 +346,9 @@ const CONTENT_SECURITY_POLICY = [
   "base-uri 'none'",
   "object-src 'none'",
   "frame-ancestors 'none'",
-  // Free Live Feed embeds only: UNTV (YouTube) + UN Web TV (Kaltura). No wildcards.
-  "frame-src https://www.youtube.com https://www.youtube-nocookie.com https://cdnapisec.kaltura.com",
-  "child-src https://www.youtube.com https://www.youtube-nocookie.com https://cdnapisec.kaltura.com",
+  // Free Live Feed embeds: first-party /players/* shell + YouTube UNTV only.
+  "frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com",
+  "child-src 'self' https://www.youtube.com https://www.youtube-nocookie.com",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
   // First-party JS only. 'wasm-unsafe-eval' required for OpenPGP Argon2 WASM.
@@ -4350,6 +4351,22 @@ export class Globe extends Server<Env> {
   }
 }
 
+/** CSP for first-party UN Web TV Playkit shell only (same-origin iframe). */
+const UN_WEBTV_PLAYER_CSP = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'self'",
+  "script-src 'self' 'unsafe-inline' https://cdnapisec.kaltura.com",
+  "style-src 'self' 'unsafe-inline' https://webtv.un.org https://cdnapisec.kaltura.com https://cfvod.kaltura.com",
+  "img-src 'self' data: blob: https://cdnapisec.kaltura.com https://cfvod.kaltura.com https://webtv.un.org",
+  "media-src 'self' blob: https://cdnapisec.kaltura.com https://cfvod.kaltura.com https://cflive.kaltura.com https://cdnapi.kaltura.com",
+  "connect-src 'self' https://cdnapisec.kaltura.com https://cdnapi.kaltura.com https://cfvod.kaltura.com https://cflive.kaltura.com https://www.kaltura.com",
+  "worker-src 'self' blob:",
+  "font-src 'self' data:",
+  "form-action 'none'",
+].join("; ");
+
 export default {
   async fetch(
     request: Request,
@@ -4357,6 +4374,31 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
+
+    // First-party UN Web TV 24h player (free Live Feed embed).
+    // Served from Worker so we control CSP/XFO (static /* DENY would block framing).
+    if (
+      url.pathname === "/players/un-webtv-24h" ||
+      url.pathname === "/players/un-webtv-24h.html" ||
+      url.pathname === "/players/un-webtv-24h/"
+    ) {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return methodNotAllowedResponse();
+      }
+      const headers = new Headers({
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "public, max-age=300, stale-while-revalidate=3600",
+        "content-security-policy": UN_WEBTV_PLAYER_CSP,
+        "x-frame-options": "SAMEORIGIN",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "cross-origin-resource-policy": "same-site",
+      });
+      if (request.method === "HEAD") {
+        return new Response(null, { status: 200, headers });
+      }
+      return new Response(UN_WEBTV_24H_HTML, { status: 200, headers });
+    }
 
     // Harden API routing surface against path-confusion probes
     if (url.pathname.startsWith("/api/") && isSuspiciousApiPath(url.pathname)) {

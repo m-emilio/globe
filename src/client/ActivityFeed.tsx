@@ -180,10 +180,10 @@ type UnTvChannel =
       label: string;
       blurb: string;
       group: "live" | "body" | "browse";
-      kind: "kaltura";
-      entryId: string;
-      partnerId: string;
-      uiconfId: string;
+      /** First-party player page under /players/* (Playkit shell) */
+      kind: "local";
+      /** Absolute path on this origin, e.g. /players/un-webtv-24h.html */
+      playerPath: string;
       pageUrl: string;
     }
   | {
@@ -213,10 +213,9 @@ const UN_TV_CHANNELS: readonly UnTvChannel[] = [
     label: "Web TV 24h",
     blurb: "Official 24-hour UN Web TV channel",
     group: "live",
-    kind: "kaltura",
-    partnerId: "2503451",
-    uiconfId: "49754663",
-    entryId: "1_gb6tjmle",
+    // Remote Kaltura embedIframe hangs; use first-party Playkit shell instead
+    kind: "local",
+    playerPath: "/players/un-webtv-24h",
     pageUrl: "https://webtv.un.org/en/asset/k1g/k1gb6tjmle",
   },
   {
@@ -290,24 +289,15 @@ function unTvEmbedSrc(channel: UnTvChannel): string | null {
       "?autoplay=0&rel=0&modestbranding=1&playsinline=1"
     );
   }
-  if (channel.kind === "kaltura") {
+  if (channel.kind === "local") {
+    // Strict allow-list: Worker-served first-party Playkit shell only
     if (
-      !/^\d{4,10}$/.test(channel.partnerId) ||
-      !/^\d{6,12}$/.test(channel.uiconfId) ||
-      !/^[0-9a-z_]{6,24}$/i.test(channel.entryId)
+      channel.playerPath !== "/players/un-webtv-24h" &&
+      channel.playerPath !== "/players/un-webtv-24h.html"
     ) {
       return null;
     }
-    // Working player shell (embedIframeJs Location headers are corrupt on CDN).
-    const q = new URLSearchParams({
-      iframeembed: "true",
-      wid: `_${channel.partnerId}`,
-    });
-    return (
-      `https://cdnapisec.kaltura.com/html5/html5lib/v2.89/mwEmbedFrame.php` +
-      `/p/${channel.partnerId}/uiconf_id/${channel.uiconfId}` +
-      `/entry_id/${channel.entryId}?${q.toString()}`
-    );
+    return "/players/un-webtv-24h";
   }
   return null;
 }
