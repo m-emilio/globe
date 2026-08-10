@@ -1210,12 +1210,13 @@ export function Cobe({
       // Drop mapSamples when SVG overlays are heavy so WebGL + arcs share the frame budget.
       const choropleth = preparedChoroplethRef.current;
       const routeCount = overlayRoutesRef.current.routes.length;
+      // Lower samples = less GPU; keep globe snappy with overlays + UI chrome.
       const mapSamples =
         choropleth.length > 0 || routeCount >= ROUTE_HEAVY_COUNT
-          ? 5000
+          ? 4200
           : routeCount > 0
-            ? 6500
-            : 8000;
+            ? 5500
+            : 6500;
       globe.update({
         markers: markersScratch,
         glowColor: glowColorRef.current,

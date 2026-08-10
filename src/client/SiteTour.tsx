@@ -47,7 +47,7 @@ const TOUR_STEPS: SiteTourStep[] = [
   },
   {
     title: "Live Feed app",
-    body: "Open Feed for free UN Web TV / UNTV channel embeds, plus paid join/leave detail and web support chat after Stripe unlock. Globe markers stay free.",
+    body: "Feed has tabs: free UN TV (UNTV, Web TV 24h, GA, Security Council links), paid Visitors, and Support chat after Stripe. Stop embeds when not watching to keep the globe smooth.",
     hint: "Bottom dock · Feed · UN TV free.",
   },
   {

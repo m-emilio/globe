@@ -6526,60 +6526,89 @@ button[aria-busy="true"],
 }
 
 .activity-menu {
-  width: min(360px, calc(100vw - 24px));
-  max-height: min(620px, calc(100dvh - var(--nav-offset, 70px) - 100px));
-  background: rgba(0, 0, 0, 0.94);
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(640px, calc(100dvh - var(--nav-offset, 70px) - 100px));
+  background: rgba(6, 10, 16, 0.97);
   border: 1.5px solid #8A6F48;
-  border-radius: 4px;
+  border-radius: 8px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 0 34px rgba(0, 217, 255, 0.22);
-  backdrop-filter: blur(14px);
-  /* Anchored in top chrome — no position jumps */
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  /* No backdrop-filter — blurs fight WebGL globe and kill FPS */
   position: relative;
-  contain: layout paint;
+  contain: layout paint style;
 }
 
-/* Free UN Web TV / UNTV embeds inside Live Feed (not paywalled) */
-.un-tv-panel {
+/* Section tabs: UN TV (free) | Visitors | Support */
+.feed-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   flex: 0 0 auto;
-  margin: 0 0 2px;
-  padding: 10px 12px 8px;
-  border-bottom: 1px solid rgba(77, 171, 247, 0.28);
-  background:
-    linear-gradient(145deg, rgba(33, 89, 168, 0.22), rgba(0, 16, 24, 0.55));
 }
 
-.un-tv-head {
+.feed-tab {
+  appearance: none;
+  border: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: transparent;
+  color: #8b949e;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 10px 6px;
+  cursor: pointer;
+  min-height: 42px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 4px;
+  justify-content: center;
+  gap: 5px;
 }
 
-.un-tv-head strong {
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #7ee0ff;
+.feed-tab:last-child {
+  border-right: 0;
 }
 
-.un-tv-free-badge {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 3px 7px;
+.feed-tab:hover {
+  color: #d5dbe3;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.feed-tab.active {
+  color: #e7f5ff;
+  background: rgba(77, 171, 247, 0.12);
+  box-shadow: inset 0 -2px 0 #4dabf7;
+}
+
+.feed-tab-badge {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 5px;
   border-radius: 999px;
-  border: 1px solid rgba(105, 219, 123, 0.45);
-  background: rgba(105, 219, 123, 0.12);
+  background: rgba(105, 219, 123, 0.18);
   color: #b2f2bb;
+  letter-spacing: 0.04em;
+}
+
+.feed-tab-badge.locked {
+  background: rgba(245, 196, 48, 0.16);
+  color: #ffe8a3;
+}
+
+/* Free UN Web TV / UNTV (not paywalled) */
+.un-tv-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 12px;
+  -webkit-overflow-scrolling: touch;
 }
 
 .un-tv-blurb {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   font-size: 11px;
   line-height: 1.4;
   color: #9aa4b2;
@@ -6594,50 +6623,61 @@ button[aria-busy="true"],
   text-decoration: underline;
 }
 
+.un-tv-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6e7681;
+  margin: 8px 0 6px;
+}
+
 .un-tv-channels {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
 
 .un-tv-chip {
   appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
   color: #d5dbe3;
-  border-radius: 999px;
-  padding: 7px 11px;
+  border-radius: 8px;
+  padding: 7px 10px;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  min-height: 36px;
+  min-height: 34px;
 }
 
 .un-tv-chip:hover {
-  border-color: rgba(77, 171, 247, 0.45);
-  background: rgba(77, 171, 247, 0.12);
+  border-color: rgba(77, 171, 247, 0.4);
+  background: rgba(77, 171, 247, 0.1);
 }
 
 .un-tv-chip.active {
-  border-color: rgba(77, 171, 247, 0.65);
-  background: rgba(77, 171, 247, 0.22);
+  border-color: rgba(77, 171, 247, 0.7);
+  background: rgba(77, 171, 247, 0.2);
   color: #e7f5ff;
-  box-shadow: 0 0 10px rgba(77, 171, 247, 0.25);
+}
+
+.un-tv-chip-link {
+  border-style: dashed;
 }
 
 .un-tv-player-wrap {
-  margin-top: 6px;
+  margin-top: 10px;
 }
 
 .un-tv-player {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
-  min-height: 150px;
-  max-height: 220px;
+  max-height: 180px;
   border: 0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #000;
 }
 
@@ -6659,7 +6699,7 @@ button[aria-busy="true"],
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  min-height: 34px;
+  min-height: 32px;
 }
 
 .un-tv-open-link {
@@ -6673,10 +6713,10 @@ button[aria-busy="true"],
 }
 
 .un-tv-hint {
-  margin: 4px 0 0;
+  margin: 10px 0 0;
   font-size: 11px;
   color: #6e7681;
-  line-height: 1.35;
+  line-height: 1.4;
 }
 
 /* Paid web-support chat in Live Feed (client-only history) */
