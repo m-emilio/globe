@@ -37,6 +37,8 @@ declare namespace Cloudflare {
 		SAM_API_KEY?: string;
 		/** KV for auth users/sessions, entitlements, and catalog */
 		BILLING_KV: KVNamespace;
+		/** Static assets (public/) — used when run_worker_first is true */
+		ASSETS: Fetcher;
 	}
 }
 interface Env extends Cloudflare.Env {}

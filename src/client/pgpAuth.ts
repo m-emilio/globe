@@ -1108,7 +1108,7 @@ export async function signInWithDeviceKey(options: {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = (await loginRes.json()) as {
+  const data = await readJsonResponse<{
     user?: {
       id: string;
       fingerprint: string;
@@ -1120,7 +1120,7 @@ export async function signInWithDeviceKey(options: {
     adminActionSecretRequired?: boolean;
     message?: string;
     error?: string;
-  };
+  }>(loginRes, "Device sign-in failed");
   // Session is established via Set-Cookie (HttpOnly). Do not store sessionToken in JS.
   if (!loginRes.ok || !data.user) {
     const code = data.error || "";
@@ -1204,6 +1204,34 @@ export async function generateAndKeepOnDevice(options?: {
       msg.includes("Device key") || msg.includes("IndexedDB")
         ? msg
         : `Could not store the new key on this device: ${msg}`,
+    );
+  }
+}
+
+/**
+ * Parse JSON API responses safely — empty/HTML bodies used to throw
+ * "JSON.parse: unexpected end of data" during sign-in when routing was wrong.
+ */
+export async function readJsonResponse<T extends Record<string, unknown>>(
+  response: Response,
+  fallbackMessage: string,
+): Promise<T> {
+  const text = await response.text();
+  if (!text.trim()) {
+    throw new Error(
+      response.status === 405
+        ? `${fallbackMessage} (API route rejected — try again after refresh).`
+        : `${fallbackMessage} (empty response from server, HTTP ${response.status}).`,
+    );
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const looksHtml = /^\s*</.test(text);
+    throw new Error(
+      looksHtml
+        ? `${fallbackMessage} (server returned a page instead of JSON — API routing may be misconfigured).`
+        : `${fallbackMessage} (invalid JSON from server, HTTP ${response.status}).`,
     );
   }
 }
@@ -1819,12 +1847,12 @@ export async function buildChallengeLoginPayload(options: {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ fingerprint }),
   });
-  const challenge = (await challengeRes.json()) as {
+  const challenge = await readJsonResponse<{
     challengeId?: string;
     message?: string;
     fingerprint?: string;
     error?: string;
-  };
+  }>(challengeRes, "Could not start login challenge");
   if (!challengeRes.ok || !challenge.challengeId || !challenge.message) {
     throw new Error(
       challenge.message || challenge.error || "Could not start login challenge",

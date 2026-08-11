@@ -4769,17 +4769,37 @@ export default {
       );
     }
 
-    const response =
-      (await routePartykitRequest(request, { ...env })) ||
+    // PartyKit / Durable Object WebSocket upgrade
+    const party = await routePartykitRequest(request, { ...env });
+    if (party) {
+      return isWebSocketRequest(request)
+        ? party
+        : withSecurityHeaders(party, request);
+    }
+
+    // Static assets + SPA shell (requires assets.binding = ASSETS + run_worker_first)
+    if (env.ASSETS) {
+      const assetResponse = await env.ASSETS.fetch(request);
+      // Don't wrap WebSocket; assets are always HTTP.
+      // Avoid re-applying DENY/CSP that break first-party player routes (handled above).
+      if (
+        url.pathname.startsWith("/players/") ||
+        isWebSocketRequest(request)
+      ) {
+        return assetResponse;
+      }
+      return withSecurityHeaders(assetResponse, request);
+    }
+
+    return withSecurityHeaders(
       new Response("Not Found", {
         status: 404,
         headers: {
           "content-type": "text/plain; charset=utf-8",
+          "cache-control": "no-store",
         },
-      });
-
-    return isWebSocketRequest(request)
-      ? response
-      : withSecurityHeaders(response, request);
+      }),
+      request,
+    );
   },
 } satisfies ExportedHandler<Env>;
