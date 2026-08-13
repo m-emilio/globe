@@ -5101,22 +5101,86 @@ function App() {
           };
         })
       : [];
-  const contractsGlobeMarkers =
+  /** Contracting: + popups via zero-width arcs (same system as PKI / Trade Pulse) */
+  const contractsGlobeArcs: GlobeArc[] =
     contractsLayerOn &&
     contractsStatus === "ready" &&
     contractsPreview?.markers?.length
-      ? contractsPreview.markers.map((m) => ({
-          location: [m.lat, m.lng] as [number, number],
-          size: Math.max(0.04, Math.min(0.12, m.size || 0.07)),
-        }))
+      ? (() => {
+          const oppById = new Map(
+            (contractsPreview.opportunities || []).map((o) => [o.id, o]),
+          );
+          return contractsPreview.markers.map((m) => {
+            const opp = oppById.get(m.id);
+            const title = (opp?.title || m.title || "Opportunity").slice(0, 160);
+            const short =
+              title.length > 28 ? `${title.slice(0, 26)}…` : title;
+            return {
+              id: `contract:${m.id}`,
+              from: [m.lat, m.lng] as [number, number],
+              to: [m.lat, m.lng] as [number, number],
+              fromLabel: "PoP",
+              toLabel: short,
+              color: "#f5c430",
+              width: 0,
+              dash: "none",
+              severity: m.setAsideCode ? "elevated" : "watch",
+              comtrade: {
+                kind: "contract" as const,
+                routeId: m.id,
+                commodity: title,
+                commodityCode:
+                  opp?.solicitationNumber ||
+                  opp?.noticeId ||
+                  m.id.slice(0, 12),
+                period: opp?.postedDate || "",
+                originName: opp?.department || "Federal agency",
+                originIso3: "USA",
+                destName:
+                  m.placeLabel ||
+                  opp?.placeLabel ||
+                  [opp?.city, opp?.state].filter(Boolean).join(", ") ||
+                  "Place of performance",
+                destIso3: (opp?.state || "US").slice(0, 3),
+                transportMode:
+                  opp?.naicsLabel ||
+                  (m.naics ? `NAICS ${m.naics}` : "") ||
+                  "",
+                customsProcedure: opp?.type || "",
+                valueUsd: 0,
+                quantity: opp?.setAside || m.setAsideCode || "—",
+                supplierSharePct: 0,
+                exportValueUsd: 0,
+                importValueUsd: 0,
+                asymmetryPct: 0,
+                fobValueUsd: 0,
+                cifValueUsd: 0,
+                frictionPct: 0,
+                reExportSharePct: 0,
+                confidencePct: 0,
+                severity: m.setAsideCode ? "elevated" : "watch",
+                layers: [
+                  m.setAsideCode || opp?.setAsideCode || "",
+                  m.naics || opp?.naics || "",
+                ].filter(Boolean),
+                insight: (opp?.descriptionExcerpt || "").slice(0, 400),
+                referenceUrl: opp?.url || "",
+                responseDeadline: opp?.responseDeadline || "",
+                setAsideLabel: opp?.setAside || m.setAsideCode || "",
+                noticeId: opp?.noticeId || "",
+                solicitationNumber: opp?.solicitationNumber || "",
+                active: opp?.active || "",
+              },
+            };
+          });
+        })()
       : [];
   const globeOverlayMarkers = [
     ...unGlobalOverlayMarkers,
     ...tradePulseGlobeMarkers,
-    ...contractsGlobeMarkers,
   ];
   const globeMarkerColor =
-    contractsGlobeMarkers.length > 0
+    contractsGlobeArcs.length > 0
       ? ([0.95, 0.72, 0.12] as [number, number, number])
       : tradePulseGlobeMarkers.length > 0
         ? ([1, 0.24, 0.18] as [number, number, number])
@@ -5126,6 +5190,7 @@ function App() {
   const globeOverlayRoutes: GlobeArc[] = [
     ...tradePulseGlobeArcs,
     ...pkiGlobeArcs,
+    ...contractsGlobeArcs,
   ];
 
   return (

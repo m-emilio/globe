@@ -4379,6 +4379,30 @@ a.nav-title:focus-visible {
 }
 
 /* PKI endpoint popup — distinct from trade language */
+.globe-arc-contract-popup {
+  border-color: rgba(245, 196, 48, 0.55);
+  box-shadow:
+    0 16px 48px rgba(0, 0, 0, 0.55),
+    0 0 20px rgba(245, 196, 48, 0.18);
+}
+
+.globe-arc-contract-popup .globe-arc-comtrade-popup-header {
+  border-bottom-color: rgba(245, 196, 48, 0.28);
+}
+
+.globe-arc-contract-popup .globe-arc-comtrade-link {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffe8a3;
+  text-decoration: none;
+}
+
+.globe-arc-contract-popup .globe-arc-comtrade-link:hover {
+  text-decoration: underline;
+}
+
 .globe-arc-pki-popup {
   border-color: rgba(255, 80, 120, 0.35);
   box-shadow:
@@ -7363,8 +7387,8 @@ button[aria-busy="true"],
    Explicit 2-row grid so rows never overlap; height is content-driven (no max-height clip). */
 @media (max-width: 768px) {
   :root {
-    /* Approx chrome height for offsets (grid height may grow slightly with safe-area) */
-    --mobile-nav-body: 92px;
+    /* Single compact row — nav-center is empty (features live in dock) */
+    --mobile-nav-body: 48px;
     --mobile-nav-height: calc(var(--mobile-nav-body) + env(safe-area-inset-top, 0px));
   }
 
@@ -7375,68 +7399,69 @@ button[aria-busy="true"],
   }
 
   .nav-bar {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: auto auto;
-    grid-template-areas:
-      "left right"
-      "center center";
+    display: flex;
+    flex-direction: row;
     align-items: center;
-    column-gap: 8px;
-    row-gap: 6px;
-    padding: 8px 10px;
-    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    padding-top: calc(6px + env(safe-area-inset-top, 0px));
     height: auto;
-    min-height: var(--mobile-nav-height);
+    min-height: 0;
     max-height: none;
     box-sizing: border-box;
     overflow: visible;
   }
 
   .nav-left {
-    grid-area: left;
     min-width: 0;
-    max-width: 100%;
+    max-width: 55%;
     overflow: hidden;
+    height: auto;
   }
 
   .nav-title {
-    font-size: 12px;
-    letter-spacing: 1.4px;
-    height: 32px;
-    padding: 0 10px;
+    font-size: 11px;
+    letter-spacing: 1.2px;
+    height: 30px;
+    min-height: 30px;
+    padding: 0 8px;
     white-space: nowrap;
     line-height: 1;
   }
 
   .nav-subtitle {
-    font-size: 10px;
-    margin-left: 4px;
+    display: none;
   }
 
   .nav-right {
-    grid-area: right;
     display: flex;
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
+    height: auto;
   }
 
-  /* Same 3-button row — dedicated second grid row, full width, no overlap */
-  .nav-center {
-    grid-area: center;
+  /* Empty on mobile (dock holds tools) — hide so it doesn’t reserve a second row */
+  .nav-center:empty {
+    display: none;
+  }
+
+  .nav-center:not(:empty) {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 6px;
     width: 100%;
     min-width: 0;
+    order: 3;
+    flex: 1 0 100%;
   }
 
   .nav-btn {
     width: 100%;
     min-width: 0;
-    min-height: 40px;
-    height: 40px;
+    min-height: 34px;
+    height: 34px;
     padding: 0 6px;
     font-size: 11px;
     font-weight: 600;
@@ -7450,9 +7475,9 @@ button[aria-busy="true"],
   }
 
   .nav-menu-btn {
-    min-height: 34px;
-    height: 34px;
-    padding: 0 10px;
+    min-height: 30px;
+    height: 30px;
+    padding: 0 8px;
     font-size: 10px;
     letter-spacing: 0.5px;
     gap: 4px;
@@ -7975,26 +8000,35 @@ button[aria-busy="true"],
 
 @media (max-width: 480px) {
   :root {
-    --mobile-nav-body: 88px;
+    --mobile-nav-body: 44px;
     --mobile-nav-height: calc(var(--mobile-nav-body) + env(safe-area-inset-top, 0px));
   }
 
+  .nav-bar {
+    padding: 4px 8px;
+    padding-top: calc(4px + env(safe-area-inset-top, 0px));
+    gap: 6px;
+  }
+
   /* Keep the same 3-across button layout — do not stack into a tall column */
-  .nav-center {
+  .nav-center:not(:empty) {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 5px;
   }
 
   .nav-btn {
-    min-height: 40px;
-    height: 40px;
-    font-size: 11px;
+    min-height: 32px;
+    height: 32px;
+    font-size: 10px;
     letter-spacing: 0.02em;
     padding: 0 4px;
   }
 
   .nav-title {
-    font-size: 14px;
+    font-size: 11px;
+    height: 28px;
+    min-height: 28px;
+    padding: 0 8px;
   }
 
   .nav-subtitle {
@@ -8002,19 +8036,20 @@ button[aria-busy="true"],
   }
 
   .nav-menu-btn {
-    min-height: 40px;
-    height: 40px;
-    padding: 0 10px;
-    font-size: 12px;
+    min-height: 28px;
+    height: 28px;
+    padding: 0 8px;
+    font-size: 10px;
   }
 
   .weather-icon-btn {
-    width: 40px;
-    height: 40px;
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
   }
 
   .main-content {
-    margin-top: calc(var(--mobile-nav-height) + 8px);
+    margin-top: calc(var(--mobile-nav-height) + 4px);
   }
 
   .weather-panel,

@@ -80,10 +80,19 @@ export type GlobeArcComtradeDetail = {
   insight: string;
   /** free-subscription when Worker hydrated from Free API */
   dataMode?: "derived-preview" | "free-subscription";
-  /** trade = Comtrade/Trade Pulse; pki = CVE/PKI arcs */
-  kind?: "trade" | "pki";
-  /** Optional external reference URL (e.g. NVD) */
+  /** trade = Comtrade/Trade Pulse; pki = CVE/PKI arcs; contract = SAM.gov */
+  kind?: "trade" | "pki" | "contract";
+  /** Optional external reference URL (e.g. NVD / SAM.gov) */
   referenceUrl?: string;
+  /** Contract-only: response deadline */
+  responseDeadline?: string;
+  /** Contract-only: set-aside label */
+  setAsideLabel?: string;
+  /** Contract-only: notice / solicitation ids */
+  noticeId?: string;
+  solicitationNumber?: string;
+  /** Contract-only: active flag */
+  active?: string;
 };
 
 export type GlobeArc = {
@@ -678,6 +687,28 @@ function getRoutePoints(routes: GlobeArc[]): RoutePoint[] {
   };
 
   for (const route of routes) {
+    const isContract = route.comtrade?.kind === "contract";
+    const sameEndpoint =
+      isContract ||
+      (Math.abs(route.from[0] - route.to[0]) < 1e-6 &&
+        Math.abs(route.from[1] - route.to[1]) < 1e-6);
+
+    // Point-only contracts: single + at place of performance (no origin dup)
+    if (sameEndpoint && isContract) {
+      const placeKey = `contract:${route.id}`;
+      consider({
+        key: placeKey,
+        vector: vectorFromLocation(route.to),
+        color: route.color,
+        severity: route.severity,
+        label: route.toLabel ?? "Contract",
+        role: "destination",
+        countryName: route.comtrade?.destName ?? route.toLabel ?? "Contract",
+        comtrade: route.comtrade,
+      });
+      continue;
+    }
+
     const fromIso = route.comtrade?.originIso3 || "";
     const toIso = route.comtrade?.destIso3 || "";
     const fromKey = fromIso
@@ -687,16 +718,18 @@ function getRoutePoints(routes: GlobeArc[]): RoutePoint[] {
       ? `dest:${toIso}`
       : `dest:${route.to[0].toFixed(1)},${route.to[1].toFixed(1)}`;
 
-    consider({
-      key: fromKey,
-      vector: vectorFromLocation(route.from),
-      color: route.color,
-      severity: route.severity,
-      label: route.fromLabel ?? "Origin",
-      role: "origin",
-      countryName: route.comtrade?.originName ?? route.fromLabel ?? "Origin",
-      comtrade: route.comtrade,
-    });
+    if (!sameEndpoint) {
+      consider({
+        key: fromKey,
+        vector: vectorFromLocation(route.from),
+        color: route.color,
+        severity: route.severity,
+        label: route.fromLabel ?? "Origin",
+        role: "origin",
+        countryName: route.comtrade?.originName ?? route.fromLabel ?? "Origin",
+        comtrade: route.comtrade,
+      });
+    }
 
     if (route.via) {
       const viaIso = route.comtrade?.hubIso3 || "";
@@ -1015,6 +1048,10 @@ export function Cobe({
   const autoRotationRef = useRef(0);
   const isAutoRotatePausedRef = useRef(false);
   const globeScaleRef = useRef(DEFAULT_VIEW_ZOOM);
+  /** Two-finger pinch distance + zoom at gesture start */
+  const pinchRef = useRef<{ startDistance: number; startZoom: number } | null>(
+    null,
+  );
   const [isAutoRotatePaused, setIsAutoRotatePaused] = useState(false);
   const [globeScale, setGlobeScale] = useState(DEFAULT_VIEW_ZOOM);
   const [isGlobeControlsOpen, setIsGlobeControlsOpen] = useState(false);
@@ -1603,11 +1640,19 @@ export function Cobe({
           >
             Reset view
           </button>
-          <p className="globe-controls-hint">Drag globe to look around · scroll to zoom</p>
+          <p className="globe-controls-hint">
+            Drag to look · scroll / pinch to zoom
+          </p>
         </div>
       )}
     </div>
   );
+
+  const touchDistance = (a: React.Touch, b: React.Touch) => {
+    const dx = a.clientX - b.clientX;
+    const dy = a.clientY - b.clientY;
+    return Math.hypot(dx, dy);
+  };
 
   return (
     <div className="globe-cobe-root">
@@ -1627,10 +1672,40 @@ export function Cobe({
           transformOrigin: "center center",
         }}
         onWheel={(e) => {
-          // Pinch/trackpad/mouse wheel zoom without cutting the globe
+          // Trackpad/mouse wheel zoom without cutting the globe
           e.preventDefault();
           const delta = e.deltaY > 0 ? -VIEW_ZOOM_STEP : VIEW_ZOOM_STEP;
           nudgeViewZoom(delta * (e.ctrlKey ? 1.5 : 1));
+        }}
+        onTouchStart={(e) => {
+          if (e.touches.length === 2) {
+            e.preventDefault();
+            // Cancel single-finger drag when pinching
+            pointerInteracting.current = null;
+            pinchRef.current = {
+              startDistance: touchDistance(e.touches[0], e.touches[1]),
+              startZoom: globeScaleRef.current,
+            };
+          }
+        }}
+        onTouchMove={(e) => {
+          if (e.touches.length === 2 && pinchRef.current) {
+            e.preventDefault();
+            const dist = touchDistance(e.touches[0], e.touches[1]);
+            const start = pinchRef.current.startDistance;
+            if (start > 8) {
+              const ratio = dist / start;
+              setViewZoomValue(pinchRef.current.startZoom * ratio);
+            }
+          }
+        }}
+        onTouchEnd={(e) => {
+          if (e.touches.length < 2) {
+            pinchRef.current = null;
+          }
+        }}
+        onTouchCancel={() => {
+          pinchRef.current = null;
         }}
       >
       <div
@@ -1692,6 +1767,10 @@ export function Cobe({
       >
         <svg className="globe-arc-svg" viewBox="0 0 400 400">
           {overlayRoutes.map((route) => {
+            // Point-only layers (e.g. contracting) — no visible arc stroke
+            if (route.width <= 0 || route.comtrade?.kind === "contract") {
+              return null;
+            }
             const solid = isSolidArcDash(route.dash);
             const style = {
               ["--arc-color" as string]: route.color,
@@ -1791,7 +1870,12 @@ export function Cobe({
         }}
         onTouchMove={(e) => {
           e.preventDefault();
-          if (pointerInteracting.current !== null && e.touches[0]) {
+          // Single-finger orbit only — two-finger pinch handled on sphere parent
+          if (
+            e.touches.length === 1 &&
+            pointerInteracting.current !== null &&
+            e.touches[0]
+          ) {
             updatePointerRotation(
               e.touches[0].clientX,
               e.touches[0].clientY,
@@ -1848,13 +1932,17 @@ export function Cobe({
             className={
               selectedPoint.comtrade.kind === "pki"
                 ? "globe-arc-comtrade-popup globe-arc-pki-popup"
-                : "globe-arc-comtrade-popup"
+                : selectedPoint.comtrade.kind === "contract"
+                  ? "globe-arc-comtrade-popup globe-arc-contract-popup"
+                  : "globe-arc-comtrade-popup"
             }
             role="dialog"
             aria-label={
               selectedPoint.comtrade.kind === "pki"
                 ? `Certificate / PKI exposure for ${selectedPoint.countryName}`
-                : `Comtrade data for ${selectedPoint.countryName}`
+                : selectedPoint.comtrade.kind === "contract"
+                  ? `Contract opportunity at ${selectedPoint.countryName}`
+                  : `Comtrade data for ${selectedPoint.countryName}`
             }
             style={
               {
@@ -1890,7 +1978,10 @@ export function Cobe({
                 <strong>
                   {selectedPoint.comtrade.kind === "pki"
                     ? selectedPoint.comtrade.commodityCode
-                    : selectedPoint.countryName}
+                    : selectedPoint.comtrade.kind === "contract"
+                      ? selectedPoint.comtrade.commodityCode ||
+                        selectedPoint.countryName
+                      : selectedPoint.countryName}
                 </strong>
                 <span>
                   {selectedPoint.comtrade.kind === "pki"
@@ -1899,15 +1990,19 @@ export function Cobe({
                       : selectedPoint.role === "relay"
                         ? "Relay"
                         : "Exposure country"
-                    : selectedPoint.role === "origin"
-                      ? "Origin"
-                      : selectedPoint.role === "relay"
-                        ? "Intermediary hub"
-                        : "Destination"}{" "}
+                    : selectedPoint.comtrade.kind === "contract"
+                      ? "SAM.gov opportunity · place of performance"
+                      : selectedPoint.role === "origin"
+                        ? "Origin"
+                        : selectedPoint.role === "relay"
+                          ? "Intermediary hub"
+                          : "Destination"}{" "}
                   · {selectedPoint.comtrade.severity}
                   {selectedPoint.comtrade.kind === "pki"
                     ? ` · ${selectedPoint.countryName}`
-                    : ""}
+                    : selectedPoint.comtrade.kind === "contract"
+                      ? ` · ${selectedPoint.countryName}`
+                      : ""}
                   <em className="globe-arc-comtrade-drag-hint"> · drag header to move</em>
                 </span>
               </div>
@@ -1934,7 +2029,86 @@ export function Cobe({
               </div>
             </div>
             <div className="globe-arc-comtrade-popup-body">
-              {selectedPoint.comtrade.kind === "pki" ? (
+              {selectedPoint.comtrade.kind === "contract" ? (
+                <>
+                  <p className="globe-arc-comtrade-commodity">
+                    <strong>{selectedPoint.comtrade.commodity}</strong>
+                  </p>
+                  <p className="globe-arc-comtrade-route">
+                    {selectedPoint.comtrade.destName}
+                    {selectedPoint.comtrade.originName
+                      ? ` · ${selectedPoint.comtrade.originName}`
+                      : ""}
+                  </p>
+                  <div className="globe-arc-comtrade-grid">
+                    <div>
+                      <span>Solicitation</span>
+                      <strong>
+                        {selectedPoint.comtrade.solicitationNumber ||
+                          selectedPoint.comtrade.commodityCode ||
+                          "—"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Notice</span>
+                      <strong>
+                        {selectedPoint.comtrade.noticeId || "—"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Type</span>
+                      <strong>
+                        {selectedPoint.comtrade.customsProcedure || "—"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Posted</span>
+                      <strong>{selectedPoint.comtrade.period || "—"}</strong>
+                    </div>
+                    <div>
+                      <span>Response by</span>
+                      <strong>
+                        {selectedPoint.comtrade.responseDeadline || "—"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Set-aside</span>
+                      <strong>
+                        {selectedPoint.comtrade.setAsideLabel ||
+                          selectedPoint.comtrade.quantity ||
+                          "—"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>NAICS</span>
+                      <strong>
+                        {selectedPoint.comtrade.transportMode || "—"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Active</span>
+                      <strong>
+                        {selectedPoint.comtrade.active || "—"}
+                      </strong>
+                    </div>
+                  </div>
+                  {selectedPoint.comtrade.insight ? (
+                    <p className="globe-arc-comtrade-insight">
+                      {selectedPoint.comtrade.insight}
+                    </p>
+                  ) : null}
+                  {safeGlobeHref(selectedPoint.comtrade.referenceUrl) ? (
+                    <a
+                      className="globe-arc-comtrade-link"
+                      href={safeGlobeHref(selectedPoint.comtrade.referenceUrl)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Open on SAM.gov
+                    </a>
+                  ) : null}
+                </>
+              ) : selectedPoint.comtrade.kind === "pki" ? (
                 <p className="globe-arc-comtrade-route pki-arc-route">
                   {selectedPoint.comtrade.originName} →{" "}
                   {selectedPoint.comtrade.destName}
@@ -1953,6 +2127,8 @@ export function Cobe({
                     : ""}
                 </p>
               )}
+              {selectedPoint.comtrade.kind !== "contract" ? (
+              <>
               <p className="globe-arc-comtrade-commodity">
                 <strong>{selectedPoint.comtrade.commodity}</strong>
                 <span>
@@ -2118,6 +2294,8 @@ export function Cobe({
                     ? " · UN Comtrade"
                     : " · Preview"}
               </p>
+              </>
+              ) : null}
             </div>
             <button
               type="button"
