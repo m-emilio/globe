@@ -778,11 +778,29 @@ function formatPopupPct(value: number): string {
   return `${value.toFixed(1)}%`;
 }
 
+/** Routes that draw an SVG stroke (contracts are point-only + markers). */
+function isDrawableArc(route: GlobeArc): boolean {
+  if (route.width <= 0) return false;
+  if (route.comtrade?.kind === "contract") return false;
+  // Degenerate zero-length arcs have no stroke
+  if (
+    Math.abs(route.from[0] - route.to[0]) < 1e-6 &&
+    Math.abs(route.from[1] - route.to[1]) < 1e-6 &&
+    !route.via
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function prepareRouteOverlay(routes: GlobeArc[]): RouteOverlayData {
-  const steps = routeSampleSteps(routes.length);
+  // Path samples only for drawable arcs — must match DOM .globe-arc-path count.
+  // Point-only contracts still contribute + markers via getRoutePoints(all).
+  const drawable = routes.filter(isDrawableArc);
+  const steps = routeSampleSteps(drawable.length);
   return {
     key: `${steps}|${routes.map((route) => route.id).join("|")}`,
-    routes: routes.map((route) => ({
+    routes: drawable.map((route) => ({
       id: route.id,
       samples: buildRouteSamples(route, steps),
     })),
@@ -802,13 +820,13 @@ function getRouteOverlayElements(
 
   // Re-query when route set changes OR React hasn't finished mounting paths yet
   // (cache hit with empty/short NodeList was why arcs "sometimes" never appeared).
+  // pathCount may be 0 for contract-only layers (point markers without strokes).
   if (
     cached &&
     cached.key === overlay.key &&
     cached.width === width &&
     cached.paths.length === pathCount &&
-    cached.points.length === pointCount &&
-    pathCount > 0
+    cached.points.length === pointCount
   ) {
     return cached;
   }
@@ -827,22 +845,27 @@ function getRouteOverlayElements(
     const id = path.dataset.arcId || "";
     if (id) pathsById.set(id, path);
   }
-  const paths = overlay.routes.map((route, index) => {
-    return pathsById.get(route.id) || pathNodes[index] || null;
-  }).filter((p): p is SVGPathElement => Boolean(p));
+  const paths = overlay.routes
+    .map((route, index) => {
+      return pathsById.get(route.id) || pathNodes[index] || null;
+    })
+    .filter((p): p is SVGPathElement => Boolean(p));
 
   const pointsByKey = new Map<string, HTMLDivElement>();
   for (const el of pointNodes) {
     const key = el.dataset.arcPoint || "";
     if (key) pointsByKey.set(key, el);
   }
-  const points = overlay.points.map((point, index) => {
-    return pointsByKey.get(point.key) || pointNodes[index] || null;
-  }).filter((p): p is HTMLDivElement => Boolean(p));
+  const points = overlay.points
+    .map((point, index) => {
+      return pointsByKey.get(point.key) || pointNodes[index] || null;
+    })
+    .filter((p): p is HTMLDivElement => Boolean(p));
 
   // Only cache when DOM fully matches data — otherwise retry next frame.
+  // Allow pathCount === 0 (contract-only + markers).
   const complete =
-    paths.length === pathCount && points.length === pointCount && pathCount > 0;
+    paths.length === pathCount && points.length === pointCount;
   const elements = {
     key: overlay.key,
     width,
@@ -947,12 +970,17 @@ function updateRouteOverlay(
     rotSnap: { phi: number; theta: number; key: string };
   },
 ): boolean {
-  if (!container || overlay.routes.length === 0) {
+  if (!container) {
+    return true;
+  }
+  // Nothing to project (layer off / empty)
+  if (overlay.routes.length === 0 && overlay.points.length === 0) {
     return true;
   }
 
   const elements = getRouteOverlayElements(container, overlay, width, cache);
   // DOM not ready yet (React commit lag) — caller should retry next frame.
+  // paths may be empty when only contract points are active.
   if (
     elements.paths.length !== overlay.routes.length ||
     elements.points.length !== overlay.points.length
@@ -1246,12 +1274,15 @@ export function Cobe({
       // Visitor positions mutate in place — markers must update every frame for live motion.
       // Drop mapSamples when SVG overlays are heavy so WebGL + arcs share the frame budget.
       const choropleth = preparedChoroplethRef.current;
-      const routeCount = overlayRoutesRef.current.routes.length;
+      const routeOverlay = overlayRoutesRef.current;
+      const routeCount = routeOverlay.routes.length;
+      const pointCount = routeOverlay.points.length;
+      const overlayLoad = routeCount + pointCount;
       // Lower samples = less GPU; keep globe snappy with overlays + UI chrome.
       const mapSamples =
         choropleth.length > 0 || routeCount >= ROUTE_HEAVY_COUNT
           ? 4200
-          : routeCount > 0
+          : overlayLoad > 0
             ? 5500
             : 6500;
       globe.update({
@@ -1266,8 +1297,9 @@ export function Cobe({
         mapSamples,
       });
 
-      if (routeCount > 0) {
-        const routeKey = overlayRoutesRef.current.key;
+      // Project strokes and/or + point markers (contracts may be points-only)
+      if (routeCount > 0 || pointCount > 0) {
+        const routeKey = routeOverlay.key;
         if (routeKey !== lastRouteKey) {
           lastRouteKey = routeKey;
           routeNeedsImmediateDraw = true;
@@ -1296,7 +1328,7 @@ export function Cobe({
           routeGpuRotSnap.key = routeKey;
           const ok = updateRouteOverlay(
             routeOverlayRef.current,
-            overlayRoutesRef.current,
+            routeOverlay,
             currentRotation,
             currentWidth,
             COBE_RENDER_SCALE,

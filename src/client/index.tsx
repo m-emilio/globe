@@ -5041,10 +5041,7 @@ function App() {
     showTradePulsePanel && tradePulseStatus === "ready"
       ? getVisibleTradePulseRoutes(tradePulsePreview, tradePulseLayers)
       : [];
-  const tradePulseGlobeMarkers =
-    showTradePulsePanel && tradePulseStatus === "ready"
-      ? getTradePulseGlobeMarkers(tradePulsePreview, tradePulseLayers)
-      : [];
+  // Endpoint dots come from arc + controls (avoid double markers / z-fight glitch)
   const tradePulseGlobeArcs: GlobeArc[] =
     showTradePulsePanel && tradePulseStatus === "ready"
       ? visibleTradePulseRoutes.map((route) => {
@@ -5175,14 +5172,11 @@ function App() {
           });
         })()
       : [];
-  const globeOverlayMarkers = [
-    ...unGlobalOverlayMarkers,
-    ...tradePulseGlobeMarkers,
-  ];
+  const globeOverlayMarkers = [...unGlobalOverlayMarkers];
   const globeMarkerColor =
     contractsGlobeArcs.length > 0
       ? ([0.95, 0.72, 0.12] as [number, number, number])
-      : tradePulseGlobeMarkers.length > 0
+      : tradePulseGlobeArcs.length > 0
         ? ([1, 0.24, 0.18] as [number, number, number])
         : unGlobalMarkerColor;
   const globeHeatZones = unodcHeatZones;
