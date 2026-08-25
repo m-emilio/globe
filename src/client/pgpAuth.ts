@@ -1088,6 +1088,7 @@ export async function signInWithDeviceKey(options: {
   sessionToken: string;
   isAdmin: boolean;
   adminActionSecretRequired: boolean;
+  paymentRequired?: boolean;
   message?: string;
 }> {
   const { deviceKey, passphrase } = options;
@@ -1118,6 +1119,7 @@ export async function signInWithDeviceKey(options: {
     sessionToken?: string;
     isAdmin?: boolean;
     adminActionSecretRequired?: boolean;
+    paymentRequired?: boolean;
     message?: string;
     error?: string;
   }>(loginRes, "Device sign-in failed");
@@ -1149,6 +1151,7 @@ export async function signInWithDeviceKey(options: {
     sessionToken: "",
     isAdmin: Boolean(data.isAdmin),
     adminActionSecretRequired: Boolean(data.adminActionSecretRequired),
+    paymentRequired: data.paymentRequired,
     message: data.message,
   };
 }

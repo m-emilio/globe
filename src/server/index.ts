@@ -7,10 +7,12 @@ import {
   getUserById,
   loginUser,
   logoutUser,
+  paymentEnforcementEnabled,
   rateLimitDurable,
   rateLimitOrNull,
   registerUser,
   requireTransitAccess,
+  userHasFeatureAccess,
   type AuthEnv,
 } from "./auth";
 import {
@@ -4009,7 +4011,7 @@ export class Globe extends Server<Env> {
     }
   }
 
-  /** Deliver feed-* only to connections that proved transitPaid via session cookie */
+  /** Deliver feed-* only to connections with feature access (PGP session; Stripe only if enforced) */
   private broadcastFeed(message: OutgoingMessage, excludeId?: string) {
     for (const connection of this.getConnections<ConnectionState>()) {
       if (excludeId && connection.id === excludeId) continue;
@@ -4040,7 +4042,9 @@ export class Globe extends Server<Env> {
         this.env as AuthEnv,
       );
       signedIn = Boolean(session?.user.fingerprint);
-      feedPaid = Boolean(session?.user.transitPaid);
+      feedPaid = Boolean(
+        session?.user && userHasFeatureAccess(session.user, this.env as AuthEnv),
+      );
       userId = session?.user.id ? String(session.user.id).slice(0, 128) : undefined;
     } catch {
       signedIn = false;
@@ -4194,8 +4198,8 @@ export class Globe extends Server<Env> {
   }
 
   /**
-   * Paid Live Feed web-support chat. Validates + rate-limits, then fans out
-   * only to transitPaid peers. Never writes chat to DO storage, KV, or logs.
+   * Live Feed web-support chat. Validates + rate-limits, then fans out
+   * only to peers with feature access. Never writes chat to DO storage, KV, or logs.
    */
   onMessage(conn: Connection<ConnectionState>, message: string | ArrayBuffer) {
     void this.handleChatMessage(conn, message).catch(() => {
@@ -4233,14 +4237,14 @@ export class Globe extends Server<Env> {
     const state = conn.state as ConnectionState | undefined;
     // Only fully connected sockets with map state may chat
     if (!state?.position?.id) return;
-    // Fast path: paid flag from connect (updated below if entitlement revoked)
+    // Fast path: access flag from connect (updated below if entitlement revoked)
     if (!state.feedPaid) return;
 
-    // Mid-session revoke: re-check transitPaid from KV when we have a user id
-    if (state.userId) {
+    // Mid-session revoke: only when Stripe is enforced and entitlement is gone
+    if (state.userId && paymentEnforcementEnabled(this.env as AuthEnv)) {
       try {
         const user = await getUserById(this.env as AuthEnv, state.userId);
-        if (!user?.transitPaid) {
+        if (!user || !userHasFeatureAccess(user, this.env as AuthEnv)) {
           conn.setState({ ...state, feedPaid: false });
           this.sendJson(conn, { type: "feed-access", paid: false });
           return;

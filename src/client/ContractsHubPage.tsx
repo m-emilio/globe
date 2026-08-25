@@ -248,7 +248,7 @@ export function ContractsHubPage(props: ContractsHubProps) {
             </div>
             <p className="un-hub-card-desc">
               {access === "login_required"
-                ? "Sign in with your device-local OpenPGP key, then unlock with Stripe ($20) to use Contracting."
+                ? "Sign in with your device-local OpenPGP key to use Contracting. Stripe is only required on deployments that enforce payment."
                 : "Stripe access ($20) unlocks Contracting, Transit, Nearby maps, Live Feed, and support chat. Source data is public SAM.gov opportunities."}
             </p>
             <div className="contracts-actions">

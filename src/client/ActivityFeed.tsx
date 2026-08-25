@@ -883,13 +883,14 @@ export function ActivityFeed({
                 {access === "login_required" ? "Sign in required" : "Stripe required"}
               </div>
               <p className="activity-lock-copy">
-                Live Feed (joins/leaves with city/org) and web support chat need
-                Stripe access ($20) — same unlock as Transit
+                {access === "login_required"
+                  ? "Live Feed (joins/leaves with city/org) and web support chat need a PGP sign-in — same as Transit and Contracting."
+                  : "Live Feed (joins/leaves with city/org) and web support chat need Stripe access ($20) — same unlock as Transit."}{" "}
                 {isLinkUp
-                  ? " (globe link connected)."
+                  ? "(globe link connected)."
                   : isLinkConnecting
-                    ? " (globe link still connecting)."
-                    : " (globe link offline — use Reconnect)."}
+                    ? "(globe link still connecting)."
+                    : "(globe link offline — use Reconnect)."}
               </p>
               <div className="activity-lock-actions">
                 {access === "login_required" ? (
@@ -910,8 +911,9 @@ export function ActivityFeed({
                 )}
               </div>
               <p className="activity-lock-note">
-                Globe markers stay free. Paid feed and support chat are
-                server-gated after payment.
+                {access === "login_required"
+                  ? "Globe markers stay free. Visitor feed and support chat unlock after PGP sign-in."
+                  : "Globe markers stay free. Paid feed and support chat are server-gated after payment."}
               </p>
             </div>
           ) : (
@@ -920,7 +922,7 @@ export function ActivityFeed({
               <div className="live-chat" aria-label="Web support chat">
                 <div className="live-chat-head">
                   <strong>Web support</strong>
-                  <span>Paid · ephemeral · not stored</span>
+                  <span>Ephemeral · not stored</span>
                 </div>
                 <div
                   className="live-chat-list"
