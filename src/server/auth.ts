@@ -822,6 +822,7 @@ export async function registerUser(
     {
       user: toPublicUser(user),
       ...adminFlags(user, env),
+      ...accessFlags(env),
       message:
         "Public key registered. Keep the private key on your device for future sign-in (never upload it).",
     },
@@ -1207,6 +1208,7 @@ export async function loginUser(
     {
       user: toPublicUser(user),
       ...adminFlags(user, env),
+      ...accessFlags(env),
       message: "Logged in. Session token issued (not a private key).",
     },
     200,
@@ -1299,6 +1301,7 @@ export async function adoptSessionToken(
     {
       user: toPublicUser(session.user),
       ...adminFlags(session.user, env),
+      ...accessFlags(env),
       message: "Session adopted into cookie.",
     },
     200,
@@ -1362,7 +1365,12 @@ export async function getMe(
   const session = await getSessionUser(request, env);
   if (!session) {
     return json(
-      { authenticated: false, user: null, sessionToken: null },
+      {
+        authenticated: false,
+        user: null,
+        sessionToken: null,
+        ...accessFlags(env),
+      },
       { status: 200 },
       applySecurityHeaders,
     );
@@ -1375,6 +1383,7 @@ export async function getMe(
       authenticated: true,
       user: toPublicUser(session.user),
       ...adminFlags(session.user, env),
+      ...accessFlags(env),
     },
     { status: 200 },
     applySecurityHeaders,
@@ -1384,6 +1393,15 @@ export async function getMe(
 export function paymentEnforcementEnabled(env: AuthEnv): boolean {
   const v = env.TRANSIT_REQUIRE_PAYMENT?.trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes";
+}
+
+/** Stripe is optional unless TRANSIT_REQUIRE_PAYMENT is on. */
+export function userHasFeatureAccess(user: UserRecord, env: AuthEnv): boolean {
+  return !paymentEnforcementEnabled(env) || Boolean(user.transitPaid);
+}
+
+export function accessFlags(env: AuthEnv): { paymentRequired: boolean } {
+  return { paymentRequired: paymentEnforcementEnabled(env) };
 }
 
 /**
@@ -1552,7 +1570,7 @@ export async function requireTransitAccess(
     );
   }
 
-  if (paymentEnforcementEnabled(env) && !session.user.transitPaid) {
+  if (!userHasFeatureAccess(session.user, env)) {
     return json(
       {
         error: "payment_required",

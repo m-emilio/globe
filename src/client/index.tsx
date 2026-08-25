@@ -2046,6 +2046,8 @@ function App() {
     primaryUserId: string | null;
     transitPaid: boolean;
   } | null>(null);
+  /** Mirrors TRANSIT_REQUIRE_PAYMENT. Default off: PGP session is enough. */
+  const [paymentRequired, setPaymentRequired] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminAllowlistConfigured, setAdminAllowlistConfigured] =
     useState(false);
@@ -2160,7 +2162,11 @@ function App() {
         isAdmin?: boolean;
         adminActionSecretRequired?: boolean;
         adminAllowlistConfigured?: boolean;
+        paymentRequired?: boolean;
       };
+      if (typeof data.paymentRequired === "boolean") {
+        setPaymentRequired(data.paymentRequired);
+      }
       if (data.authenticated && data.user?.fingerprint) {
         setAuthUser(data.user);
         setIsAdmin(Boolean(data.isAdmin));
@@ -2972,6 +2978,9 @@ function App() {
       setAuthUser(result.user);
       setIsAdmin(result.isAdmin);
       setAdminSecretRequired(result.adminActionSecretRequired);
+      if (typeof result.paymentRequired === "boolean") {
+        setPaymentRequired(result.paymentRequired);
+      }
       setSelectedDeviceFp(result.user.fingerprint);
       setKeyPassphrase("");
       setShowAuthPanel(false);
@@ -3160,15 +3169,16 @@ function App() {
   const isFeedPausedRef = useRef(false);
   /** Server only sends feed-* when paid; this gates client-side record as well */
   const liveFeedUnlockedRef = useRef(false);
-  const lastButtonClickAt = useRef(0);
   const lastButtonClicks = useRef<Map<string, number>>(new Map());
+  const authSocketIdRef = useRef<string | null | undefined>(undefined);
 
-  // UI lock + client-side record gate. Server also withholds feed-* unless transitPaid.
+  // UI lock + client-side record gate. Server withholds feed-* unless the
+  // session has feature access (PGP login; Stripe only when TRANSIT_REQUIRE_PAYMENT).
   const liveFeedAccess: LiveFeedAccess = !authUser
     ? "login_required"
-    : authUser.transitPaid
-      ? "ok"
-      : "payment_required";
+    : paymentRequired && !authUser.transitPaid
+      ? "payment_required"
+      : "ok";
 
   useEffect(() => {
     isFeedPausedRef.current = isFeedPaused;
@@ -3322,14 +3332,12 @@ function App() {
     const now = Date.now();
     const lastClickAt = lastButtonClicks.current.get(actionKey) ?? 0;
 
-    if (
-      now - lastButtonClickAt.current < BUTTON_RATE_LIMIT_MS ||
-      now - lastClickAt < BUTTON_RATE_LIMIT_MS
-    ) {
+    // Per-action debounce only. A global lock swallowed dock clicks (Contracts,
+    // PKI, UN, Feed, Weather) right after PGP sign-in / other button presses.
+    if (now - lastClickAt < BUTTON_RATE_LIMIT_MS) {
       return;
     }
 
-    lastButtonClickAt.current = now;
     lastButtonClicks.current.set(actionKey, now);
     action();
   };
@@ -4351,7 +4359,9 @@ function App() {
       setContractsLayerOn(false);
       setContractsStatus("error");
       setContractsError(
-        "Contracting requires Stripe unlock ($20). Unlocks Transit, Nearby, Live Feed, Contracting, and support chat. Data source remains public SAM.gov.",
+        liveFeedAccess === "login_required"
+          ? "Sign in with your PGP key to use Contracting (public SAM.gov opportunities via FederalKey)."
+          : "Contracting requires Stripe unlock ($20). Unlocks Transit, Nearby, Live Feed, Contracting, and support chat. Data source remains public SAM.gov.",
       );
       return;
     }
@@ -4434,29 +4444,28 @@ function App() {
     }
   };
 
-  // Open Contracts hub → default PKI search when entitled
+  // Open Contracts hub → search when the PGP session (and Stripe, if enforced) is ready.
+  // Retry after sign-in: an earlier idle pass may have run while authUser was still null.
   useEffect(() => {
+    if (liveFeedAccess !== "ok") {
+      setContractsPreview(null);
+      setContractsLayerOn(false);
+      setContractsStatus("idle");
+      if (showContractsHub) {
+        setContractsError(
+          liveFeedAccess === "login_required"
+            ? "Sign in with your PGP key to use Contracting (public SAM.gov opportunities via FederalKey)."
+            : "Contracting requires Stripe unlock ($20). Unlocks Transit, Nearby, Live Feed, Contracting, and support chat. Data source remains public SAM.gov.",
+        );
+      }
+      return;
+    }
     if (!showContractsHub) return;
     if (contractsStatus === "idle") {
       void loadSamContracts({ force: false });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showContractsHub, authUser?.id, authUser?.transitPaid]);
-
-  // Drop paid contract data if session loses unlock
-  useEffect(() => {
-    if (liveFeedAccess === "ok") return;
-    setContractsPreview(null);
-    setContractsLayerOn(false);
-    if (showContractsHub && contractsStatus === "ready") {
-      setContractsStatus("error");
-      setContractsError(
-        !authUser
-          ? "Sign in to use Contracting."
-          : "Contracting requires Stripe unlock ($20).",
-      );
-    }
-  }, [liveFeedAccess, authUser, showContractsHub, contractsStatus]);
+  }, [showContractsHub, liveFeedAccess, authUser?.id]);
 
   const setUnodcFocusMode = (mode: "focus" | "all-live" | "none") => {
     if (!unodcPreview) return;
@@ -4616,7 +4625,7 @@ function App() {
         return;
       }
 
-      // Paid Live Feed channel (server only sends feed-join/leave if transitPaid)
+      // Live Feed channel (server only sends feed-join/leave if the session has feature access)
       if (message.type === "feed-access") {
         // Align client gate with server cookie entitlement (true and false)
         const paid = Boolean(message.paid);
@@ -4714,13 +4723,8 @@ function App() {
   const sendChatMessage = useCallback(
     (text: string) => {
       const clean = sanitizeChatText(text);
-      // Paid web-support chat — same gate as Live Feed (server also enforces feedPaid)
-      if (
-        !clean ||
-        socketStatus !== "connected" ||
-        liveFeedAccess !== "ok" ||
-        !authUser?.transitPaid
-      ) {
+      // Web-support chat — same gate as Live Feed (server enforces feedPaid / feature access)
+      if (!clean || socketStatus !== "connected" || liveFeedAccess !== "ok") {
         return false;
       }
 
@@ -4754,6 +4758,23 @@ function App() {
     },
     [socket, socketStatus, authUser, liveFeedAccess],
   );
+
+  // Re-open the globe socket after PGP login/logout so the Worker re-reads
+  // the session cookie (feedPaid / feature access). Without this, Support chat
+  // and visitor feed stay dead on the pre-login connection.
+  useEffect(() => {
+    const id = authUser?.id ?? null;
+    const prev = authSocketIdRef.current;
+    authSocketIdRef.current = id;
+    if (prev === undefined || prev === id) return;
+    try {
+      setSocketStatus("connecting");
+      socket.reconnect();
+    } catch {
+      // PartySocket may already be mid-retry
+    }
+  }, [authUser?.id, socket]);
+
   const weatherGlow = getWeatherGlow(weatherFeed);
   const enabledComtradeSectionCount =
     Object.values(comtradeSections).filter(Boolean).length;
@@ -6507,7 +6528,9 @@ function App() {
             setShowAuthPanel(true);
             setAuthMode("login");
             setAuthMessage(
-              "Sign in, then buy Stripe access to unlock Live Feed and web support chat.",
+              paymentRequired
+                ? "Sign in, then buy Stripe access to unlock Live Feed and web support chat."
+                : "Sign in with your PGP key to unlock Live Feed and web support chat.",
             );
           }}
           onBuyAccess={() => {
@@ -6567,7 +6590,7 @@ function App() {
                     Sign in
                   </button>
                 )}
-                {authUser && !authUser.transitPaid && (
+                {authUser && paymentRequired && !authUser.transitPaid && (
                   <button
                     type="button"
                     className="billing-buy-btn"
@@ -6651,14 +6674,40 @@ function App() {
           {nearbyStatus === "error" && (
             <div className="nearby-error">
               <span>{nearbyError}</span>
-              <button
-                type="button"
-                onClick={() => {
-                  void loadNearbyPaths(false, nearbyRadiusM, true);
-                }}
-              >
-                Retry
-              </button>
+              <div className="nearby-footer-actions" style={{ marginTop: 10 }}>
+                {!authUser && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAuthPanel(true);
+                      setAuthMode("login");
+                    }}
+                    disabled={authBusy}
+                  >
+                    Sign in
+                  </button>
+                )}
+                {authUser && paymentRequired && !authUser.transitPaid && (
+                  <button
+                    type="button"
+                    className="billing-buy-btn"
+                    onClick={() => {
+                      void startTransitCheckout();
+                    }}
+                    disabled={checkoutBusy}
+                  >
+                    {checkoutBusy ? "Opening Stripe…" : "Buy access ($20)"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    void loadNearbyPaths(false, nearbyRadiusM, true);
+                  }}
+                >
+                  Retry
+                </button>
+              </div>
             </div>
           )}
 
@@ -7616,7 +7665,11 @@ function App() {
           onSignIn={() => {
             setShowAuthPanel(true);
             setAuthMode("login");
-            setAuthMessage("Sign in, then unlock Contracting with Stripe ($20).");
+            setAuthMessage(
+              paymentRequired
+                ? "Sign in, then unlock Contracting with Stripe ($20)."
+                : "Sign in with your PGP key to use Contracting.",
+            );
           }}
           onBuyAccess={() => {
             void startTransitCheckout();
@@ -9288,7 +9341,9 @@ function App() {
                     Signed in
                     {authUser.transitPaid
                       ? " · Transit + Live Feed + support paid"
-                      : ""}
+                      : !paymentRequired
+                        ? " · PGP session (Stripe not required)"
+                        : ""}
                     {authUser.primaryUserId
                       ? ` · ${authUser.primaryUserId}`
                       : ""}
