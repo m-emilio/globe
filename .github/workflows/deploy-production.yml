@@ -46,6 +46,9 @@ jobs:
           npx tsc --project src/client --noEmit
           npx tsc --project src/server --noEmit
 
+      - name: Post-quantum self-test
+        run: node scripts/pqc-selftest.mjs
+
       - name: Deploy production Worker globe
         if: env.CF_API_TOKEN != '' && env.CF_ACCOUNT_ID != ''
         uses: cloudflare/wrangler-action@v3

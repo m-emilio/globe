@@ -67,6 +67,9 @@ jobs:
           npx tsc --project src/client --noEmit
           npx tsc --project src/server --noEmit
 
+      - name: Post-quantum self-test
+        run: node scripts/pqc-selftest.mjs
+
       - name: Deploy to security test Worker
         # Do not use secrets.* inside if: (invalid workflow)
         if: env.CF_API_TOKEN != '' && env.CF_ACCOUNT_ID != ''
