@@ -5118,6 +5118,25 @@ a.nav-title:focus-visible {
   line-height: 1.35;
 }
 
+.auth-pqc-title {
+  margin-top: 18px;
+  color: #9af0d0;
+}
+
+.auth-pqc-lab {
+  margin: 8px 0 12px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(61, 255, 168, 0.28);
+  background: rgba(16, 48, 40, 0.28);
+}
+
+.auth-pqc-lab textarea {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .auth-inline-ok {
   margin-top: 8px;
   padding: 8px 10px;
