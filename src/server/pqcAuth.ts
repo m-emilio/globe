@@ -18,26 +18,26 @@ import {
   type UserRecord,
 } from "./auth";
 import {
-  ML_DSA_SUITES,
-  assertMlDsaLengths,
+  PQC_SIG_SUITES,
+  assertPqcSigLengths,
   b64ToFixedBytes,
   buildPqcLoginMessage,
   bytesToB64,
   decodeStoredPublicKey,
   encodeStoredPublicKey,
-  isMlDsaSuite,
-  rejectPrivateSizedKey,
+  isPqcSigSuite,
   verifyPqcSignature,
-  type MlDsaSuiteId,
+  type PqcSigSuiteId,
 } from "./pqcVerify";
 
 const CHALLENGE_TTL_SECONDS = 180;
-const MAX_SIGNATURE_CHARS = 8192;
+const MAX_SIGNATURE_CHARS = 70_000;
 const MAX_PUBLIC_CHARS = 4096;
+const MAX_PQC_BODY_BYTES = 96_000;
 
 type ChallengeRecord = {
   fingerprint: string;
-  suite: MlDsaSuiteId;
+  suite: PqcSigSuiteId;
   message: string;
   createdAt: string;
   expiresAt: string;
@@ -104,7 +104,7 @@ async function readObject(
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<{ body: Record<string, unknown> } | { error: Response }> {
   try {
-    const parsed = await readJsonBody(request);
+    const parsed = await readJsonBody(request, MAX_PQC_BODY_BYTES);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return { error: json({ error: "invalid_json" }, 400, applySecurityHeaders) };
     }
@@ -121,9 +121,9 @@ async function readObject(
   }
 }
 
-function suiteFrom(body: Record<string, unknown>): MlDsaSuiteId | null {
+function suiteFrom(body: Record<string, unknown>): PqcSigSuiteId | null {
   const suite = body.suite;
-  if (typeof suite !== "string" || !isMlDsaSuite(suite)) return null;
+  if (typeof suite !== "string" || !isPqcSigSuite(suite)) return null;
   return suite;
 }
 
@@ -156,7 +156,7 @@ export async function registerPqcUser(
     return json(
       {
         error: "invalid_public_key",
-        message: "Choose an ML-DSA suite and send the public key only.",
+        message: "Choose a post-quantum suite and send the public key only.",
       },
       400,
       applySecurityHeaders,
@@ -168,17 +168,17 @@ export async function registerPqcUser(
 
   let publicKey: Uint8Array;
   try {
-    assertMlDsaLengths(suite);
+    assertPqcSigLengths(suite);
     const peeked = b64ToFixedBytes(publicKeyB64, atob(publicKeyB64.replace(/\s+/g, "")).length);
+    const expected = PQC_SIG_SUITES[suite];
     if (
-      peeked.length === ML_DSA_SUITES["ml-dsa44"].secretKey ||
-      peeked.length === ML_DSA_SUITES["ml-dsa65"].secretKey ||
-      peeked.length === ML_DSA_SUITES["ml-dsa87"].secretKey
+      peeked.length === expected.secretKey &&
+      expected.secretKey !== expected.publicKey
     ) {
       peeked.fill(0);
       throw new Error("private_key_rejected");
     }
-    if (peeked.length !== ML_DSA_SUITES[suite].publicKey) {
+    if (peeked.length !== expected.publicKey) {
       peeked.fill(0);
       throw new Error("invalid_length");
     }
@@ -219,7 +219,7 @@ export async function registerPqcUser(
     id: randomId(16),
     fingerprint,
     publicKeyArmored: encodeStoredPublicKey(suite, bytesToB64(publicKey)),
-    primaryUserId: ML_DSA_SUITES[suite].label,
+    primaryUserId: PQC_SIG_SUITES[suite].label,
     createdAt: new Date().toISOString(),
     transitPaid: false,
   };
@@ -437,8 +437,7 @@ export async function loginPqcUser(
 
   let signature: Uint8Array;
   try {
-    signature = b64ToFixedBytes(signatureB64, ML_DSA_SUITES[suite].signature);
-    rejectPrivateSizedKey(signature);
+    signature = b64ToFixedBytes(signatureB64, PQC_SIG_SUITES[suite].signature);
   } catch (error) {
     if (error instanceof Error && error.message === "private_key_rejected") {
       return privateKeyRejected(applySecurityHeaders);

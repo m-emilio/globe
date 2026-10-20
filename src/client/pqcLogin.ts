@@ -2,7 +2,14 @@
  * ML-DSA sign-in inside the existing account modal.
  * OpenPGP file rules stay on the import panel. This block never accepts a file.
  */
-import { ML_DSA_SUITES, isMlDsaSuite, type MlDsaSuiteId } from "../server/pqcVerify";
+import {
+  ML_DSA_SUITES,
+  SLH_DSA_SUITES,
+  isPqcSigSuite,
+  type MlDsaSuiteId,
+  type PqcSigSuiteId,
+  type SlhDsaSuiteId,
+} from "../server/pqcVerify";
 import {
   createMlDsaDeviceKey,
   deleteMlDsaDeviceKey,
@@ -10,7 +17,23 @@ import {
   signMlDsaLogin,
 } from "./mlDsa";
 
-const SUITE_ORDER: MlDsaSuiteId[] = ["ml-dsa65", "ml-dsa87", "ml-dsa44"];
+const ML_ORDER: MlDsaSuiteId[] = ["ml-dsa65", "ml-dsa87", "ml-dsa44"];
+const SLH_SHA2: SlhDsaSuiteId[] = [
+  "slh-dsa-sha2-128s",
+  "slh-dsa-sha2-128f",
+  "slh-dsa-sha2-192s",
+  "slh-dsa-sha2-192f",
+  "slh-dsa-sha2-256s",
+  "slh-dsa-sha2-256f",
+];
+const SLH_SHAKE: SlhDsaSuiteId[] = [
+  "slh-dsa-shake-128s",
+  "slh-dsa-shake-128f",
+  "slh-dsa-shake-192s",
+  "slh-dsa-shake-192f",
+  "slh-dsa-shake-256s",
+  "slh-dsa-shake-256f",
+];
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -48,6 +71,11 @@ async function postJson(
   return { ok: response.ok, status: response.status, code };
 }
 
+function suiteLabelFor(suite: PqcSigSuiteId): string {
+  if (suite in ML_DSA_SUITES) return ML_DSA_SUITES[suite as MlDsaSuiteId].label;
+  return SLH_DSA_SUITES[suite as SlhDsaSuiteId].label;
+}
+
 function fixedError(code: string, status: number): string {
   if (code === "rate_limited" || status === 429) return "Too many sign-in attempts. Wait a minute and try again.";
   if (code === "private_key_rejected") return "The private key stays on this device.";
@@ -67,7 +95,7 @@ function patchSessionLabel(): void {
     const status = block.querySelector(".auth-user-meta-status");
     if (!(status instanceof HTMLElement)) continue;
     const text = status.textContent || "";
-    if (!text.includes("ML-DSA-") || !text.includes("PGP session")) continue;
+    if (!(text.includes("ML-DSA-") || text.includes("SLH-DSA-")) || !text.includes("PGP session")) continue;
     status.textContent = text.replace("PGP session", "ML-DSA session");
     const print = block.querySelector(".auth-user-fingerprint");
     if (print instanceof HTMLElement && print.title === "Full OpenPGP fingerprint") {
@@ -97,22 +125,31 @@ export function mountPqcLogin(): void {
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const hint = el(
     "p",
-    "ML-DSA-65 is the default. ML-DSA-87 is the set still recommended after 2030. The private key is wrapped in this browser and is not uploaded. OpenPGP sign-in above is separate.",
+    "ML-DSA-65 is the default. SLH-DSA-SHA2-128s is the smaller hash-based set. The private key is wrapped in this browser and is not uploaded. The ECDHE key lab on this screen uses a .pem file. OpenPGP sign-in still uses .asc, .pgp, or .gpg.",
   );
   hint.style.cssText = "margin:0 0 10px;font-size:13px;line-height:1.4;color:#d5ffe9";
 
   const suiteLabel = el("label");
   suiteLabel.style.cssText = "display:flex;flex-direction:column;gap:6px";
-  suiteLabel.append(el("span", "ML-DSA suite"));
+  suiteLabel.append(el("span", "Post-quantum suite"));
   const suiteSelect = el("select");
   suiteSelect.id = "globe-pqc-login-suite";
   suiteSelect.style.cssText = "min-height:48px;font-size:16px;padding:8px";
-  for (let i = 0; i < SUITE_ORDER.length; i++) {
-    const id = SUITE_ORDER[i]!;
-    const option = el("option", ML_DSA_SUITES[id].label);
-    option.value = id;
-    suiteSelect.append(option);
-  }
+  const addGroup = (label: string, ids: readonly PqcSigSuiteId[]) => {
+    const group = el("optgroup");
+    group.label = label;
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i]!;
+      const row = id in ML_DSA_SUITES ? ML_DSA_SUITES[id as MlDsaSuiteId] : SLH_DSA_SUITES[id as SlhDsaSuiteId];
+      const option = el("option", row.label);
+      option.value = id;
+      group.append(option);
+    }
+    suiteSelect.append(group);
+  };
+  addGroup("ML-DSA", ML_ORDER);
+  addGroup("SLH-DSA SHA2", SLH_SHA2);
+  addGroup("SLH-DSA SHAKE", SLH_SHAKE);
   suiteLabel.append(suiteSelect);
 
   const status = el("p", "");
@@ -146,9 +183,9 @@ export function mountPqcLogin(): void {
   root.append(title, hint, suiteLabel, status, create, signIn, remove);
   modal.append(root);
 
-  const selected = (): MlDsaSuiteId => {
+  const selected = (): PqcSigSuiteId => {
     const value = suiteSelect.value;
-    return isMlDsaSuite(value) ? value : "ml-dsa65";
+    return isPqcSigSuite(value) ? value : "ml-dsa65";
   };
   const setStatus = (message: string, isError = false) => {
     status.textContent = message;
@@ -166,8 +203,8 @@ export function mountPqcLogin(): void {
         const here = rows.some((row) => row.suite === selected());
         setStatus(
           here
-            ? `${ML_DSA_SUITES[selected()].label} key is on this device.`
-            : `No ${ML_DSA_SUITES[selected()].label} key on this device yet.`,
+            ? `${suiteLabelFor(selected())} key is on this device.`
+            : `No ${suiteLabelFor(selected())} key on this device yet.`,
         );
       })
       .catch((error: unknown) => {
@@ -175,10 +212,10 @@ export function mountPqcLogin(): void {
       });
   };
 
-  const signInWith = async (suite: MlDsaSuiteId): Promise<void> => {
+  const signInWith = async (suite: PqcSigSuiteId): Promise<void> => {
     const rows = await listMlDsaDeviceKeys();
     const row = rows.find((item) => item.suite === suite);
-    if (!row) throw new Error(`Create an ${ML_DSA_SUITES[suite].label} key on this device first.`);
+    if (!row) throw new Error(`Create a ${suiteLabelFor(suite)} key on this device first.`);
     const challenge = await postJson("/api/auth/pqc/challenge", {
       suite,
       fingerprint: row.fingerprint,
@@ -243,7 +280,7 @@ export function mountPqcLogin(): void {
     setBusy(true);
     void deleteMlDsaDeviceKey(suite)
       .then(() => {
-        setStatus(`Removed the ${ML_DSA_SUITES[suite].label} key from this device.`);
+        setStatus(`Removed the ${suiteLabelFor(suite)} key from this device.`);
       })
       .catch((error: unknown) => {
         setStatus(error instanceof Error ? error.message : "Could not remove the device key.", true);

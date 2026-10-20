@@ -5,22 +5,53 @@
  */
 import {
   ML_DSA_SUITES,
+  PQC_SIG_SUITES,
+  SLH_DSA_SUITES,
   assertMlDsaLengths,
+  assertPqcSigLengths,
   b64ToFixedBytes,
   buildPqcLoginMessage,
   bytesToB64,
-  isMlDsaSuite,
+  isPqcSigSuite,
   pqcLoginContext,
   pqcLoginMessageMatches,
   verifyPqcSignature,
   type MlDsaSuiteId,
+  type PqcSigSuiteId,
+  type SlhDsaSuiteId,
 } from "../server/pqcVerify";
 import { ml_dsa44, ml_dsa65, ml_dsa87 } from "@noble/post-quantum/ml-dsa.js";
+import {
+  slh_dsa_sha2_128f,
+  slh_dsa_sha2_128s,
+  slh_dsa_sha2_192f,
+  slh_dsa_sha2_192s,
+  slh_dsa_sha2_256f,
+  slh_dsa_sha2_256s,
+  slh_dsa_shake_128f,
+  slh_dsa_shake_128s,
+  slh_dsa_shake_192f,
+  slh_dsa_shake_192s,
+  slh_dsa_shake_256f,
+  slh_dsa_shake_256s,
+} from "@noble/post-quantum/slh-dsa.js";
 
 const SIGNERS = {
   "ml-dsa44": ml_dsa44,
   "ml-dsa65": ml_dsa65,
   "ml-dsa87": ml_dsa87,
+  "slh-dsa-sha2-128s": slh_dsa_sha2_128s,
+  "slh-dsa-sha2-128f": slh_dsa_sha2_128f,
+  "slh-dsa-sha2-192s": slh_dsa_sha2_192s,
+  "slh-dsa-sha2-192f": slh_dsa_sha2_192f,
+  "slh-dsa-sha2-256s": slh_dsa_sha2_256s,
+  "slh-dsa-sha2-256f": slh_dsa_sha2_256f,
+  "slh-dsa-shake-128s": slh_dsa_shake_128s,
+  "slh-dsa-shake-128f": slh_dsa_shake_128f,
+  "slh-dsa-shake-192s": slh_dsa_shake_192s,
+  "slh-dsa-shake-192f": slh_dsa_shake_192f,
+  "slh-dsa-shake-256s": slh_dsa_shake_256s,
+  "slh-dsa-shake-256f": slh_dsa_shake_256f,
 } as const;
 
 const DB_NAME = "globe-pqc-login";
@@ -32,13 +63,13 @@ const WRAP_RAW_ID = "aes-gcm-256-raw";
 
 export type MlDsaDeviceRecord = {
   fingerprint: string;
-  suite: MlDsaSuiteId;
+  suite: PqcSigSuiteId;
   createdAt: string;
 };
 
 type StoredKey = {
   fingerprint: string;
-  suite: MlDsaSuiteId;
+  suite: PqcSigSuiteId;
   publicKeyB64: string;
   wrappedSecretB64: string;
   wrapIvB64: string;
@@ -173,12 +204,12 @@ async function wrapSecret(secret: Uint8Array): Promise<{ wrappedSecretB64: strin
 async function unwrapSecret(row: StoredKey): Promise<Uint8Array> {
   const key = await getWrapKey();
   const iv = b64ToFixedBytes(row.wrapIvB64, 12);
-  const cipher = b64ToFixedBytes(row.wrappedSecretB64, ML_DSA_SUITES[row.suite].secretKey + 16);
+  const cipher = b64ToFixedBytes(row.wrappedSecretB64, PQC_SIG_SUITES[row.suite].secretKey + 16);
   try {
     const plain = new Uint8Array(
       await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipher),
     );
-    if (plain.length !== ML_DSA_SUITES[row.suite].secretKey) {
+    if (plain.length !== PQC_SIG_SUITES[row.suite].secretKey) {
       wipe(plain);
       throw new Error("Could not unlock the ML-DSA key on this device.");
     }
@@ -194,19 +225,19 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export async function createMlDsaDeviceKey(suite: MlDsaSuiteId): Promise<{
+export async function createMlDsaDeviceKey(suite: PqcSigSuiteId): Promise<{
   fingerprint: string;
   publicKeyB64: string;
-  suite: MlDsaSuiteId;
+  suite: PqcSigSuiteId;
 }> {
-  assertMlDsaLengths(suite);
+  assertPqcSigLengths(suite);
   const existing = await listMlDsaDeviceKeys();
   if (existing.some((row) => row.suite === suite)) {
-    throw new Error(`This device already has an ${ML_DSA_SUITES[suite].label} key. Remove it before creating another.`);
+    throw new Error(`This device already has a ${PQC_SIG_SUITES[suite].label} key. Remove it before creating another.`);
   }
   const pair = SIGNERS[suite].keygen();
   try {
-    if (pair.publicKey.length !== ML_DSA_SUITES[suite].publicKey) {
+    if (pair.publicKey.length !== PQC_SIG_SUITES[suite].publicKey) {
       throw new Error("Could not generate that ML-DSA key.");
     }
     const fingerprint = await sha256Hex(pair.publicKey);
@@ -238,13 +269,13 @@ export async function listMlDsaDeviceKeys(): Promise<MlDsaDeviceRecord[]> {
   ).catch(() => [] as StoredKey[]);
   const out: MlDsaDeviceRecord[] = [];
   for (const row of rows) {
-    if (!row || !isMlDsaSuite(row.suite) || !/^[a-f0-9]{64}$/.test(row.fingerprint)) continue;
+    if (!row || !isPqcSigSuite(row.suite) || !/^[a-f0-9]{64}$/.test(row.fingerprint)) continue;
     out.push({ fingerprint: row.fingerprint, suite: row.suite, createdAt: row.createdAt });
   }
   return out;
 }
 
-export async function deleteMlDsaDeviceKey(suite: MlDsaSuiteId): Promise<void> {
+export async function deleteMlDsaDeviceKey(suite: PqcSigSuiteId): Promise<void> {
   const rows = await withDb<StoredKey[]>("readonly", KEY_STORE, (store) =>
     idbReq(store.getAll() as IDBRequest<StoredKey[]>),
   );
@@ -256,7 +287,7 @@ export async function deleteMlDsaDeviceKey(suite: MlDsaSuiteId): Promise<void> {
 }
 
 export async function signMlDsaLogin(
-  suite: MlDsaSuiteId,
+  suite: PqcSigSuiteId,
   message: string,
   origin: string,
 ): Promise<{ fingerprint: string; signatureB64: string }> {
@@ -267,7 +298,7 @@ export async function signMlDsaLogin(
     .filter((row) => row.suite === suite)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const row = matches[0];
-  if (!row) throw new Error(`Create an ${ML_DSA_SUITES[suite].label} key on this device first.`);
+  if (!row) throw new Error(`Create a ${PQC_SIG_SUITES[suite].label} key on this device first.`);
   if (!pqcLoginMessageMatches(message, { origin, suite, fingerprint: row.fingerprint })) {
     throw new Error("The sign-in challenge did not match this device key.");
   }
@@ -277,8 +308,8 @@ export async function signMlDsaLogin(
       context: pqcLoginContext(),
     });
     try {
-      if (signature.length !== ML_DSA_SUITES[suite].signature) {
-        throw new Error("Could not sign in with this ML-DSA key.");
+      if (signature.length !== PQC_SIG_SUITES[suite].signature) {
+        throw new Error("Could not sign in with this post-quantum key.");
       }
       return { fingerprint: row.fingerprint, signatureB64: bytesToB64(signature) };
     } finally {
@@ -330,4 +361,40 @@ export async function mlDsaLoginSelfTest(): Promise<{ ok: true; suites: number }
   }
   if (count !== 3) throw new Error("ML-DSA self-test failed: suite count");
   return { ok: true, suites: count };
+}
+
+/** Checks every SLH-DSA length, and signs only SHA2-128f so the check stays short. */
+export async function slhDsaLoginSelfTest(): Promise<{ ok: true; suites: number; signed: SlhDsaSuiteId }> {
+  const origin = "https://globe.example";
+  const ids = Object.keys(SLH_DSA_SUITES) as SlhDsaSuiteId[];
+  for (const suite of ids) assertPqcSigLengths(suite);
+  const suite: SlhDsaSuiteId = "slh-dsa-sha2-128f";
+  const pair = SIGNERS[suite].keygen();
+  const fingerprint = await sha256Hex(pair.publicKey);
+  const message = buildPqcLoginMessage({
+    origin,
+    suite,
+    fingerprint,
+    nonce: "cd".repeat(16),
+    expiresAtMs: Date.now() + 60_000,
+  });
+  const signature = SIGNERS[suite].sign(new TextEncoder().encode(message), pair.secretKey, {
+    context: pqcLoginContext(),
+  });
+  const flipped = new Uint8Array(signature);
+  flipped[0] ^= 0x01;
+  try {
+    if (!verifyPqcSignature(suite, signature, message, pair.publicKey)) {
+      throw new Error("SLH-DSA self-test failed: signature did not verify");
+    }
+    if (verifyPqcSignature(suite, flipped, message, pair.publicKey)) {
+      throw new Error("SLH-DSA self-test failed: tampered signature verified");
+    }
+  } finally {
+    wipe(pair.secretKey);
+    wipe(pair.publicKey);
+    wipe(signature);
+    wipe(flipped);
+  }
+  return { ok: true, suites: ids.length, signed: suite };
 }
