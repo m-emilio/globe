@@ -1205,7 +1205,9 @@ export async function loginUser(
 
   if (
     user.publicKeyArmored.startsWith("globe-ml-dsa:v1:") ||
-    user.publicKeyArmored.startsWith("globe-slh-dsa:v1:")
+    user.publicKeyArmored.startsWith("globe-slh-dsa:v1:") ||
+    user.publicKeyArmored.startsWith("globe-ecdhe:v1:") ||
+    user.publicKeyArmored.startsWith("globe-kem:v1:")
   ) {
     return json(
       { error: "auth_failed", message: "Could not verify signature." },
