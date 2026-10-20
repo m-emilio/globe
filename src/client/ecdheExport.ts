@@ -114,7 +114,7 @@ async function runDerive(
   const peerEl = panel?.querySelector("#globe-ecdhe-peer");
   if (!(peerEl instanceof HTMLTextAreaElement)) return;
   button.disabled = true;
-  status.textContent = "Deriving…";
+  setDeriveStatus(status, "pending", "Deriving…");
   try {
     const curve = asCurve(detail.curve);
     const peer = peerEl.value;
@@ -135,12 +135,38 @@ async function runDerive(
     ) {
       throw new Error("PKCS#8 and the private JWK did not agree, or the session key was extractable.");
     }
-    status.textContent = `Shared secret fingerprint (SHA-256): ${fromPem.sharedSecretSha256Hex}. AES-GCM session key stays non-extractable.`;
+    setDeriveStatus(
+      status,
+      "agreed",
+      `Shared secret fingerprint (SHA-256): ${fromPem.sharedSecretSha256Hex}. AES-GCM session key stays non-extractable.`,
+    );
   } catch (error) {
-    status.textContent = error instanceof Error ? error.message : "ECDHE derive failed";
+    const message = error instanceof Error ? error.message : "ECDHE derive failed";
+    setDeriveStatus(
+      status,
+      message.startsWith("Paste the peer public key") ? "empty-peer" : "error",
+      message,
+    );
   } finally {
     button.disabled = false;
   }
+}
+
+function setDeriveStatus(
+  status: HTMLElement,
+  kind: "pending" | "empty-peer" | "agreed" | "error",
+  message: string,
+): void {
+  status.hidden = false;
+  status.id =
+    kind === "agreed"
+      ? "globe-ecdhe-derive-agreed"
+      : kind === "empty-peer"
+        ? "globe-ecdhe-derive-empty"
+        : kind === "error"
+          ? "globe-ecdhe-derive-error"
+          : "globe-ecdhe-derive-status";
+  status.textContent = message;
 }
 
 function showPanel(detail: EcdheExportDetail): void {
@@ -181,6 +207,7 @@ function showPanel(detail: EcdheExportDetail): void {
 
   const status = document.createElement("p");
   status.id = "globe-ecdhe-derive-status";
+  status.hidden = true;
   status.setAttribute("role", "status");
   status.style.cssText =
     "min-height:1.2em;margin:8px 0;font:12px/1.4 ui-monospace,monospace;color:#d7dcff;word-break:break-all";
