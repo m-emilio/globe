@@ -15,6 +15,7 @@ import {
   userHasFeatureAccess,
   type AuthEnv,
 } from "./auth";
+import { createPqcChallenge, loginPqcUser, registerPqcUser } from "./pqcAuth";
 import {
   adminClaimSession,
   adminDeleteUser,
@@ -4641,6 +4642,27 @@ export default {
         request,
         await getMe(request, env, applySecurityHeaders),
       );
+    }
+
+    if (url.pathname === "/api/auth/pqc/register") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return registerPqcUser(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/pqc/challenge") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return createPqcChallenge(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/pqc/login") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return loginPqcUser(request, env, applySecurityHeaders);
     }
 
     // --- Admin portal (allowlist + secret + PGP elevation for mutations) ---
