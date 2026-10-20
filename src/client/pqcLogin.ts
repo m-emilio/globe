@@ -82,6 +82,7 @@ function fixedError(code: string, status: number): string {
   if (code === "fingerprint_taken") return "This key is already registered. Sign in with this device.";
   if (code === "invalid_challenge") return "That sign-in challenge expired. Try again.";
   if (code === "auth_failed") return "Could not verify the ML-DSA signature.";
+  if (code === "key_limit") return "This network already has 3 sign-in keys. Sign in with an existing key from this device.";
   if (code === "kv_missing") return "Sign-in storage is not available right now.";
   if (status === 0) return "Could not reach sign-in.";
   return "ML-DSA sign-in failed.";
@@ -127,11 +128,11 @@ export function mountPqcLogin(): void {
     "color:#e7fff3",
   ].join(";");
 
-  const title = el("h3", "Post-quantum sign-in");
+  const title = el("h3", "Post-quantum signature");
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const hint = el(
     "p",
-    "ML-DSA-65 is the default. SLH-DSA-SHA2-128s is the smaller hash-based set. The private key is wrapped in this browser and is not uploaded. The ECDHE key lab on this screen uses a .pem file. OpenPGP sign-in still uses .asc, .pgp, or .gpg.",
+    "This is the signature method of the same sign-in. ML-DSA-65 is the default. SLH-DSA-SHA2-128s is the smaller hash-based set. The private key is wrapped in this browser and is not uploaded. A matching signature gets the same session as a device key.",
   );
   hint.style.cssText = "margin:0 0 10px;font-size:13px;line-height:1.4;color:#d5ffe9";
 
@@ -173,15 +174,15 @@ export function mountPqcLogin(): void {
     "background:#16382c",
     "color:#e7fff3",
   ].join(";");
-  const create = el("button", "Create ML-DSA key on this device");
+  const create = el("button", "Create this signature key on this device");
   create.type = "button";
   create.id = "globe-pqc-login-create";
   create.style.cssText = buttonStyle;
-  const signIn = el("button", "Sign in with this device key");
+  const signIn = el("button", "Sign in with this signature");
   signIn.type = "button";
   signIn.id = "globe-pqc-login-signin";
   signIn.style.cssText = buttonStyle;
-  const remove = el("button", "Remove ML-DSA key from this device");
+  const remove = el("button", "Remove this signature key from this device");
   remove.type = "button";
   remove.id = "globe-pqc-login-remove";
   remove.style.cssText = buttonStyle;
@@ -206,11 +207,16 @@ export function mountPqcLogin(): void {
   const refresh = () => {
     void listMlDsaDeviceKeys()
       .then((rows) => {
-        const here = rows.some((row) => row.suite === selected());
+        const suite = selected();
+        const label = suiteLabelFor(suite);
+        create.textContent = `Create ${label} key on this device`;
+        signIn.textContent = `Sign in with ${label}`;
+        remove.textContent = `Remove ${label} key from this device`;
+        const here = rows.some((row) => row.suite === suite);
         setStatus(
           here
-            ? `${suiteLabelFor(selected())} key is on this device.`
-            : `No ${suiteLabelFor(selected())} key on this device yet.`,
+            ? `${label} key is on this device. Sign in uses the same session as a device key.`
+            : `No ${label} key on this device yet. Create one here, then sign in.`,
         );
       })
       .catch((error: unknown) => {

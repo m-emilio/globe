@@ -157,6 +157,7 @@ function fixed(code: string, status: number): string {
   if (code === "private_key_rejected") return "The private key stays on this device.";
   if (code === "invalid_challenge") return "That sign-in challenge expired. Try again.";
   if (code === "auth_failed") return "Could not verify the lab sign-in.";
+  if (code === "key_limit") return "This network already has 3 sign-in keys. Sign in with an existing key from this device.";
   if (code === "kv_missing") return "Sign-in storage is not available right now.";
   return "Lab sign-in failed.";
 }

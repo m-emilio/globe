@@ -120,7 +120,7 @@ export function mountPqcLab(): void {
 
   const status = el("p", "");
   status.id = "globe-pqc-status";
-  status.style.cssText = "min-height:1.2em;margin:8px 0;font-size:13px";
+  status.style.cssText = "min-height:1.2em;margin:8px 0;font-size:13px;white-space:pre-wrap";
 
   const row = el("div");
   row.style.cssText = "display:flex;flex-wrap:wrap;gap:8px";
@@ -283,7 +283,18 @@ export function mountPqcLab(): void {
     void pqcSelfTest()
       .then(() => {
         showFp("");
-        setStatus("Self-test passed. All key-agreement suites matched, and a flipped ciphertext did not.");
+        const lines = [
+          "Self-test passed.",
+          "This check ran on this device. Each suite had to agree with itself, and a ciphertext with one flipped bit had to miss. Shared secrets were wiped after the comparison. No private key, shared secret, or fingerprint is shown here.",
+        ];
+        for (let i = 0; i < PQC_KEM_SUITES.length; i++) {
+          const suite = PQC_KEM_SUITES[i]!;
+          lines.push(
+            `${suite.label}: public key ${suite.publicKey} bytes, ciphertext ${suite.cipherText} bytes, shared secret ${suite.sharedSecret} bytes. Both sides matched. The flipped ciphertext did not.`,
+          );
+        }
+        lines.push("Pass means all six key-agreement suites matched and every flipped ciphertext was rejected.");
+        setStatus(lines.join("\n"));
       })
       .catch((error: unknown) => {
         showFp("");

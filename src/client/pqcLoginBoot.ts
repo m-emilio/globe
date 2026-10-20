@@ -26,10 +26,35 @@ function patchSessionLabel(): void {
   }
 }
 
+let arrangeSignIn: (() => void) | null = null;
+
 function watch(): void {
   patchSessionLabel();
+  const admin = document.querySelector(".admin-modal");
+  if (admin instanceof HTMLElement && admin.dataset.globeLoginLog !== "1") {
+    admin.dataset.globeLoginLog = "1";
+    void import("./adminLoginLog")
+      .then((mod) => {
+        mod.mountAdminLoginLog();
+      })
+      .catch(() => {
+        delete admin.dataset.globeLoginLog;
+      });
+  }
   const modal = document.querySelector(".auth-modal:not(.admin-modal)");
   if (!(modal instanceof HTMLElement)) return;
+  if (arrangeSignIn) arrangeSignIn();
+  else if (modal.dataset.globeSignIn !== "1") {
+    modal.dataset.globeSignIn = "1";
+    void import("./signInOne")
+      .then((mod) => {
+        arrangeSignIn = () => mod.mountUnifiedSignIn();
+        arrangeSignIn();
+      })
+      .catch(() => {
+        delete modal.dataset.globeSignIn;
+      });
+  }
   if (modal.dataset.globePqcLogin === "1") return;
   modal.dataset.globePqcLogin = "1";
   void import("./pqcLogin").catch(() => {
