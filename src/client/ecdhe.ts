@@ -180,9 +180,11 @@ export async function listSupportedEcdheCurves(): Promise<EcdheCurveInfo[]> {
 /**
  * Generate an ephemeral ECDHE key pair.
  * The private key is extractable (PKCS#8, JWK, and raw when the browser allows it).
+ * Pass `{ publish: false }` for tests so they do not replace the export panel.
  */
 export async function generateEcdheKeyPair(
   curve: EcdheCurveId = "P-256",
+  options?: { publish?: boolean },
 ): Promise<EcdheEphemeralPair> {
   const subtle = requireSubtle();
   let keyPair: CryptoKeyPair;
@@ -233,12 +235,14 @@ export async function generateEcdheKeyPair(
     publicKeySpkiB64: bytesToB64(spki),
     createdAt: new Date().toISOString(),
   };
-  publishEcdheExport({
-    curve,
-    privateKeyPkcs8Pem: pair.privateKeyPkcs8Pem,
-    privateKeyJwk,
-    privateKeyRawB64,
-  });
+  if (options?.publish !== false) {
+    publishEcdheExport({
+      curve,
+      privateKeyPkcs8Pem: pair.privateKeyPkcs8Pem,
+      privateKeyJwk,
+      privateKeyRawB64,
+    });
+  }
   return pair;
 }
 
@@ -295,6 +299,95 @@ export async function importEcdhePeerPublicKey(
       `Could not import peer SPKI for ${curve}: ${msg}. Expect base64 SPKI or JWK JSON.`,
     );
   }
+}
+
+/**
+ * Import an extractable ephemeral private key from PKCS#8 PEM/base64 or a private JWK (`d`).
+ * The imported key is used only to derive. It is not an OpenPGP login key.
+ */
+export async function importEcdhePrivateKey(
+  curve: EcdheCurveId,
+  input: string,
+): Promise<CryptoKey> {
+  const subtle = requireSubtle();
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error(
+      "Paste a PKCS#8 private key or a private JWK (it must include d).",
+    );
+  }
+
+  const algorithm = generateAlgorithm(curve);
+  const usages: KeyUsage[] = ["deriveBits", "deriveKey"];
+
+  if (trimmed.startsWith("{")) {
+    let parsed: JsonWebKey;
+    try {
+      parsed = JSON.parse(trimmed) as JsonWebKey;
+    } catch {
+      throw new Error("Private key looks like JSON but is not a valid JWK.");
+    }
+    if (!parsed.d) {
+      throw new Error(
+        "Private JWK is missing d. Paste a private JWK, not the public key.",
+      );
+    }
+    if (parsed.crv && parsed.crv !== curve) {
+      throw new Error(
+        `Private JWK curve is ${parsed.crv}. This lab selected ${curve}.`,
+      );
+    }
+    const jwk: JsonWebKey = { ...parsed };
+    delete jwk.ext;
+    delete jwk.key_ops;
+    delete jwk.alg;
+    delete jwk.use;
+    try {
+      return await subtle.importKey("jwk", jwk, algorithm, false, usages);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new Error(`Could not import private JWK for ${curve}: ${msg}`);
+    }
+  }
+
+  const body = trimmed
+    .replace(/-----BEGIN [A-Z0-9 ]+-----/gi, "")
+    .replace(/-----END [A-Z0-9 ]+-----/gi, "")
+    .replace(/\s+/g, "");
+  if (!body) {
+    throw new Error("PKCS#8 private key was empty.");
+  }
+  try {
+    const raw = b64ToBytes(body);
+    const copy = new Uint8Array(raw.byteLength);
+    copy.set(raw);
+    return await subtle.importKey(
+      "pkcs8",
+      copy.buffer,
+      algorithm,
+      false,
+      usages,
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Could not import PKCS#8 private key for ${curve}: ${msg}. Expect PEM or base64 PKCS#8.`,
+    );
+  }
+}
+
+/**
+ * Derive from copied PKCS#8 or a private JWK plus the peer public key.
+ * Returns the SHA-256 fingerprint and a non-extractable AES-GCM session key.
+ */
+export async function deriveEcdheFromPrivateMaterial(
+  curve: EcdheCurveId,
+  privateMaterial: string,
+  peerPublic: string,
+): Promise<EcdheDeriveResult> {
+  const privateKey = await importEcdhePrivateKey(curve, privateMaterial);
+  const peer = await importEcdhePeerPublicKey(curve, peerPublic);
+  return deriveEcdheSession(privateKey, peer, curve);
 }
 
 /**
@@ -383,12 +476,12 @@ export async function deriveEcdheSession(
   };
 }
 
-/** Self-test: two ephemeral parties should derive the same shared fingerprint. */
+/** Self-test: in-memory, PKCS#8, and private JWK derives must match. */
 export async function ecdheSelfTest(
   curve: EcdheCurveId = "P-256",
 ): Promise<{ ok: true; curve: EcdheCurveId; sharedSecretSha256Hex: string }> {
-  const a = await generateEcdheKeyPair(curve);
-  const b = await generateEcdheKeyPair(curve);
+  const a = await generateEcdheKeyPair(curve, { publish: false });
+  const b = await generateEcdheKeyPair(curve, { publish: false });
   const peerA = await importEcdhePeerPublicKey(curve, a.publicKeySpkiB64);
   const peerB = await importEcdhePeerPublicKey(curve, b.publicKeySpkiB64);
   const d1 = await deriveEcdheSession(a.privateKey, peerB, curve);
@@ -398,6 +491,25 @@ export async function ecdheSelfTest(
   }
   if (!a.privateKey.extractable || !a.privateKeyJwk.d || !a.privateKeyPkcs8Pem.includes("PRIVATE KEY")) {
     throw new Error("ECDHE self-test failed: private key was not extractable");
+  }
+  const fromPem = await deriveEcdheFromPrivateMaterial(
+    curve,
+    a.privateKeyPkcs8Pem,
+    b.publicKeySpkiB64,
+  );
+  const fromJwk = await deriveEcdheFromPrivateMaterial(
+    curve,
+    JSON.stringify(a.privateKeyJwk),
+    JSON.stringify(b.publicKeyJwk),
+  );
+  if (
+    fromPem.sharedSecretSha256Hex !== d1.sharedSecretSha256Hex ||
+    fromJwk.sharedSecretSha256Hex !== d1.sharedSecretSha256Hex
+  ) {
+    throw new Error("ECDHE self-test failed: imported private key did not match");
+  }
+  if (fromPem.sessionKey.extractable || fromJwk.sessionKey.extractable || d1.sessionKey.extractable) {
+    throw new Error("ECDHE self-test failed: session key was extractable");
   }
   return {
     ok: true,
