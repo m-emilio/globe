@@ -9,8 +9,10 @@ import {
   authFingerprintStorageKey,
   authUserStorageKey,
   clientIp,
+  enforceIpKeyLimit,
   issueLoginSession,
   normalizeFingerprint,
+  rememberIpKey,
   rateLimitDurable,
   readJsonBody,
   type AuthEnv,
@@ -215,6 +217,9 @@ export async function registerPqcUser(
     );
   }
 
+  const capped = await enforceIpKeyLimit(env, request, fingerprint, applySecurityHeaders);
+  if (capped) return capped;
+
   const user: UserRecord = {
     id: randomId(16),
     fingerprint,
@@ -225,6 +230,7 @@ export async function registerPqcUser(
   };
   await env.BILLING_KV.put(authUserStorageKey(user.id), JSON.stringify(user));
   await env.BILLING_KV.put(authFingerprintStorageKey(user.fingerprint), user.id);
+  await rememberIpKey(env, request, user.fingerprint);
 
   return issueLoginSession(
     request,

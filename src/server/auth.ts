@@ -726,6 +726,79 @@ export async function getSessionUser(
   }
 }
 
+export const MAX_KEYS_PER_IP = 3;
+
+export function ipKeyDecision(
+  existing: readonly string[],
+  fingerprint: string,
+  limit = MAX_KEYS_PER_IP,
+): "allow" | "known" | "block" {
+  if (existing.includes(fingerprint)) return "known";
+  if (existing.length >= limit) return "block";
+  return "allow";
+}
+
+async function ipKeyStorageKey(ip: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`globe-ip-keys:v1:${ip}`),
+  );
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `auth:ip-keys:${hex.slice(0, 32)}`;
+}
+
+function readIpFingerprints(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as { fingerprints?: unknown };
+    if (!Array.isArray(parsed.fingerprints)) return [];
+    const out: string[] = [];
+    for (let i = 0; i < parsed.fingerprints.length; i++) {
+      const item = parsed.fingerprints[i];
+      if (typeof item !== "string") continue;
+      const hex = item.toLowerCase();
+      if (/^[a-f0-9]{40}$/.test(hex) || /^[a-f0-9]{64}$/.test(hex)) out.push(hex);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Block a new key when this network already holds MAX_KEYS_PER_IP distinct keys. */
+export async function enforceIpKeyLimit(
+  env: AuthEnv,
+  request: Request,
+  fingerprint: string,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response | null> {
+  if (!env.BILLING_KV) return null;
+  const normalized = normalizeFingerprint(fingerprint);
+  if (!normalized) return null;
+  const existing = readIpFingerprints(await env.BILLING_KV.get(await ipKeyStorageKey(clientIp(request))));
+  if (ipKeyDecision(existing, normalized) !== "block") return null;
+  return json(
+    {
+      error: "key_limit",
+      message: `This network already has ${MAX_KEYS_PER_IP} sign-in keys. Sign in with an existing key from this device.`,
+    },
+    { status: 403 },
+    applySecurityHeaders,
+  );
+}
+
+/** Remember a key that was just created from this network. Existing keys are not added twice. */
+export async function rememberIpKey(env: AuthEnv, request: Request, fingerprint: string): Promise<void> {
+  if (!env.BILLING_KV) return;
+  const normalized = normalizeFingerprint(fingerprint);
+  if (!normalized) return;
+  const storageKey = await ipKeyStorageKey(clientIp(request));
+  const existing = readIpFingerprints(await env.BILLING_KV.get(storageKey));
+  if (ipKeyDecision(existing, normalized) !== "allow") return;
+  existing.push(normalized);
+  await env.BILLING_KV.put(storageKey, JSON.stringify({ fingerprints: existing.slice(0, MAX_KEYS_PER_IP) }));
+}
+
 export async function registerUser(
   request: Request,
   env: AuthEnv,
@@ -834,6 +907,9 @@ export async function registerUser(
     );
   }
 
+  const capped = await enforceIpKeyLimit(env, request, parsed.fingerprint, applySecurityHeaders);
+  if (capped) return capped;
+
   const user: UserRecord = {
     id: randomId(16),
     fingerprint: parsed.fingerprint,
@@ -845,6 +921,7 @@ export async function registerUser(
 
   await env.BILLING_KV.put(userKey(user.id), JSON.stringify(user));
   await env.BILLING_KV.put(fingerprintKey(user.fingerprint), user.id);
+  await rememberIpKey(env, request, user.fingerprint);
 
   const sessionId = await createSession(env, user.id);
   if (!sessionId) {

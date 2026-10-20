@@ -1,5 +1,6 @@
 import { mlDsaLoginSelfTest, slhDsaLoginSelfTest } from "../src/client/mlDsa.ts";
 import { pqcSelfTest } from "../src/client/pqc.ts";
+import { ipKeyDecision, MAX_KEYS_PER_IP } from "../src/server/auth.ts";
 import { labLoginSelfTest } from "../src/server/labAuth.ts";
 
 const result = await pqcSelfTest();
@@ -22,6 +23,18 @@ if (!lab.ok || lab.ecdhe !== "P-256" || lab.kem !== "ml-kem512") {
   console.error("lab login self-test failed");
   process.exit(1);
 }
+const sample = "ab".repeat(32);
+const held = ["11".repeat(32), "22".repeat(32), "33".repeat(32)];
+if (
+  MAX_KEYS_PER_IP !== 3 ||
+  held.length !== MAX_KEYS_PER_IP ||
+  ipKeyDecision([], sample) !== "allow" ||
+  ipKeyDecision([sample], sample) !== "known" ||
+  ipKeyDecision(held, sample) !== "block"
+) {
+  console.error("ip key limit self-test failed");
+  process.exit(1);
+}
 console.log(
-  `pqc self-test ok suite=${result.suite} public=${result.publicKeyBytes} secret=${result.secretKeyBytes} ciphertext=${result.cipherTextBytes} shared=${result.sharedSecretBytes} fingerprint-hex=${result.sharedSecretSha256Hex.length} kems=${result.kemSuites} dsa=${dsa.suites} slh=${slh.suites} slh-signed=${slh.signed} lab=${lab.ecdhe}/${lab.kem}`,
+  `pqc self-test ok suite=${result.suite} public=${result.publicKeyBytes} secret=${result.secretKeyBytes} ciphertext=${result.cipherTextBytes} shared=${result.sharedSecretBytes} fingerprint-hex=${result.sharedSecretSha256Hex.length} kems=${result.kemSuites} dsa=${dsa.suites} slh=${slh.suites} slh-signed=${slh.signed} lab=${lab.ecdhe}/${lab.kem} keys-per-ip=${MAX_KEYS_PER_IP}`,
 );

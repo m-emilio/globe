@@ -14,7 +14,9 @@ import {
   authFingerprintStorageKey,
   authUserStorageKey,
   clientIp,
+  enforceIpKeyLimit,
   issueLoginSession,
+  rememberIpKey,
   normalizeFingerprint,
   rateLimitDurable,
   readJsonBody,
@@ -264,6 +266,8 @@ export async function registerLabUser(
       applySecurityHeaders,
     );
   }
+  const capped = await enforceIpKeyLimit(env, request, fingerprint, applySecurityHeaders);
+  if (capped) return capped;
   const label = picked.family === "ecdhe" ? `ECDHE-${picked.suite}` : `KEM-${picked.suite}`;
   const user: UserRecord = {
     id: randomId(16),
@@ -275,6 +279,7 @@ export async function registerLabUser(
   };
   await env.BILLING_KV.put(authUserStorageKey(user.id), JSON.stringify(user));
   await env.BILLING_KV.put(authFingerprintStorageKey(user.fingerprint), user.id);
+  await rememberIpKey(env, request, user.fingerprint);
   return json(
     { registered: true, family: picked.family, suite: picked.suite, fingerprint },
     201,

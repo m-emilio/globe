@@ -1051,6 +1051,28 @@ export async function adminListAudit(
   );
 }
 
+/** Recent sign-in attempts. Same admin session gate as the audit list. No key material. */
+export async function adminListLoginAttempts(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  const { listLoginAttempts } = await import("./loginLog");
+  const attempts = await listLoginAttempts(env);
+  return json(
+    {
+      attempts,
+      retentionDays: 30,
+      keyLimitPerIp: 3,
+      stored: "Result, method, suite, network, and an 8-character account prefix. Private keys, signatures, MACs, challenges, and session cookies are not stored.",
+    },
+    { status: 200 },
+    applySecurityHeaders,
+  );
+}
+
 /**
  * List all registered users (public fields only — never public keys).
  * Requires full elevation: allowlisted session + action secret + PGP step-up.
