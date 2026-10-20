@@ -24,11 +24,13 @@ import {
   adminElevate,
   adminElevateChallenge,
   adminGrantTransit,
+  adminGrantUnlimitedKeys,
   adminListAudit,
   adminListLoginAttempts,
   adminListUsers,
   adminLookupUser,
   adminRevokeTransit,
+  adminRevokeUnlimitedKeys,
   adminStatus,
 } from "./admin";
 import {
@@ -4731,6 +4733,18 @@ export default {
         return methodNotAllowedResponse();
       }
       return adminRevokeTransit(request, env, applySecurityHeaders);
+    }
+    if (url.pathname === "/api/admin/grant-unlimited-keys") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adminGrantUnlimitedKeys(request, env, applySecurityHeaders);
+    }
+    if (url.pathname === "/api/admin/revoke-unlimited-keys") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adminRevokeUnlimitedKeys(request, env, applySecurityHeaders);
     }
     if (url.pathname === "/api/admin/claim-session") {
       if (request.method !== "POST") {
