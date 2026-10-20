@@ -10,6 +10,8 @@
  * Browser support: ECDH P-256/P-384/P-521 widely; X25519 is newer (Chrome/Firefox recent).
  */
 
+import { peerPublicMaterial, sanitizeKeyMaterial, KEY_MATERIAL_MAX_CHARS } from "./keyMaterial";
+
 export type EcdheCurveId = "P-256" | "P-384" | "P-521" | "X25519";
 
 export type EcdheCurveInfo = {
@@ -324,6 +326,7 @@ export async function importEcdhePeerPublicKey(
 export async function importEcdhePrivateKey(
   curve: EcdheCurveId,
   input: string,
+  options?: { extractable?: boolean },
 ): Promise<CryptoKey> {
   const subtle = requireSubtle();
   const trimmed = input.trim();
@@ -335,6 +338,7 @@ export async function importEcdhePrivateKey(
 
   const algorithm = generateAlgorithm(curve);
   const usages: KeyUsage[] = ["deriveBits", "deriveKey"];
+  const extractable = options?.extractable === true;
 
   if (trimmed.startsWith("{")) {
     let parsed: JsonWebKey;
@@ -353,13 +357,15 @@ export async function importEcdhePrivateKey(
         `Private JWK curve is ${parsed.crv}. This lab selected ${curve}.`,
       );
     }
-    const jwk: JsonWebKey = { ...parsed };
-    delete jwk.ext;
-    delete jwk.key_ops;
-    delete jwk.alg;
-    delete jwk.use;
+    const jwk: JsonWebKey = {
+      kty: parsed.kty,
+      crv: parsed.crv,
+      x: parsed.x,
+      y: parsed.y,
+      d: parsed.d,
+    };
     try {
-      return await subtle.importKey("jwk", jwk, algorithm, false, usages);
+      return await subtle.importKey("jwk", jwk, algorithm, extractable, usages);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       throw new Error(`Could not import private JWK for ${curve}: ${msg}`);
@@ -381,7 +387,7 @@ export async function importEcdhePrivateKey(
       "pkcs8",
       copy.buffer,
       algorithm,
-      false,
+      extractable,
       usages,
     );
   } catch (error) {
@@ -544,4 +550,208 @@ export async function ecdheSelfTest(
 
 export function getEcdheCurve(id: EcdheCurveId): EcdheCurveInfo {
   return ECDHE_CURVES.find((c) => c.id === id) || ECDHE_CURVES[0]!;
+}
+
+export type EcdheLoadedPrivate = {
+  curve: EcdheCurveId;
+  pem: string;
+  privateJwk: JsonWebKey;
+  publicJwk: JsonWebKey;
+  publicSpkiB64: string;
+};
+
+const CURVE_TRY_ORDER: EcdheCurveId[] = ["X25519", "P-256", "P-384", "P-521"];
+
+/** Load a sanitized PKCS#8 or private JWK and its public half. */
+export async function loadEcdhePrivateMaterial(
+  material: string,
+  preferred?: EcdheCurveId,
+): Promise<EcdheLoadedPrivate> {
+  const order = preferred
+    ? [preferred, ...CURVE_TRY_ORDER.filter((curve) => curve !== preferred)]
+    : CURVE_TRY_ORDER;
+  let last = "Could not read that ECDHE private key.";
+  for (const curve of order) {
+    try {
+      const subtle = requireSubtle();
+      const key = await importEcdhePrivateKey(curve, material, { extractable: true });
+      const privateJwk = (await subtle.exportKey("jwk", key)) as JsonWebKey;
+      if (!privateJwk.d) throw new Error("Imported key had no private scalar.");
+      const pkcs8 = await subtle.exportKey("pkcs8", key);
+      const publicJwk: JsonWebKey = {
+        kty: privateJwk.kty,
+        crv: privateJwk.crv,
+        x: privateJwk.x,
+        y: privateJwk.y,
+      };
+      const pub = await subtle.importKey(
+        "jwk",
+        publicJwk,
+        importPublicAlgorithm(curve),
+        true,
+        [],
+      );
+      const spki = await subtle.exportKey("spki", pub);
+      return {
+        curve,
+        pem: toPkcs8Pem(bytesToB64(pkcs8)),
+        privateJwk,
+        publicJwk,
+        publicSpkiB64: bytesToB64(spki),
+      };
+    } catch (error) {
+      last = error instanceof Error ? error.message : last;
+    }
+  }
+  throw new Error(last);
+}
+
+export type EcdheSecurityCheck = { id: string; label: string; pass: boolean };
+
+/** Local derivation and field checks. Results carry no key material. */
+export async function runEcdheSecurityChecks(
+  curve: EcdheCurveId = "X25519",
+): Promise<EcdheSecurityCheck[]> {
+  const checks: EcdheSecurityCheck[] = [];
+  const push = (id: string, label: string, pass: boolean) => {
+    checks.push({ id, label, pass });
+  };
+  try {
+    const result = await ecdheSelfTest(curve);
+    push(
+      "agreement",
+      "PKCS#8 and JWK agree, and the session key stays non-extractable",
+      result.ok && result.sharedSecretSha256Hex.length === 64,
+    );
+  } catch {
+    push(
+      "agreement",
+      "PKCS#8 and JWK agree, and the session key stays non-extractable",
+      false,
+    );
+  }
+
+  try {
+    const pair = await generateEcdheKeyPair(curve, { publish: false });
+    let rejectedPublic = false;
+    try {
+      await importEcdhePrivateKey(curve, JSON.stringify(pair.publicKeyJwk));
+    } catch (error) {
+      rejectedPublic =
+        error instanceof Error && error.message.startsWith("Private JWK is missing d");
+    }
+    push("reject-public-as-private", "A public key is rejected as a private key", rejectedPublic);
+
+    let rejectedEmpty = false;
+    try {
+      peerPublicMaterial("  ");
+    } catch (error) {
+      rejectedEmpty =
+        error instanceof Error && error.message.startsWith("Paste the peer public key");
+    }
+    push("reject-empty-peer", "An empty peer field is rejected", rejectedEmpty);
+
+    let rejectedPrivatePeer = false;
+    try {
+      peerPublicMaterial(pair.privateKeyPkcs8Pem);
+    } catch (error) {
+      rejectedPrivatePeer =
+        error instanceof Error && error.message === "Peer field must be a public key.";
+    }
+    push(
+      "reject-private-peer",
+      "A private key is rejected in the peer field",
+      rejectedPrivatePeer,
+    );
+
+    const sanitized = sanitizeKeyMaterial(
+      `<script>alert(1)</script>\n${pair.privateKeyPkcs8Pem}\n`,
+    );
+    push(
+      "strip-html",
+      "HTML around a private key is removed",
+      sanitized.kind === "pkcs8" &&
+        sanitized.pem.startsWith("-----BEGIN PRIVATE KEY-----") &&
+        !sanitized.pem.includes("<"),
+    );
+
+    const cleaned = sanitizeKeyMaterial(`\uFEFF\0${pair.privateKeyPkcs8Pem}`);
+    push(
+      "strip-controls",
+      "A byte-order mark and NUL bytes are removed",
+      cleaned.kind === "pkcs8" &&
+        cleaned.pem.startsWith("-----BEGIN PRIVATE KEY-----") &&
+        !cleaned.pem.includes("\0"),
+    );
+
+    const mixed = sanitizeKeyMaterial(
+      `${pair.privateKeyPkcs8Pem}\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nAA==\n-----END PGP PRIVATE KEY BLOCK-----\n`,
+    );
+    push(
+      "reject-mixed",
+      "OpenPGP and PKCS#8 in one field are rejected",
+      mixed.kind === "rejected",
+    );
+
+    const scriptUrl = sanitizeKeyMaterial("javascript:alert(1)");
+    push(
+      "reject-script-url",
+      "A script URL in the key field is rejected",
+      scriptUrl.kind === "rejected",
+    );
+
+    const asc = ecdhePrivateKeyAsc(pair.privateKeyPkcs8Pem);
+    push(
+      "asc-pkcs8",
+      "The .asc file is PKCS#8, not an OpenPGP login key",
+      asc.startsWith("-----BEGIN PRIVATE KEY-----") &&
+        asc.endsWith("-----END PRIVATE KEY-----\n") &&
+        !asc.includes("PGP PRIVATE KEY"),
+    );
+
+    const other = await generateEcdheKeyPair(curve, { publish: false });
+    const agreed = await deriveEcdheFromPrivateMaterial(
+      curve,
+      pair.privateKeyPkcs8Pem,
+      pair.publicKeySpkiB64,
+    );
+    const changed = await deriveEcdheFromPrivateMaterial(
+      curve,
+      pair.privateKeyPkcs8Pem,
+      other.publicKeySpkiB64,
+    );
+    push(
+      "peer-changes-secret",
+      "A different peer public key changes the shared secret",
+      agreed.sharedSecretSha256Hex.length === 64 &&
+        agreed.sharedSecretSha256Hex !== changed.sharedSecretSha256Hex &&
+        !agreed.sessionKey.extractable &&
+        !changed.sessionKey.extractable,
+    );
+  } catch {
+    const missing: Array<[string, string]> = [
+      ["reject-public-as-private", "A public key is rejected as a private key"],
+      ["reject-empty-peer", "An empty peer field is rejected"],
+      ["reject-private-peer", "A private key is rejected in the peer field"],
+      ["strip-html", "HTML around a private key is removed"],
+      ["strip-controls", "A byte-order mark and NUL bytes are removed"],
+      ["reject-mixed", "OpenPGP and PKCS#8 in one field are rejected"],
+      ["reject-script-url", "A script URL in the key field is rejected"],
+      ["asc-pkcs8", "The .asc file is PKCS#8, not an OpenPGP login key"],
+      ["peer-changes-secret", "A different peer public key changes the shared secret"],
+    ];
+    for (let i = 0; i < missing.length; i++) {
+      const item = missing[i]!;
+      if (checks.some((row) => row.id === item[0])) continue;
+      push(item[0], item[1], false);
+    }
+  }
+
+  const oversized = sanitizeKeyMaterial("A".repeat(KEY_MATERIAL_MAX_CHARS + 1));
+  push(
+    "reject-oversize",
+    "Oversized key material is rejected",
+    oversized.kind === "rejected",
+  );
+  return checks;
 }
