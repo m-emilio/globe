@@ -9,11 +9,14 @@
   X-Frame-Options: DENY
   Permissions-Policy: camera=(), microphone=(), geolocation=(self), payment=(), usb=(), interest-cohort=()
   X-Permitted-Cross-Domain-Policies: none
-  # Short HTML cache — was max-age=0 (constant revalidation felt like network lag)
-  Cache-Control: public, max-age=60, stale-while-revalidate=300
+  # Short HTML cache — was max-age=0 (constant revalidation felt like network lag).
+  # No stale-while-revalidate: a stale shell kept the previous /dist/index.js URL.
+  Cache-Control: public, max-age=60
 
 /dist/*
-  Cache-Control: public, max-age=604800, stale-while-revalidate=86400, immutable
+  # Entry bundles are not content-hashed. Immutable caching pinned a stale
+  # index.js whose chunk URLs 404, so the page stayed on Loading.
+  Cache-Control: public, max-age=0, must-revalidate
   Cross-Origin-Resource-Policy: cross-origin
 
 /dist/chunks/*

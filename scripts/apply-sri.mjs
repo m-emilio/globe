@@ -56,7 +56,7 @@ function injectIntegrity(html, attr, urlPath, integrity) {
   // Scripts may be written as <script …></script>; consume the closer to avoid duplicates.
   const esc = urlPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(
-    `<(script|link)\\b([^>]*\\b${attr}\\s*=\\s*["']${esc}["'][^>]*)\\s*/?>` +
+    `<(script|link)\\b([^>]*\\b${attr}\\s*=\\s*["']${esc}(?:\\?[^"']*)?["'][^>]*)\\s*/?>` +
       `(?:\\s*</script>)?`,
     "i",
   );

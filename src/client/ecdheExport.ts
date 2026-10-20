@@ -59,15 +59,24 @@ function hideInlineLab(): void {
   }
 }
 
+let applyingCopy = false;
+
 function applyCopy(): void {
-  hideInlineLab();
-  const nodes = document.querySelectorAll(".auth-inline-ok, .auth-field-hint");
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i]!;
-    const text = node.textContent ?? "";
-    if (text.includes(OLD_READY)) node.textContent = text.replace(OLD_READY, NEW_READY);
-    if (text.includes(OLD_HINT)) node.textContent = text.replace(OLD_HINT, NEW_HINT);
-    if (text.includes("Cleared ephemeral material.")) hidePanel();
+  if (applyingCopy) return;
+  if (!document.querySelector(".auth-modal, .auth-ecdhe-title")) return;
+  applyingCopy = true;
+  try {
+    hideInlineLab();
+    const nodes = document.querySelectorAll(".auth-inline-ok, .auth-field-hint");
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i]!;
+      const text = node.textContent ?? "";
+      if (text.includes(OLD_READY)) node.textContent = text.replace(OLD_READY, NEW_READY);
+      if (text.includes(OLD_HINT)) node.textContent = text.replace(OLD_HINT, NEW_HINT);
+      if (text.includes("Cleared ephemeral material.")) hidePanel();
+    }
+  } finally {
+    applyingCopy = false;
   }
 }
 
@@ -597,7 +606,25 @@ function onImport(event: Event): void {
 
 window.addEventListener("globe-ecdhe-export", onExport);
 window.addEventListener("globe-ecdhe-import", onImport);
-const observer = new MutationObserver(() => applyCopy());
-observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
-applyCopy();
+
+let modalCopyWatch: MutationObserver | null = null;
+
+function watchAuthCopy(): void {
+  const modal = document.querySelector(".auth-modal");
+  if (!(modal instanceof HTMLElement)) {
+    modalCopyWatch?.disconnect();
+    modalCopyWatch = null;
+    return;
+  }
+  if (modal.dataset.globeCopyWatch === "1") return;
+  modal.dataset.globeCopyWatch = "1";
+  modalCopyWatch?.disconnect();
+  modalCopyWatch = new MutationObserver(() => applyCopy());
+  modalCopyWatch.observe(modal, { subtree: true, childList: true, characterData: true });
+  applyCopy();
+}
+
+const shellObserver = new MutationObserver(() => watchAuthCopy());
+shellObserver.observe(document.documentElement, { subtree: true, childList: true });
+watchAuthCopy();
 mountLauncher();

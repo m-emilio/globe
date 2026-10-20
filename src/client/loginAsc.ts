@@ -174,16 +174,28 @@ function patchPasswords(): void {
   }
 }
 
+let patchingLogin = false;
+
 function patchLoginImport(): void {
-  patchPasswords();
-  const panels = document.querySelectorAll(".auth-export-panel");
-  for (let i = 0; i < panels.length; i++) {
-    const panel = panels[i];
-    if (!(panel instanceof HTMLElement)) continue;
-    const input = panel.querySelector('input[type="file"]');
-    if (!(input instanceof HTMLInputElement)) continue;
-    bindInput(panel, input);
-    ensurePaste(panel, input);
+  if (patchingLogin) return;
+  const modal = document.querySelector(".auth-modal");
+  if (!(modal instanceof HTMLElement)) return;
+  patchingLogin = true;
+  loginObserver.disconnect();
+  try {
+    patchPasswords();
+    const panels = modal.querySelectorAll(".auth-export-panel");
+    for (let i = 0; i < panels.length; i++) {
+      const panel = panels[i];
+      if (!(panel instanceof HTMLElement)) continue;
+      const input = panel.querySelector('input[type="file"]');
+      if (!(input instanceof HTMLInputElement)) continue;
+      bindInput(panel, input);
+      ensurePaste(panel, input);
+    }
+  } finally {
+    patchingLogin = false;
+    loginObserver.observe(document.documentElement, { subtree: true, childList: true });
   }
 }
 
@@ -207,6 +219,6 @@ function stripPassphraseNulls(event: Event): void {
 document.addEventListener("input", stripPassphraseNulls, true);
 document.addEventListener("pointerdown", openFilePicker, true);
 document.addEventListener("click", openFilePicker, true);
-const observer = new MutationObserver(() => patchLoginImport());
-observer.observe(document.documentElement, { subtree: true, childList: true });
+const loginObserver = new MutationObserver(() => patchLoginImport());
+loginObserver.observe(document.documentElement, { subtree: true, childList: true });
 patchLoginImport();
