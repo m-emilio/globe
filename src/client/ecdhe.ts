@@ -2,7 +2,8 @@
  * Experimental ECDHE (Elliptic-Curve Diffie–Hellman Ephemeral) helpers.
  *
  * - Ephemeral WebCrypto key agreement only — NOT OpenPGP identity keys.
- * - Private keys stay non-extractable in memory (not uploaded, not IndexedDB).
+ * - Private keys are extractable so the lab can show PKCS#8 and JWK.
+ *   They are not uploaded and they are not OpenPGP login keys.
  * - Public keys export as JWK + SPKI (base64) for peer exchange.
  * - Shared secret is shown only as a SHA-256 fingerprint by default.
  *
@@ -54,8 +55,16 @@ export const ECDHE_CURVES: EcdheCurveInfo[] = [
 
 export type EcdheEphemeralPair = {
   curve: EcdheCurveId;
-  /** Non-extractable private key — memory only */
+  /** Extractable ephemeral private key. Not an OpenPGP identity key. */
   privateKey: CryptoKey;
+  /** PKCS#8, base64 (not URL-safe). */
+  privateKeyPkcs8B64: string;
+  /** PKCS#8 PEM, so it can be copied into other tools. */
+  privateKeyPkcs8Pem: string;
+  /** Private JWK, including `d`. */
+  privateKeyJwk: JsonWebKey;
+  /** Raw private scalar, base64. Present when this browser can export it (X25519). */
+  privateKeyRawB64?: string;
   publicKey: CryptoKey;
   publicKeyJwk: JsonWebKey;
   /** SPKI SubjectPublicKeyInfo, base64 (not URL-safe) */
@@ -102,6 +111,21 @@ function bufferToHex(buf: ArrayBuffer): string {
   return [...new Uint8Array(buf)]
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function toPkcs8Pem(pkcs8B64: string): string {
+  const lines = pkcs8B64.match(/.{1,64}/g) ?? [pkcs8B64];
+  return `-----BEGIN PRIVATE KEY-----\n${lines.join("\n")}\n-----END PRIVATE KEY-----`;
+}
+
+function publishEcdheExport(detail: {
+  curve: EcdheCurveId;
+  privateKeyPkcs8Pem: string;
+  privateKeyJwk: JsonWebKey;
+  privateKeyRawB64?: string;
+}): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("globe-ecdhe-export", { detail }));
 }
 
 function isX25519(curve: EcdheCurveId): boolean {
@@ -155,7 +179,7 @@ export async function listSupportedEcdheCurves(): Promise<EcdheCurveInfo[]> {
 
 /**
  * Generate an ephemeral ECDHE key pair.
- * Private key is non-extractable and must stay in process memory only.
+ * The private key is extractable (PKCS#8, JWK, and raw when the browser allows it).
  */
 export async function generateEcdheKeyPair(
   curve: EcdheCurveId = "P-256",
@@ -163,7 +187,7 @@ export async function generateEcdheKeyPair(
   const subtle = requireSubtle();
   let keyPair: CryptoKeyPair;
   try {
-    keyPair = (await subtle.generateKey(generateAlgorithm(curve), false, [
+    keyPair = (await subtle.generateKey(generateAlgorithm(curve), true, [
       "deriveBits",
       "deriveKey",
     ])) as CryptoKeyPair;
@@ -174,20 +198,48 @@ export async function generateEcdheKeyPair(
     );
   }
 
+  if (!keyPair.privateKey.extractable) {
+    throw new Error(`ECDHE private key for ${curve} was not extractable.`);
+  }
+
   const publicKeyJwk = (await subtle.exportKey(
     "jwk",
     keyPair.publicKey,
   )) as JsonWebKey;
   const spki = await subtle.exportKey("spki", keyPair.publicKey);
+  const privateKeyJwk = (await subtle.exportKey(
+    "jwk",
+    keyPair.privateKey,
+  )) as JsonWebKey;
+  const pkcs8 = await subtle.exportKey("pkcs8", keyPair.privateKey);
+  const privateKeyPkcs8B64 = bytesToB64(pkcs8);
+  let privateKeyRawB64: string | undefined;
+  try {
+    const raw = await subtle.exportKey("raw", keyPair.privateKey);
+    privateKeyRawB64 = bytesToB64(raw);
+  } catch {
+    privateKeyRawB64 = undefined;
+  }
 
-  return {
+  const pair: EcdheEphemeralPair = {
     curve,
     privateKey: keyPair.privateKey,
+    privateKeyPkcs8B64,
+    privateKeyPkcs8Pem: toPkcs8Pem(privateKeyPkcs8B64),
+    privateKeyJwk,
+    privateKeyRawB64,
     publicKey: keyPair.publicKey,
     publicKeyJwk,
     publicKeySpkiB64: bytesToB64(spki),
     createdAt: new Date().toISOString(),
   };
+  publishEcdheExport({
+    curve,
+    privateKeyPkcs8Pem: pair.privateKeyPkcs8Pem,
+    privateKeyJwk,
+    privateKeyRawB64,
+  });
+  return pair;
 }
 
 /**
@@ -343,6 +395,9 @@ export async function ecdheSelfTest(
   const d2 = await deriveEcdheSession(b.privateKey, peerA, curve);
   if (d1.sharedSecretSha256Hex !== d2.sharedSecretSha256Hex) {
     throw new Error("ECDHE self-test failed: shared secrets do not match");
+  }
+  if (!a.privateKey.extractable || !a.privateKeyJwk.d || !a.privateKeyPkcs8Pem.includes("PRIVATE KEY")) {
+    throw new Error("ECDHE self-test failed: private key was not extractable");
   }
   return {
     ok: true,
