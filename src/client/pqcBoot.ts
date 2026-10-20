@@ -1,5 +1,5 @@
 /**
- * Tiny always-loaded entry. The X-Wing implementation stays in a separate
+ * Tiny always-loaded entry. The key-agreement suites stay in a separate
  * chunk until the visitor opens the lab.
  */
 function mountPqcButton(): void {
@@ -8,7 +8,7 @@ function mountPqcButton(): void {
   button.id = "globe-pqc-open";
   button.type = "button";
   button.textContent = "PQC";
-  button.title = "Hybrid post-quantum key agreement (X-Wing)";
+  button.title = "Post-quantum key agreement";
   button.style.cssText = [
     "position:fixed",
     "right:max(12px, env(safe-area-inset-right))",

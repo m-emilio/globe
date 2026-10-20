@@ -1,15 +1,18 @@
 /**
- * Browser lab for X-Wing (ML-KEM-768 + X25519).
- * Loaded on demand from pqcBoot.ts. Not an OpenPGP login key.
+ * Browser lab for post-quantum key agreement.
+ * Loaded on demand from pqcBoot.ts. Not an OpenPGP or ML-DSA login key.
  */
 import {
-  PQC_LENGTHS,
-  PQC_SUITE_LABEL,
+  PQC_KEM_SUITES,
+  PQC_SUITE_ID,
   clearPqcSecret,
   decapsulateWithLocal,
   encapsulateToPeer,
   generatePqcKeyPair,
+  isPqcKemId,
+  pqcKemSuite,
   pqcSelfTest,
+  type PqcKemId,
   type PqcLocalPublic,
 } from "./pqc";
 
@@ -83,21 +86,44 @@ export function mountPqcLab(): void {
     "font:14px/1.4 system-ui,sans-serif",
   ].join(";");
 
-  const title = el("h2", PQC_SUITE_LABEL);
+  const title = el("h2", "Post-quantum key agreement");
   title.style.cssText = "margin:0 0 6px;font-size:16px";
-  const hint = el(
-    "p",
-    `ML-KEM-768 plus X25519 in pure JavaScript (@noble/post-quantum). Public key ${PQC_LENGTHS.publicKey} bytes, ciphertext ${PQC_LENGTHS.cipherText} bytes. The secret stays in this page. The shared secret is shown only as a SHA-256 fingerprint.`,
-  );
+  const hint = el("p", "");
+  hint.id = "globe-pqc-hint";
   hint.style.cssText = "margin:0 0 10px;color:#b7e8d2;font-size:13px";
 
+  const suiteLabel = el("label");
+  suiteLabel.style.cssText = "display:flex;flex-direction:column;gap:6px;margin:0 0 10px";
+  const suiteSpan = el("span", "Suite");
+  suiteSpan.style.cssText = "font-size:12px;color:#c9ffe4";
+  const suiteSelect = el("select");
+  suiteSelect.id = "globe-pqc-suite";
+  suiteSelect.style.cssText = [
+    "min-height:44px",
+    "font:16px/1.2 system-ui,sans-serif",
+    "color:#e7fff3",
+    "background:#0c1612",
+    "border:1px solid rgba(61,255,168,0.35)",
+    "border-radius:8px",
+    "padding:8px",
+  ].join(";");
+  for (let i = 0; i < PQC_KEM_SUITES.length; i++) {
+    const suite = PQC_KEM_SUITES[i]!;
+    const option = el("option", suite.label);
+    option.value = suite.id;
+    if (suite.id === PQC_SUITE_ID) option.selected = true;
+    suiteSelect.append(option);
+  }
+  suiteLabel.append(suiteSpan, suiteSelect);
+
   const status = el("p", "");
+  status.id = "globe-pqc-status";
   status.style.cssText = "min-height:1.2em;margin:8px 0;font-size:13px";
 
   const row = el("div");
   row.style.cssText = "display:flex;flex-wrap:wrap;gap:8px";
-  const generate = button("Generate X-Wing key");
-  const selfTest = button("Self-test (A↔B)");
+  const generate = button("Generate key");
+  const selfTest = button("Self-test all suites");
   const close = button("Close");
   row.append(generate, selfTest, close);
 
@@ -106,7 +132,7 @@ export function mountPqcLab(): void {
   publicArea.rows = 4;
   const peerArea = el("textarea");
   peerArea.rows = 4;
-  peerArea.placeholder = "Paste a peer X-Wing public key";
+  peerArea.placeholder = "Paste a peer public key for the selected suite";
   const encapsulate = button("Encapsulate to peer");
   const cipherArea = el("textarea");
   cipherArea.readOnly = true;
@@ -135,35 +161,65 @@ export function mountPqcLab(): void {
   fpBlock.hidden = true;
   fpBlock.append(el("strong", "Shared secret fingerprint (SHA-256)"), fp);
 
-  root.append(title, hint, row, status, actions, fpBlock);
+  root.append(title, hint, suiteLabel, row, status, actions, fpBlock);
   document.body.append(root);
 
+  const selectedSuite = (): PqcKemId => {
+    const value = suiteSelect.value;
+    return isPqcKemId(value) ? value : PQC_SUITE_ID;
+  };
+  const refreshHint = () => {
+    const suite = pqcKemSuite(selectedSuite());
+    hint.textContent = `${suite.label} in pure JavaScript (@noble/post-quantum). Public key ${suite.publicKey} bytes, ciphertext ${suite.cipherText} bytes. The secret stays in this page. The shared secret is shown only as a SHA-256 fingerprint. This is not a sign-in key.`;
+  };
   const setStatus = (message: string, isError = false) => {
     status.textContent = message;
     status.style.color = isError ? "#ffb4b4" : "#d8ffe8";
+    if (!isError && message.startsWith("Self-test passed")) {
+      status.dataset.pqcSelfTest = "pass";
+    } else {
+      delete status.dataset.pqcSelfTest;
+    }
   };
   const setBusy = (busy: boolean) => {
-    for (const node of [generate, selfTest, encapsulate, decapsulate, clear, close]) {
-      node.disabled = busy;
-    }
+    const nodes = [generate, selfTest, encapsulate, decapsulate, clear, close, suiteSelect];
+    for (let i = 0; i < nodes.length; i++) nodes[i]!.disabled = busy;
   };
   const showFp = (hex: string) => {
     fp.textContent = hex;
     fpBlock.hidden = hex.length === 0;
   };
+  const clearLocal = (message: string) => {
+    if (localKey) clearPqcSecret(localKey.id);
+    localKey = null;
+    publicArea.value = "";
+    peerArea.value = "";
+    cipherArea.value = "";
+    incomingArea.value = "";
+    showFp("");
+    actions.hidden = true;
+    setStatus(message);
+  };
+
+  refreshHint();
+
+  suiteSelect.addEventListener("change", () => {
+    if (localKey && localKey.suite !== selectedSuite()) {
+      clearLocal("Cleared the previous suite secret from this page.");
+    }
+    refreshHint();
+  });
 
   generate.addEventListener("click", () => {
     setBusy(true);
     try {
       if (localKey) clearPqcSecret(localKey.id);
-      localKey = generatePqcKeyPair();
+      localKey = generatePqcKeyPair(selectedSuite());
       publicArea.value = localKey.publicKeyB64;
       cipherArea.value = "";
       showFp("");
       actions.hidden = false;
-      setStatus(
-        "Key ready. Share the public key. This is not an OpenPGP login key.",
-      );
+      setStatus("Key ready. Share the public key. This is not a sign-in key.");
     } catch (error) {
       localKey = null;
       actions.hidden = true;
@@ -174,8 +230,9 @@ export function mountPqcLab(): void {
   });
 
   encapsulate.addEventListener("click", () => {
+    const suite = selectedSuite();
     setBusy(true);
-    void encapsulateToPeer(peerArea.value)
+    void encapsulateToPeer(peerArea.value, suite)
       .then((agreed) => {
         cipherArea.value = agreed.cipherTextB64 || "";
         showFp(agreed.sharedSecretSha256Hex);
@@ -191,7 +248,11 @@ export function mountPqcLab(): void {
 
   decapsulate.addEventListener("click", () => {
     if (!localKey) {
-      setStatus("Generate a local X-Wing key first.", true);
+      setStatus("Generate a local key first.", true);
+      return;
+    }
+    if (localKey.suite !== selectedSuite()) {
+      setStatus("Switch the suite back to the generated key before decapsulating.", true);
       return;
     }
     const id = localKey.id;
@@ -210,10 +271,11 @@ export function mountPqcLab(): void {
 
   selfTest.addEventListener("click", () => {
     setBusy(true);
+    setStatus("Running self-test…");
     void pqcSelfTest()
-      .then((result) => {
-        showFp(result.sharedSecretSha256Hex);
-        setStatus("Self-test passed. Both sides matched, and a flipped ciphertext did not.");
+      .then(() => {
+        showFp("");
+        setStatus("Self-test passed. All key-agreement suites matched, and a flipped ciphertext did not.");
       })
       .catch((error: unknown) => {
         showFp("");
@@ -223,15 +285,7 @@ export function mountPqcLab(): void {
   });
 
   clear.addEventListener("click", () => {
-    if (localKey) clearPqcSecret(localKey.id);
-    localKey = null;
-    publicArea.value = "";
-    peerArea.value = "";
-    cipherArea.value = "";
-    incomingArea.value = "";
-    showFp("");
-    actions.hidden = true;
-    setStatus("Cleared the X-Wing secret from this page.");
+    clearLocal("Cleared the key-agreement secret from this page.");
   });
 
   close.addEventListener("click", () => {

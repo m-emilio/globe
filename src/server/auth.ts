@@ -151,7 +151,7 @@ export async function getUserByFingerprint(
   return getUserById(env, userId);
 }
 
-type SecurityHeadersFn = (headers: Headers) => void;
+export type SecurityHeadersFn = (headers: Headers) => void;
 
 // Best-effort in-isolate rate limits (resets when isolate recycles).
 const rateBuckets = new Map<string, { windowStart: number; count: number }>();
@@ -174,6 +174,14 @@ function userKey(userId: string) {
 
 function fingerprintKey(fingerprint: string) {
   return `auth:fp:${fingerprint}`;
+}
+
+export function authUserStorageKey(userId: string): string {
+  return userKey(userId);
+}
+
+export function authFingerprintStorageKey(fingerprint: string): string {
+  return fingerprintKey(fingerprint);
 }
 
 function sessionKey(sessionId: string) {
@@ -649,6 +657,37 @@ function sessionResponse(
     ? { ...body, sessionToken: sessionId }
     : { ...body, sessionToken: null };
   return new Response(JSON.stringify(payload), { status, headers });
+}
+
+/** Issue the same HttpOnly globe_session cookie used by OpenPGP login. */
+export async function issueLoginSession(
+  request: Request,
+  env: AuthEnv,
+  user: UserRecord,
+  message: string,
+  status: number,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const sessionId = await createSession(env, user.id);
+  if (!sessionId) {
+    return json(
+      { error: "session_create_failed" },
+      { status: 500 },
+      applySecurityHeaders,
+    );
+  }
+  return sessionResponse(
+    request,
+    sessionId,
+    {
+      user: toPublicUser(user),
+      ...adminFlags(user, env),
+      ...accessFlags(env),
+      message,
+    },
+    status,
+    applySecurityHeaders,
+  );
 }
 
 export async function getSessionUser(
@@ -1157,6 +1196,14 @@ export async function loginUser(
   try {
     user = JSON.parse(userRaw) as UserRecord;
   } catch {
+    return json(
+      { error: "auth_failed", message: "Could not verify signature." },
+      { status: 401 },
+      applySecurityHeaders,
+    );
+  }
+
+  if (user.publicKeyArmored.startsWith("globe-ml-dsa:v1:")) {
     return json(
       { error: "auth_failed", message: "Could not verify signature." },
       { status: 401 },
