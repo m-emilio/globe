@@ -10,6 +10,7 @@
  * Browser support: ECDH P-256/P-384/P-521 widely; X25519 is newer (Chrome/Firefox recent).
  */
 
+import { hmacLogin, macKeyFromShared } from "../server/labMac";
 import {
   acceptLabPaste,
   acceptLoginPaste,
@@ -406,6 +407,42 @@ export async function importEcdhePrivateKey(
     throw new Error(
       `Could not import PKCS#8 private key for ${curve}: ${msg}. Expect PEM or base64 PKCS#8.`,
     );
+  }
+}
+
+/** Prove this device holds the ECDHE private key. Returns a MAC, never the shared secret. */
+export async function ecdheLoginProof(
+  curve: EcdheCurveId,
+  privateMaterial: string,
+  peerSpkiB64: string,
+  message: string,
+): Promise<string> {
+  const subtle = requireSubtle();
+  const privateKey = await importEcdhePrivateKey(curve, privateMaterial);
+  const peer = await importEcdhePeerPublicKey(curve, peerSpkiB64);
+  const bits = curve === "P-521" ? 528 : curve === "P-384" ? 384 : 256;
+  const shared = new Uint8Array(
+    await subtle.deriveBits(
+      isX25519(curve)
+        ? { name: "X25519", public: peer }
+        : { name: "ECDH", public: peer },
+      privateKey,
+      bits,
+    ),
+  );
+  try {
+    const macKey = await macKeyFromShared(shared, "ecdhe", curve);
+    try {
+      const mac = await hmacLogin(macKey, message);
+      let s = "";
+      for (let i = 0; i < mac.length; i++) s += String.fromCharCode(mac[i]!);
+      mac.fill(0);
+      return btoa(s);
+    } finally {
+      macKey.fill(0);
+    }
+  } finally {
+    shared.fill(0);
   }
 }
 

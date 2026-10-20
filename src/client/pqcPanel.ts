@@ -1,20 +1,24 @@
 /**
  * Browser lab for post-quantum key agreement.
- * Loaded on demand from pqcBoot.ts. Not an OpenPGP or ML-DSA login key.
+ * Loaded on demand from pqcBoot.ts. Sign-in sends a MAC, not the secret.
  */
 import {
   PQC_KEM_SUITES,
   PQC_SUITE_ID,
   clearPqcSecret,
+  copyPqcSecret,
   decapsulateWithLocal,
   encapsulateToPeer,
   generatePqcKeyPair,
   isPqcKemId,
+  kemLoginProof,
+  kemLoginProofFromSecret,
   pqcKemSuite,
   pqcSelfTest,
   type PqcKemId,
   type PqcLocalPublic,
 } from "./pqc";
+import { loadLabMaterial, signInWithLabKey } from "./labVault";
 
 let localKey: PqcLocalPublic | null = null;
 
@@ -70,12 +74,10 @@ export function mountPqcLab(): void {
   const root = el("section");
   root.id = "globe-pqc-lab";
   root.style.cssText = [
-    "position:fixed",
-    "right:max(12px, env(safe-area-inset-right))",
-    "bottom:max(12px, env(safe-area-inset-bottom))",
-    "z-index:10000",
-    "width:min(420px, calc(100vw - 24px))",
-    "max-height:min(80vh, 720px)",
+    "margin-top:16px",
+    "width:100%",
+    "box-sizing:border-box",
+    "max-height:min(52dvh, 560px)",
     "overflow:auto",
     "padding:14px",
     "border-radius:12px",
@@ -123,9 +125,13 @@ export function mountPqcLab(): void {
   const row = el("div");
   row.style.cssText = "display:flex;flex-wrap:wrap;gap:8px";
   const generate = button("Generate key");
+  const signIn = button("Sign in with this key");
+  signIn.id = "globe-pqc-lab-signin";
+  const savedSignIn = button("Sign in with saved lab key");
+  savedSignIn.id = "globe-pqc-lab-saved-signin";
   const selfTest = button("Self-test all suites");
   const close = button("Close");
-  row.append(generate, selfTest, close);
+  row.append(generate, signIn, savedSignIn, selfTest, close);
 
   const publicArea = el("textarea");
   publicArea.readOnly = true;
@@ -162,7 +168,9 @@ export function mountPqcLab(): void {
   fpBlock.append(el("strong", "Shared secret fingerprint (SHA-256)"), fp);
 
   root.append(title, hint, suiteLabel, row, status, actions, fpBlock);
-  document.body.append(root);
+  const modal = document.querySelector(".auth-modal:not(.admin-modal)");
+  if (modal instanceof HTMLElement) modal.append(root);
+  else document.body.append(root);
 
   const selectedSuite = (): PqcKemId => {
     const value = suiteSelect.value;
@@ -170,7 +178,7 @@ export function mountPqcLab(): void {
   };
   const refreshHint = () => {
     const suite = pqcKemSuite(selectedSuite());
-    hint.textContent = `${suite.label} in pure JavaScript (@noble/post-quantum). Public key ${suite.publicKey} bytes, ciphertext ${suite.cipherText} bytes. The secret stays in this page. The shared secret is shown only as a SHA-256 fingerprint. This is not a sign-in key.`;
+    hint.textContent = `${suite.label} in pure JavaScript (@noble/post-quantum). Public key ${suite.publicKey} bytes, ciphertext ${suite.cipherText} bytes. The secret stays on this device. Sign in from this lab sends a proof, not the secret. The shared secret is shown only as a SHA-256 fingerprint.`;
   };
   const setStatus = (message: string, isError = false) => {
     status.textContent = message;
@@ -182,7 +190,7 @@ export function mountPqcLab(): void {
     }
   };
   const setBusy = (busy: boolean) => {
-    const nodes = [generate, selfTest, encapsulate, decapsulate, clear, close, suiteSelect];
+    const nodes = [generate, signIn, savedSignIn, selfTest, encapsulate, decapsulate, clear, close, suiteSelect];
     for (let i = 0; i < nodes.length; i++) nodes[i]!.disabled = busy;
   };
   const showFp = (hex: string) => {
@@ -219,7 +227,7 @@ export function mountPqcLab(): void {
       cipherArea.value = "";
       showFp("");
       actions.hidden = false;
-      setStatus("Key ready. Share the public key. This is not a sign-in key.");
+      setStatus("Key ready. Share the public key, or sign in with it. The secret stays on this device.");
     } catch (error) {
       localKey = null;
       actions.hidden = true;
@@ -288,10 +296,77 @@ export function mountPqcLab(): void {
     clearLocal("Cleared the key-agreement secret from this page.");
   });
 
+  const signInBusy = (message: string, run: () => Promise<void>) => {
+    setBusy(true);
+    setStatus(message);
+    void run()
+      .catch((error: unknown) => {
+        setStatus(error instanceof Error ? error.message : "Lab sign-in failed.", true);
+        setBusy(false);
+      });
+  };
+  signIn.addEventListener("click", () => {
+    if (!localKey) {
+      setStatus("Generate a key first.", true);
+      return;
+    }
+    const current = localKey;
+    const secret = copyPqcSecret(current.id);
+    if (!secret) {
+      setStatus("Generate a key first.", true);
+      return;
+    }
+    signInBusy("Checking the key-agreement sign-in…", async () => {
+      try {
+        await signInWithLabKey({
+          family: "kem",
+          suite: current.suite,
+          publicKeyB64: current.publicKeyB64,
+          material: secret,
+          prove: (message, token) => kemLoginProof(current.id, token, message),
+        });
+      } finally {
+        secret.fill(0);
+      }
+    });
+  });
+  savedSignIn.addEventListener("click", () => {
+    const suite = selectedSuite();
+    signInBusy("Checking the saved lab key…", async () => {
+      const saved = await loadLabMaterial("kem", suite);
+      if (!saved) throw new Error("No saved key for this suite on this device.");
+      try {
+        await signInWithLabKey({
+          family: "kem",
+          suite,
+          publicKeyB64: saved.publicKeyB64,
+          material: saved.material,
+          prove: (message, token) => kemLoginProofFromSecret(suite, saved.material, token, message),
+        });
+      } finally {
+        saved.material.fill(0);
+      }
+    });
+  });
+
   close.addEventListener("click", () => {
     if (localKey) clearPqcSecret(localKey.id);
     localKey = null;
+    const parent = root.parentElement;
     root.remove();
-    window.dispatchEvent(new Event("globe-pqc-closed"));
+    if (parent instanceof HTMLElement && parent.classList.contains("auth-modal")) {
+      delete parent.dataset.globePqcLab;
+      if (!parent.querySelector("#globe-pqc-open")) {
+        const reopen = button("PQC key lab");
+        reopen.id = "globe-pqc-open";
+        reopen.style.width = "100%";
+        reopen.style.marginTop = "12px";
+        reopen.addEventListener("click", () => {
+          reopen.remove();
+          mountPqcLab();
+        });
+        parent.append(reopen);
+      }
+    }
   });
 }

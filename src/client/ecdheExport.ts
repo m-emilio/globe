@@ -6,6 +6,7 @@
 
 import {
   deriveEcdheFromPrivateMaterial,
+  ecdheLoginProof,
   ecdhePrivateKeyPem,
   ecdhePrivateKeyPemFilename,
   generateEcdheKeyPair,
@@ -20,6 +21,7 @@ import {
   peerPublicMaterial,
   readLabKeyFile,
 } from "./keyMaterial";
+import { loadLabMaterial, signInWithLabKey } from "./labVault";
 
 type EcdheExportDetail = {
   curve: string;
@@ -514,6 +516,37 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
   status.setAttribute("role", "status");
   status.style.cssText =
     "min-height:1.2em;margin:8px 0;font:12px/1.4 ui-monospace,monospace;color:#d7dcff;word-break:break-all";
+  const failSignIn = (button: HTMLButtonElement, error: unknown) => {
+    setDeriveStatus(status, "error", error instanceof Error ? error.message : "Lab sign-in failed.");
+    button.disabled = false;
+  };
+  const signInSaved = document.createElement("button");
+  signInSaved.type = "button";
+  signInSaved.id = "globe-ecdhe-saved-signin";
+  signInSaved.textContent = "Sign in with saved lab key";
+  signInSaved.style.cssText = BUTTON_STYLE;
+  signInSaved.addEventListener("click", () => {
+    const curve = selectedCurve;
+    signInSaved.disabled = true;
+    void loadLabMaterial("ecdhe", curve)
+      .then(async (saved) => {
+        if (!saved) throw new Error("No saved ECDHE key for this curve on this device.");
+        const pem = new TextDecoder().decode(saved.material);
+        try {
+          await signInWithLabKey({
+            family: "ecdhe",
+            suite: curve,
+            publicKeyB64: saved.publicKeyB64,
+            material: saved.material,
+            prove: (message, token) => ecdheLoginProof(curve, pem, token, message),
+          });
+        } finally {
+          saved.material.fill(0);
+        }
+      })
+      .catch((error: unknown) => failSignIn(signInSaved, error));
+  });
+  actions.append(signInSaved);
   const close = document.createElement("button");
   close.type = "button";
   close.textContent = "Close lab";
@@ -527,10 +560,37 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
     downloadButton.textContent = "Download .pem";
     downloadButton.style.cssText = BUTTON_STYLE;
     downloadButton.addEventListener("click", () => savePem(detail, ascNote));
+    const signInFresh = document.createElement("button");
+    signInFresh.type = "button";
+    signInFresh.id = "globe-ecdhe-signin";
+    signInFresh.textContent = "Sign in with this key";
+    signInFresh.style.cssText = BUTTON_STYLE;
+    signInFresh.addEventListener("click", () => {
+      const pem = detail.privateKeyPkcs8Pem;
+      const pub = detail.publicKeySpkiB64;
+      if (!pem || !pub) {
+        failSignIn(signInFresh, new Error("Generate or import an ECDHE key first."));
+        return;
+      }
+      const curve = asCurve(detail.curve);
+      const material = new TextEncoder().encode(pem);
+      signInFresh.disabled = true;
+      void signInWithLabKey({
+        family: "ecdhe",
+        suite: curve,
+        publicKeyB64: pub,
+        material,
+        prove: (message, token) => ecdheLoginProof(curve, pem, token, message),
+      })
+        .catch((error: unknown) => failSignIn(signInFresh, error))
+        .finally(() => {
+          material.fill(0);
+        });
+    });
     derive.addEventListener("click", () => {
       void runDerive(detail, status, derive);
     });
-    root.append(downloadButton, ascNote);
+    root.append(downloadButton, signInFresh, ascNote);
     root.append(
       field("Private key (PKCS#8 PEM)", detail.privateKeyPkcs8Pem),
       field("Private key (JWK, includes d)", JSON.stringify(detail.privateKeyJwk, null, 2)),
@@ -557,14 +617,14 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
         peerArea instanceof HTMLTextAreaElement ? peerArea.value : "",
       );
     });
-    root.append(peer, inspectPeer, derive, status);
+    root.append(peer, inspectPeer, derive);
   } else {
     const waiting = document.createElement("p");
     waiting.style.cssText = "margin:8px 0;font-size:13px;color:#c9c6ea";
-    waiting.textContent = "Generate a pair or import an ECDHE private key to derive.";
+    waiting.textContent = "Generate a pair or import an ECDHE private key to derive. A saved lab key can still sign in.";
     root.append(waiting);
   }
-  root.append(close);
+  root.append(status, close);
   const modal = signInModal();
   if (modal) modal.append(root);
   else document.body.append(root);

@@ -95,8 +95,14 @@ function patchSessionLabel(): void {
     const status = block.querySelector(".auth-user-meta-status");
     if (!(status instanceof HTMLElement)) continue;
     const text = status.textContent || "";
-    if (!(text.includes("ML-DSA-") || text.includes("SLH-DSA-")) || !text.includes("PGP session")) continue;
-    status.textContent = text.replace("PGP session", "ML-DSA session");
+    if (!text.includes("PGP session")) continue;
+    const replacement = text.includes("ML-DSA-") || text.includes("SLH-DSA-")
+      ? "ML-DSA session"
+      : text.includes("ECDHE-") || text.includes("KEM-")
+        ? "Key lab session"
+        : "";
+    if (!replacement) continue;
+    status.textContent = text.replace("PGP session", replacement);
     const print = block.querySelector(".auth-user-fingerprint");
     if (print instanceof HTMLElement && print.title === "Full OpenPGP fingerprint") {
       print.title = "Account fingerprint";

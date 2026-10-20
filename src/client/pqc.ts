@@ -19,6 +19,7 @@ import {
   ml_kem768_x25519,
 } from "@noble/post-quantum/hybrid.js";
 import { equalBytes } from "@noble/post-quantum/utils.js";
+import { hmacLogin, macKeyFromShared } from "../server/labMac";
 
 export const PQC_SUITE_ID = "ml-kem768-x25519" as const;
 export const PQC_SUITE_LABEL = "X-Wing (ML-KEM-768 + X25519)";
@@ -329,6 +330,49 @@ export async function encapsulateToPeer(
     wipe(enc.cipherText);
     wipe(enc.sharedSecret);
   }
+}
+
+/** MAC over a server ciphertext. The shared secret is wiped and is not returned. */
+export async function kemLoginProof(
+  id: string,
+  ciphertextB64: string,
+  message: string,
+): Promise<string> {
+  const stored = secrets.get(id);
+  if (!stored) throw new Error("Generate a local key first.");
+  return kemLoginProofFromSecret(stored.suite, stored.secret, ciphertextB64, message);
+}
+
+export async function kemLoginProofFromSecret(
+  suite: PqcKemId,
+  secret: Uint8Array,
+  ciphertextB64: string,
+  message: string,
+): Promise<string> {
+  const expected = assertSuiteLengths(suite);
+  const cipherText = b64ToBytes(ciphertextB64);
+  if (cipherText.length !== expected.cipherText) {
+    wipe(cipherText);
+    throw new Error("That sign-in challenge does not match this suite.");
+  }
+  const shared = KEMS[suite].decapsulate(cipherText, secret);
+  wipe(cipherText);
+  try {
+    const macKey = await macKeyFromShared(shared, "kem", suite);
+    try {
+      return bytesToB64(await hmacLogin(macKey, message));
+    } finally {
+      macKey.fill(0);
+    }
+  } finally {
+    wipe(shared);
+  }
+}
+
+export function copyPqcSecret(id: string): Uint8Array | null {
+  const stored = secrets.get(id);
+  if (!stored) return null;
+  return new Uint8Array(stored.secret);
 }
 
 /** Responder: recover the session from a ciphertext and the local secret. */

@@ -1,8 +1,33 @@
 /**
  * Tiny always-loaded watcher. ML-DSA stays in a separate chunk until the
- * account modal opens.
+ * account modal opens. The session label is plain text, so it can update
+ * before that chunk loads.
  */
+function patchSessionLabel(): void {
+  const nodes = document.querySelectorAll(".auth-user-meta");
+  for (let i = 0; i < nodes.length; i++) {
+    const block = nodes[i];
+    if (!(block instanceof HTMLElement)) continue;
+    const status = block.querySelector(".auth-user-meta-status");
+    if (!(status instanceof HTMLElement)) continue;
+    const text = status.textContent || "";
+    if (!text.includes("PGP session")) continue;
+    const replacement = text.includes("ML-DSA-") || text.includes("SLH-DSA-")
+      ? "ML-DSA session"
+      : text.includes("ECDHE-") || text.includes("KEM-")
+        ? "Key lab session"
+        : "";
+    if (!replacement) continue;
+    status.textContent = text.replace("PGP session", replacement);
+    const print = block.querySelector(".auth-user-fingerprint");
+    if (print instanceof HTMLElement && print.title === "Full OpenPGP fingerprint") {
+      print.title = "Account fingerprint";
+    }
+  }
+}
+
 function watch(): void {
+  patchSessionLabel();
   const modal = document.querySelector(".auth-modal:not(.admin-modal)");
   if (!(modal instanceof HTMLElement)) return;
   if (modal.dataset.globePqcLogin === "1") return;
@@ -13,5 +38,7 @@ function watch(): void {
 }
 
 const observer = new MutationObserver(() => watch());
-observer.observe(document.documentElement, { subtree: true, childList: true });
+observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
 watch();
+
+export {};
