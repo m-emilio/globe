@@ -16,6 +16,7 @@ import {
   type AuthEnv,
 } from "./auth";
 import { createPqcChallenge, loginPqcUser, registerPqcUser } from "./pqcAuth";
+import { createLabChallenge, loginLabUser, registerLabUser } from "./labAuth";
 import {
   adminClaimSession,
   adminDeleteUser,
@@ -4663,6 +4664,27 @@ export default {
         return methodNotAllowedResponse();
       }
       return loginPqcUser(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/lab/register") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return registerLabUser(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/lab/challenge") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return createLabChallenge(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/auth/lab/login") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return loginLabUser(request, env, applySecurityHeaders);
     }
 
     // --- Admin portal (allowlist + secret + PGP elevation for mutations) ---
