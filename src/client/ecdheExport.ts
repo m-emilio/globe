@@ -83,8 +83,8 @@ function mountLauncher(): void {
   button.style.cssText = [
     "position:fixed",
     "left:max(12px, env(safe-area-inset-left))",
-    "bottom:max(12px, env(safe-area-inset-bottom))",
-    "z-index:900",
+    "bottom:max(108px, calc(env(safe-area-inset-bottom) + 100px))",
+    "z-index:1200",
     "min-height:44px",
     "padding:10px 14px",
     "border-radius:999px",
@@ -275,10 +275,10 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
   root.style.cssText = [
     "position:fixed",
     "left:max(12px, env(safe-area-inset-left))",
-    "bottom:max(12px, env(safe-area-inset-bottom))",
+    "bottom:max(108px, calc(env(safe-area-inset-bottom) + 100px))",
     "z-index:1002",
     "width:min(440px, calc(100vw - 24px))",
-    "max-height:min(70dvh, 760px)",
+    "max-height:min(62dvh, 640px)",
     "overflow:auto",
     "padding:14px",
     "border-radius:12px",
