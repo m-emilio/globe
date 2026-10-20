@@ -49,6 +49,11 @@ export type UserRecord = {
   createdAt: string;
   /** Future Stripe unlock; ignored when TRANSIT_REQUIRE_PAYMENT is off. */
   transitPaid?: boolean;
+  /**
+   * Paid Stripe access under the transit minimum, or an admin grant.
+   * Lifts the per-network sign-in key cap for networks that already hold this key.
+   */
+  unlimitedKeys?: boolean;
 };
 
 export type SessionRecord = {
@@ -74,6 +79,7 @@ export type PublicUser = {
   fingerprint: string;
   primaryUserId: string | null;
   transitPaid: boolean;
+  unlimitedKeys: boolean;
 };
 
 function parseCsvList(raw?: string): string[] {
@@ -474,6 +480,7 @@ function toPublicUser(user: UserRecord): PublicUser {
     fingerprint: user.fingerprint,
     primaryUserId: user.primaryUserId,
     transitPaid: Boolean(user.transitPaid),
+    unlimitedKeys: Boolean(user.unlimitedKeys),
   };
 }
 
@@ -727,13 +734,34 @@ export async function getSessionUser(
 }
 
 export const MAX_KEYS_PER_IP = 3;
+/** Storage ceiling after an unlock. The product cap is lifted; this only bounds the KV record. */
+const UNLIMITED_KEY_STORE_MAX = 10_000;
+
+/**
+ * Paid amount at or above minCents keeps transit.
+ * A paid amount above zero and below that minimum unlocks more sign-in keys.
+ * Unpaid, free, and missing amounts unlock nothing.
+ */
+export function stripeAccessKind(
+  minCents: number,
+  paymentStatus: string,
+  amountTotal: number | null,
+): "transit" | "unlimited_keys" | "none" {
+  if (paymentStatus !== "paid") return "none";
+  if (amountTotal == null || !Number.isFinite(amountTotal) || amountTotal <= 0) return "none";
+  const min = Number.isFinite(minCents) && minCents > 0 ? Math.round(minCents) : 2000;
+  if (amountTotal >= min) return "transit";
+  return "unlimited_keys";
+}
 
 export function ipKeyDecision(
   existing: readonly string[],
   fingerprint: string,
   limit = MAX_KEYS_PER_IP,
+  unlimited = false,
 ): "allow" | "known" | "block" {
   if (existing.includes(fingerprint)) return "known";
+  if (unlimited) return "allow";
   if (existing.length >= limit) return "block";
   return "allow";
 }
@@ -765,6 +793,14 @@ function readIpFingerprints(raw: string | null): string[] {
   }
 }
 
+async function networkHasUnlimitedKeys(env: AuthEnv, fingerprints: readonly string[]): Promise<boolean> {
+  for (let i = 0; i < fingerprints.length; i++) {
+    const user = await getUserByFingerprint(env, fingerprints[i]!);
+    if (user?.unlimitedKeys) return true;
+  }
+  return false;
+}
+
 /** Block a new key when this network already holds MAX_KEYS_PER_IP distinct keys. */
 export async function enforceIpKeyLimit(
   env: AuthEnv,
@@ -777,6 +813,7 @@ export async function enforceIpKeyLimit(
   if (!normalized) return null;
   const existing = readIpFingerprints(await env.BILLING_KV.get(await ipKeyStorageKey(clientIp(request))));
   if (ipKeyDecision(existing, normalized) !== "block") return null;
+  if (await networkHasUnlimitedKeys(env, existing)) return null;
   return json(
     {
       error: "key_limit",
@@ -794,9 +831,13 @@ export async function rememberIpKey(env: AuthEnv, request: Request, fingerprint:
   if (!normalized) return;
   const storageKey = await ipKeyStorageKey(clientIp(request));
   const existing = readIpFingerprints(await env.BILLING_KV.get(storageKey));
-  if (ipKeyDecision(existing, normalized) !== "allow") return;
+  const preliminary = ipKeyDecision(existing, normalized);
+  if (preliminary === "known") return;
+  const unlimited = preliminary === "block" && (await networkHasUnlimitedKeys(env, existing));
+  if (preliminary === "block" && !unlimited) return;
   existing.push(normalized);
-  await env.BILLING_KV.put(storageKey, JSON.stringify({ fingerprints: existing.slice(0, MAX_KEYS_PER_IP) }));
+  const cap = unlimited ? UNLIMITED_KEY_STORE_MAX : MAX_KEYS_PER_IP;
+  await env.BILLING_KV.put(storageKey, JSON.stringify({ fingerprints: existing.slice(0, cap) }));
 }
 
 export async function registerUser(
@@ -1546,6 +1587,21 @@ export async function setUserTransitPaid(
   if (!raw) return null;
   const user = JSON.parse(raw) as UserRecord;
   user.transitPaid = paid;
+  await env.BILLING_KV.put(userKey(userId), JSON.stringify(user));
+  return user;
+}
+
+/** Grant or revoke the under-$20 unlimited sign-in key entitlement. */
+export async function setUserUnlimitedKeys(
+  env: AuthEnv,
+  userId: string,
+  unlimited: boolean,
+): Promise<UserRecord | null> {
+  if (!env.BILLING_KV) return null;
+  const raw = await env.BILLING_KV.get(userKey(userId));
+  if (!raw) return null;
+  const user = JSON.parse(raw) as UserRecord;
+  user.unlimitedKeys = unlimited;
   await env.BILLING_KV.put(userKey(userId), JSON.stringify(user));
   return user;
 }

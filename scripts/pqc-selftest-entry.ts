@@ -1,6 +1,6 @@
 import { mlDsaLoginSelfTest, slhDsaLoginSelfTest } from "../src/client/mlDsa.ts";
 import { pqcSelfTest } from "../src/client/pqc.ts";
-import { ipKeyDecision, MAX_KEYS_PER_IP } from "../src/server/auth.ts";
+import { ipKeyDecision, MAX_KEYS_PER_IP, stripeAccessKind } from "../src/server/auth.ts";
 import { labLoginSelfTest } from "../src/server/labAuth.ts";
 
 const result = await pqcSelfTest();
@@ -30,11 +30,16 @@ if (
   held.length !== MAX_KEYS_PER_IP ||
   ipKeyDecision([], sample) !== "allow" ||
   ipKeyDecision([sample], sample) !== "known" ||
-  ipKeyDecision(held, sample) !== "block"
+  ipKeyDecision(held, sample) !== "block" ||
+  ipKeyDecision(held, sample, MAX_KEYS_PER_IP, true) !== "allow" ||
+  stripeAccessKind(2000, "paid", 1999) !== "unlimited_keys" ||
+  stripeAccessKind(2000, "paid", 2000) !== "transit" ||
+  stripeAccessKind(2000, "paid", 0) !== "none" ||
+  stripeAccessKind(2000, "unpaid", 500) !== "none"
 ) {
   console.error("ip key limit self-test failed");
   process.exit(1);
 }
 console.log(
-  `pqc self-test ok suite=${result.suite} public=${result.publicKeyBytes} secret=${result.secretKeyBytes} ciphertext=${result.cipherTextBytes} shared=${result.sharedSecretBytes} fingerprint-hex=${result.sharedSecretSha256Hex.length} kems=${result.kemSuites} dsa=${dsa.suites} slh=${slh.suites} slh-signed=${slh.signed} lab=${lab.ecdhe}/${lab.kem} keys-per-ip=${MAX_KEYS_PER_IP}`,
+  `pqc self-test ok suite=${result.suite} public=${result.publicKeyBytes} secret=${result.secretKeyBytes} ciphertext=${result.cipherTextBytes} shared=${result.sharedSecretBytes} fingerprint-hex=${result.sharedSecretSha256Hex.length} kems=${result.kemSuites} dsa=${dsa.suites} slh=${slh.suites} slh-signed=${slh.signed} lab=${lab.ecdhe}/${lab.kem} keys-per-ip=${MAX_KEYS_PER_IP} stripe-under-20=unlimited`,
 );

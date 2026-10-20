@@ -14,6 +14,8 @@ import {
   rateLimitOrNull,
   rateLimitDurable,
   setUserTransitPaid,
+  setUserUnlimitedKeys,
+  stripeAccessKind,
   clientIp,
   readJsonBody,
   type AuthEnv,
@@ -94,6 +96,7 @@ export type EntitlementRecord = {
   currency: string | null;
   grantedAt: string;
   source: "webhook" | "claim";
+  kind: "transit" | "unlimited_keys";
 };
 
 type BillingCatalog = {
@@ -324,7 +327,10 @@ export async function grantPaidToUser(
   }
 
   const qual = paymentQualifies(env, input.paymentStatus, input.amountTotal);
-  if (!qual.ok) {
+  const kind = qual.ok
+    ? "transit"
+    : stripeAccessKind(minAmountCents(env), input.paymentStatus, input.amountTotal);
+  if (kind === "none") {
     return null;
   }
 
@@ -346,7 +352,10 @@ export async function grantPaidToUser(
     }
   }
 
-  const user = await setUserTransitPaid(env, input.userId, true);
+  const user =
+    kind === "transit"
+      ? await setUserTransitPaid(env, input.userId, true)
+      : await setUserUnlimitedKeys(env, input.userId, true);
   if (!user) return null;
 
   const record: EntitlementRecord = {
@@ -360,6 +369,7 @@ export async function grantPaidToUser(
     currency: input.currency,
     grantedAt: new Date().toISOString(),
     source: input.source,
+    kind,
   };
 
   await env.BILLING_KV.put(
@@ -498,13 +508,17 @@ export async function claimCheckoutSession(
         checkout.payment_status,
         checkout.amount_total,
       );
+      const underMinimum =
+        stripeAccessKind(minAmountCents(env), checkout.payment_status, checkout.amount_total) ===
+        "unlimited_keys";
+      const qualified = qual.ok || underMinimum;
       return json(
         {
-          error: qual.ok ? "claim_unavailable" : "payment_not_complete",
-          message: qual.ok
+          error: qualified ? "claim_unavailable" : "payment_not_complete",
+          message: qualified
             ? "Session was already claimed by another account."
             : "Payment is incomplete or does not meet the minimum amount.",
-          code: qual.ok ? "claim_unavailable" : qual.reason,
+          code: qualified || qual.ok ? "claim_unavailable" : qual.reason,
         },
         { status: 402 },
         applySecurityHeaders,
@@ -512,7 +526,11 @@ export async function claimCheckoutSession(
     }
 
     return json(
-      { hasAccess: true, authenticated: true },
+      {
+        hasAccess: record.kind === "transit",
+        unlimitedKeys: record.kind === "unlimited_keys",
+        authenticated: true,
+      },
       { status: 200 },
       applySecurityHeaders,
     );

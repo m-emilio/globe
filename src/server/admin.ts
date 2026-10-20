@@ -7,7 +7,7 @@
  * - Mutating actions require ALL of:
  *     1) Logged-in session whose fingerprint is in ADMIN_FINGERPRINTS (or id in ADMIN_USER_IDS)
  *     2) ADMIN_ACTION_SECRET Worker secret (mandatory — fail closed if unset; never store in KV)
- *     3) Short-lived elevation token from a fresh PGP signature (proves key still held)
+ *     3) Short-lived elevation token from a fresh device-key signature (proves key still held)
  * - Admin UI may generate a candidate secret in browser memory only; operator must set it
  *   as a Cloudflare Worker secret (wrangler secret put / dashboard). Never KV, git, or logs.
  * - Read-only lookup/audit need (1) only.
@@ -26,10 +26,17 @@ import {
   normalizeFingerprint,
   rateLimitDurable,
   setUserTransitPaid,
+  setUserUnlimitedKeys,
   type AuthEnv,
   type UserRecord,
 } from "./auth";
 import { grantPaidToUser, type BillingEnv } from "./billing";
+import {
+  b64ToFixedBytes,
+  decodeStoredPublicKey,
+  PQC_SIG_SUITES,
+  verifyPqcSignature,
+} from "./pqcVerify";
 
 export type AdminEnv = AuthEnv &
   BillingEnv & {
@@ -106,6 +113,7 @@ function publicUser(u: UserRecord) {
     fingerprint: u.fingerprint,
     primaryUserId: u.primaryUserId,
     transitPaid: Boolean(u.transitPaid),
+    unlimitedKeys: Boolean(u.unlimitedKeys),
     createdAt: u.createdAt,
   };
 }
@@ -149,7 +157,7 @@ async function requireElevation(
         {
           error: "elevation_required",
           message:
-            "Privileged actions need a fresh PGP step-up. Call /api/admin/elevate-challenge then /api/admin/elevate.",
+            "Privileged actions need a fresh device-key step-up. Call /api/admin/elevate-challenge then /api/admin/elevate.",
         },
         { status: 403 },
         applySecurityHeaders,
@@ -371,6 +379,8 @@ export async function adminStatus(
         mutate: [
           "grant_transit",
           "revoke_transit",
+          "grant_unlimited_keys",
+          "revoke_unlimited_keys",
           "claim_session",
           "delete_user",
         ],
@@ -483,7 +493,7 @@ export async function adminElevate(
   );
   if (limited) return limited;
 
-  let body: { challengeId?: string; signatureArmored?: string } = {};
+  let body: { challengeId?: string; signatureArmored?: string; pqcSignature?: string } = {};
   try {
     body = (await request.json()) as typeof body;
     assertNoPrivateKeyMaterial(body);
@@ -507,23 +517,19 @@ export async function adminElevate(
 
   const challengeId = body.challengeId?.trim() || "";
   const signatureArmored = body.signatureArmored?.trim() || "";
-  if (
-    !challengeId ||
-    !/^[a-f0-9]{16,128}$/i.test(challengeId) ||
-    !signatureArmored ||
-    signatureArmored.length > MAX_SIGNATURE_CHARS
-  ) {
+  const pqcSignature = body.pqcSignature?.trim() || "";
+  if (!challengeId || !/^[a-f0-9]{16,128}$/i.test(challengeId)) {
     return json(
       {
         error: "invalid_elevate",
-        message: "challengeId and signatureArmored are required.",
+        message: "challengeId and a device signature are required.",
       },
       { status: 400 },
       applySecurityHeaders,
     );
   }
 
-  if (/BEGIN PGP PRIVATE KEY BLOCK/i.test(signatureArmored)) {
+  if (/BEGIN PGP PRIVATE KEY BLOCK/i.test(signatureArmored) || /BEGIN PGP PRIVATE KEY BLOCK/i.test(pqcSignature)) {
     return json(
       { error: "private_key_rejected" },
       { status: 400 },
@@ -574,21 +580,37 @@ export async function adminElevate(
   }
 
   try {
-    const publicKey = await openpgp.readKey({
-      armoredKey: gate.user.publicKeyArmored,
-    });
-    const message = await openpgp.createMessage({ text: challenge.message });
-    const signature = await openpgp.readSignature({
-      armoredSignature: signatureArmored,
-    });
-    const result = await openpgp.verify({
-      message,
-      signature,
-      verificationKeys: publicKey,
-    });
-    const sig = result.signatures[0];
-    if (!sig) throw new Error("no_signature");
-    await sig.verified;
+    const storedPqc = decodeStoredPublicKey(gate.user.publicKeyArmored);
+    if (storedPqc) {
+      if (!pqcSignature || pqcSignature.length > 70_000) throw new Error("missing_signature");
+      const signature = b64ToFixedBytes(pqcSignature, PQC_SIG_SUITES[storedPqc.suite].signature);
+      const ok = verifyPqcSignature(
+        storedPqc.suite,
+        signature,
+        challenge.message,
+        storedPqc.publicKey,
+      );
+      if (!ok) throw new Error("bad_signature");
+    } else {
+      if (!signatureArmored || signatureArmored.length > MAX_SIGNATURE_CHARS) {
+        throw new Error("missing_signature");
+      }
+      const publicKey = await openpgp.readKey({
+        armoredKey: gate.user.publicKeyArmored,
+      });
+      const message = await openpgp.createMessage({ text: challenge.message });
+      const signature = await openpgp.readSignature({
+        armoredSignature: signatureArmored,
+      });
+      const result = await openpgp.verify({
+        message,
+        signature,
+        verificationKeys: publicKey,
+      });
+      const sig = result.signatures[0];
+      if (!sig) throw new Error("no_signature");
+      await sig.verified;
+    }
   } catch {
     await writeAudit(env, {
       at: new Date().toISOString(),
@@ -835,6 +857,138 @@ export async function adminRevokeTransit(
   );
 }
 
+export async function adminGrantUnlimitedKeys(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminMutation(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+
+  let body: { userId?: string; fingerprint?: string; note?: string } = {};
+  try {
+    body = (await request.json()) as typeof body;
+    assertNoPrivateKeyMaterial(body);
+  } catch {
+    body = {};
+  }
+
+  let user: UserRecord | null = null;
+  if (body.userId?.trim()) {
+    user = await getUserById(env, body.userId.trim());
+  }
+  if (!user && body.fingerprint?.trim()) {
+    user = await getUserByFingerprint(env, body.fingerprint.trim());
+  }
+  if (!user) {
+    return json(
+      {
+        error: "user_not_found",
+        message: "Provide a valid userId or fingerprint.",
+      },
+      { status: 404 },
+      applySecurityHeaders,
+    );
+  }
+
+  const updated = await setUserUnlimitedKeys(env, user.id, true);
+  if (!updated) {
+    return json(
+      { error: "update_failed" },
+      { status: 500 },
+      applySecurityHeaders,
+    );
+  }
+
+  await writeAudit(env, {
+    at: new Date().toISOString(),
+    adminUserId: gate.user.id,
+    adminFingerprint: gate.user.fingerprint,
+    action: "grant_unlimited_keys",
+    targetUserId: user.id,
+    targetFingerprint: user.fingerprint,
+    detail: body.note?.slice(0, 200) || "manual grant",
+    ip: clientIp(request),
+    ok: true,
+  });
+
+  return json(
+    {
+      ok: true,
+      user: publicUser(updated),
+      message: "Unlimited sign-in keys granted for networks that hold this account.",
+    },
+    { status: 200 },
+    applySecurityHeaders,
+  );
+}
+
+export async function adminRevokeUnlimitedKeys(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminMutation(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+
+  let body: { userId?: string; fingerprint?: string; note?: string } = {};
+  try {
+    body = (await request.json()) as typeof body;
+    assertNoPrivateKeyMaterial(body);
+  } catch {
+    body = {};
+  }
+
+  let user: UserRecord | null = null;
+  if (body.userId?.trim()) {
+    user = await getUserById(env, body.userId.trim());
+  }
+  if (!user && body.fingerprint?.trim()) {
+    user = await getUserByFingerprint(env, body.fingerprint.trim());
+  }
+  if (!user) {
+    return json(
+      {
+        error: "user_not_found",
+        message: "Provide a valid userId or fingerprint.",
+      },
+      { status: 404 },
+      applySecurityHeaders,
+    );
+  }
+
+  const updated = await setUserUnlimitedKeys(env, user.id, false);
+  if (!updated) {
+    return json(
+      { error: "update_failed" },
+      { status: 500 },
+      applySecurityHeaders,
+    );
+  }
+
+  await writeAudit(env, {
+    at: new Date().toISOString(),
+    adminUserId: gate.user.id,
+    adminFingerprint: gate.user.fingerprint,
+    action: "revoke_unlimited_keys",
+    targetUserId: user.id,
+    targetFingerprint: user.fingerprint,
+    detail: body.note?.slice(0, 200) || "manual revoke",
+    ip: clientIp(request),
+    ok: true,
+  });
+
+  return json(
+    {
+      ok: true,
+      user: publicUser(updated),
+      message: "Unlimited sign-in keys revoked. This network is back to 3 keys.",
+    },
+    { status: 200 },
+    applySecurityHeaders,
+  );
+}
+
 /**
  * Admin claims a paid Stripe Checkout session for a user.
  * Requires full mutation gate (secret + PGP elevation).
@@ -1000,6 +1154,7 @@ export async function adminClaimSession(
         user: updated ? publicUser(updated) : publicUser(target),
         sessionId,
         paymentStatus: checkout.payment_status,
+        kind: record.kind,
       },
       { status: 200 },
       applySecurityHeaders,
