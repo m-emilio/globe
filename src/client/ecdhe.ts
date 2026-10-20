@@ -118,6 +118,22 @@ function toPkcs8Pem(pkcs8B64: string): string {
   return `-----BEGIN PRIVATE KEY-----\n${lines.join("\n")}\n-----END PRIVATE KEY-----`;
 }
 
+/** ASCII-armored PKCS#8 for a local `.asc` download. Not an OpenPGP login key. */
+export function ecdhePrivateKeyAsc(pem: string): string {
+  const trimmed = pem.trim();
+  if (
+    !trimmed.startsWith("-----BEGIN PRIVATE KEY-----") ||
+    !trimmed.endsWith("-----END PRIVATE KEY-----")
+  ) {
+    throw new Error("ECDHE .asc export needs a PKCS#8 private key.");
+  }
+  return `${trimmed}\n`;
+}
+
+export function ecdhePrivateKeyAscFilename(curve: EcdheCurveId): string {
+  return `globe-ecdhe-${curve}-private.asc`;
+}
+
 function publishEcdheExport(detail: {
   curve: EcdheCurveId;
   privateKeyPkcs8Pem: string;
@@ -510,6 +526,14 @@ export async function ecdheSelfTest(
   }
   if (fromPem.sessionKey.extractable || fromJwk.sessionKey.extractable || d1.sessionKey.extractable) {
     throw new Error("ECDHE self-test failed: session key was extractable");
+  }
+  const asc = ecdhePrivateKeyAsc(a.privateKeyPkcs8Pem);
+  if (
+    !asc.startsWith("-----BEGIN PRIVATE KEY-----") ||
+    !asc.endsWith("-----END PRIVATE KEY-----\n") ||
+    asc.includes("PGP PRIVATE KEY")
+  ) {
+    throw new Error("ECDHE self-test failed: .asc armor was not PKCS#8");
   }
   return {
     ok: true,

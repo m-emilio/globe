@@ -7,6 +7,8 @@
 
 import {
   deriveEcdheFromPrivateMaterial,
+  ecdhePrivateKeyAsc,
+  ecdhePrivateKeyAscFilename,
   type EcdheCurveId,
 } from "./ecdhe";
 
@@ -196,8 +198,20 @@ function showPanel(detail: EcdheExportDetail): void {
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const hint = document.createElement("p");
   hint.textContent =
-    "Ephemeral ECDHE only. This is not an OpenPGP login key and it is not uploaded. Copy PKCS#8 or the private JWK, then derive with the peer public key.";
+    "Ephemeral ECDHE only. This is not an OpenPGP login key and it is not uploaded. The .asc file is the PKCS#8 private key, saved on this device. Copy it or the private JWK, then derive with the peer public key.";
   hint.style.cssText = "margin:0 0 8px;color:#c9c6ea;font-size:13px";
+
+  const download = document.createElement("button");
+  download.type = "button";
+  download.id = "globe-ecdhe-download-asc";
+  download.textContent = "Download .asc";
+  download.style.cssText = `${BUTTON_STYLE};margin:0 8px 8px 0`;
+
+  const ascNote = document.createElement("p");
+  ascNote.id = "globe-ecdhe-asc-note";
+  ascNote.hidden = true;
+  ascNote.setAttribute("role", "status");
+  ascNote.style.cssText = "margin:0 0 8px;font-size:12px;color:#d7dcff";
 
   const derive = document.createElement("button");
   derive.type = "button";
@@ -220,10 +234,15 @@ function showPanel(detail: EcdheExportDetail): void {
   derive.addEventListener("click", () => {
     void runDerive(detail, status, derive);
   });
+  download.addEventListener("click", () => {
+    saveAsc(detail, ascNote);
+  });
 
   root.append(
     title,
     hint,
+    download,
+    ascNote,
     field("Private key (PKCS#8 PEM)", detail.privateKeyPkcs8Pem),
     field("Private key (JWK, includes d)", JSON.stringify(detail.privateKeyJwk, null, 2)),
   );
@@ -232,6 +251,32 @@ function showPanel(detail: EcdheExportDetail): void {
   }
   root.append(peerField(), derive, status, close);
   document.body.append(root);
+  saveAsc(detail, ascNote);
+}
+
+function saveAsc(detail: EcdheExportDetail, note: HTMLElement): void {
+  let filename = "globe-ecdhe-private.asc";
+  try {
+    filename = ecdhePrivateKeyAscFilename(asCurve(detail.curve));
+    const asc = ecdhePrivateKeyAsc(detail.privateKeyPkcs8Pem);
+    const blob = new Blob([asc], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    note.hidden = false;
+    note.id = "globe-ecdhe-asc-saved";
+    note.textContent = `Saved ${filename}. This is not an OpenPGP login key.`;
+  } catch (error) {
+    note.hidden = false;
+    note.id = "globe-ecdhe-asc-error";
+    note.textContent = error instanceof Error ? error.message : "Could not save the .asc file.";
+  }
 }
 
 function onExport(event: Event): void {
