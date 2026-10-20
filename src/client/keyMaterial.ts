@@ -74,6 +74,9 @@ export function sanitizeKeyMaterial(input: string): SanitizedKeyMaterial {
   if (text.length > KEY_MATERIAL_MAX_CHARS) {
     return { kind: "rejected", reason: "Key material is too large." };
   }
+  if (hasMarkup(text) || /&(?:#\d+|#x[0-9a-f]+|[a-z]{2,12});/i.test(text)) {
+    return { kind: "rejected", reason: "Unsupported content in the key field." };
+  }
   const pgp = armorBlock(text, "pgp");
   const pkcs8 = armorBlock(text, "pkcs8");
   if (pgp && pkcs8) return { kind: "rejected", reason: "Mixed key formats." };
@@ -87,10 +90,127 @@ export function sanitizeKeyMaterial(input: string): SanitizedKeyMaterial {
   if (/^[A-Za-z0-9+/=]+$/.test(b64) && b64.length >= 40 && b64.length <= 4000) {
     return { kind: "spki", b64 };
   }
-  return {
-    kind: "rejected",
-    reason: "Paste an OpenPGP private key (.asc) or an ECDHE private key.",
-  };
+  return { kind: "rejected", reason: "Unrecognized key material." };
+}
+
+/** Sign-in picker. Extensions only — a MIME such as text/plain hides .asc on iOS. */
+export const LOGIN_FILE_ACCEPT = ".asc,.pgp,.gpg";
+/** Lab picker. PKCS#8 uses .pem so it cannot be confused with an OpenPGP .asc. */
+export const LAB_FILE_ACCEPT = ".pem";
+
+const LOGIN_EXTENSIONS = new Set([".asc", ".pgp", ".gpg"]);
+const LAB_EXTENSIONS = new Set([".pem"]);
+
+function keyFilenameExtension(
+  filename: string,
+  allowed: ReadonlySet<string>,
+): { ok: true; extension: string } | { ok: false; reason: string } {
+  if (typeof filename !== "string" || filename.length < 3 || filename.length > 120) {
+    return { ok: false, reason: "That file name is not allowed." };
+  }
+  if (/[\u0000-\u001F\u007F\u202A-\u202E\u2066-\u2069]/.test(filename)) {
+    return { ok: false, reason: "That file name is not allowed." };
+  }
+  if (/[\\/<>:"|?*#%]/.test(filename) || /[\s.]$/.test(filename)) {
+    return { ok: false, reason: "That file name is not allowed." };
+  }
+  const parts = filename.split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return { ok: false, reason: "That file name is not allowed." };
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9 _-]{0,80}$/.test(parts[0])) {
+    return { ok: false, reason: "That file name is not allowed." };
+  }
+  const extension = `.${parts[1].toLowerCase()}`;
+  if (!allowed.has(extension)) {
+    return { ok: false, reason: "That file extension is not allowed here." };
+  }
+  return { ok: true, extension };
+}
+
+/** Reject types that execute or render. Empty and generic binary types are ignored. */
+export function isActiveUploadType(type: string): boolean {
+  const value = type.trim().toLowerCase().split(";")[0]?.trim() ?? "";
+  return (
+    value === "text/html" ||
+    value === "application/xhtml+xml" ||
+    value === "image/svg+xml" ||
+    value === "text/xml" ||
+    value === "application/xml" ||
+    value === "text/javascript" ||
+    value === "application/javascript"
+  );
+}
+
+export function acceptLoginPaste(input: string): SanitizedKeyMaterial {
+  const clean = sanitizeKeyMaterial(input);
+  if (clean.kind === "openpgp-private") return clean;
+  if (clean.kind === "pkcs8" || clean.kind === "private-jwk") {
+    return { kind: "rejected", reason: "That file is an ECDHE .pem. Use the key lab." };
+  }
+  if (clean.kind === "public-jwk" || clean.kind === "spki") {
+    return { kind: "rejected", reason: "That file is a public key. Sign-in needs the private key .asc." };
+  }
+  if (clean.kind === "rejected" && clean.reason === "Unrecognized key material.") {
+    return {
+      kind: "rejected",
+      reason: "Sign-in needs an OpenPGP private key (.asc, .pgp, or .gpg).",
+    };
+  }
+  return clean;
+}
+
+export function acceptLabPaste(input: string): SanitizedKeyMaterial {
+  const clean = sanitizeKeyMaterial(input);
+  if (clean.kind === "pkcs8" || clean.kind === "private-jwk") return clean;
+  if (clean.kind === "openpgp-private") {
+    return {
+      kind: "rejected",
+      reason: "That file is an OpenPGP login key. Import it on the sign-in screen.",
+    };
+  }
+  if (clean.kind === "public-jwk" || clean.kind === "spki") {
+    return { kind: "rejected", reason: "The lab needs an ECDHE private key, not a public key." };
+  }
+  if (clean.kind === "rejected" && clean.reason === "Unrecognized key material.") {
+    return { kind: "rejected", reason: "The lab needs an ECDHE .pem or a private JWK." };
+  }
+  return clean;
+}
+
+export function readLoginKeyFile(file: {
+  name: string;
+  type: string;
+  text: string;
+}): SanitizedKeyMaterial {
+  if (isActiveUploadType(file.type)) {
+    return { kind: "rejected", reason: "That file type is not allowed." };
+  }
+  const named = keyFilenameExtension(file.name, LOGIN_EXTENSIONS);
+  if (!named.ok) return { kind: "rejected", reason: named.reason };
+  return acceptLoginPaste(file.text);
+}
+
+export function readLabKeyFile(file: {
+  name: string;
+  type: string;
+  text: string;
+}): SanitizedKeyMaterial {
+  if (isActiveUploadType(file.type)) {
+    return { kind: "rejected", reason: "That file type is not allowed." };
+  }
+  const named = keyFilenameExtension(file.name, LAB_EXTENSIONS);
+  if (!named.ok) return { kind: "rejected", reason: named.reason };
+  const clean = acceptLabPaste(file.text);
+  if (clean.kind === "private-jwk") {
+    return { kind: "rejected", reason: "A private JWK is pasted, not a .pem file." };
+  }
+  if (clean.kind !== "pkcs8") {
+    return clean.kind === "rejected"
+      ? clean
+      : { kind: "rejected", reason: "The lab needs an ECDHE .pem private key." };
+  }
+  return clean;
 }
 
 /** Fixed label for a key field. The label never includes the field contents. */

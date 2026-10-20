@@ -6,14 +6,20 @@
 
 import {
   deriveEcdheFromPrivateMaterial,
-  ecdhePrivateKeyAsc,
-  ecdhePrivateKeyAscFilename,
+  ecdhePrivateKeyPem,
+  ecdhePrivateKeyPemFilename,
   generateEcdheKeyPair,
   loadEcdhePrivateMaterial,
   runEcdheSecurityChecks,
   type EcdheCurveId,
 } from "./ecdhe";
-import { describeKeyMaterial, peerPublicMaterial, sanitizeKeyMaterial } from "./keyMaterial";
+import {
+  acceptLabPaste,
+  describeKeyMaterial,
+  LAB_FILE_ACCEPT,
+  peerPublicMaterial,
+  readLabKeyFile,
+} from "./keyMaterial";
 
 type EcdheExportDetail = {
   curve: string;
@@ -243,12 +249,12 @@ function setDeriveStatus(
   status.textContent = message;
 }
 
-function saveAsc(detail: EcdheExportDetail, note: HTMLElement): void {
-  let filename = "globe-ecdhe-private.asc";
+function savePem(detail: EcdheExportDetail, note: HTMLElement): void {
+  let filename = "globe-ecdhe-private.pem";
   try {
-    filename = ecdhePrivateKeyAscFilename(asCurve(detail.curve));
-    const asc = ecdhePrivateKeyAsc(detail.privateKeyPkcs8Pem);
-    const blob = new Blob([asc], { type: "text/plain;charset=utf-8" });
+    filename = ecdhePrivateKeyPemFilename(asCurve(detail.curve));
+    const pem = ecdhePrivateKeyPem(detail.privateKeyPkcs8Pem);
+    const blob = new Blob([pem], { type: "application/x-pem-file" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -259,12 +265,12 @@ function saveAsc(detail: EcdheExportDetail, note: HTMLElement): void {
     anchor.remove();
     URL.revokeObjectURL(url);
     note.hidden = false;
-    note.id = "globe-ecdhe-asc-saved";
+    note.id = "globe-ecdhe-pem-saved";
     note.textContent = `Saved ${filename}. This is not an OpenPGP login key.`;
   } catch (error) {
     note.hidden = false;
-    note.id = "globe-ecdhe-asc-error";
-    note.textContent = error instanceof Error ? error.message : "Could not save the .asc file.";
+    note.id = "globe-ecdhe-pem-error";
+    note.textContent = error instanceof Error ? error.message : "Could not save the .pem file.";
   }
 }
 
@@ -303,7 +309,7 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const hint = document.createElement("p");
   hint.textContent =
-    "Ephemeral key agreement on this device. Not an OpenPGP login key and not uploaded. Import a sanitized .asc or private JWK, derive with a peer public key, and run the local checks.";
+    "ECDHE agreement on this device. The lab file is a .pem. Sign-in takes an OpenPGP .asc, .pgp, or .gpg. Nothing is uploaded.";
   hint.style.cssText = "margin:0 0 8px;color:#c9c6ea;font-size:13px";
 
   const curveLabel = document.createElement("label");
@@ -388,12 +394,12 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
   const importLabel = document.createElement("label");
   importLabel.style.cssText = "display:flex;flex-direction:column;gap:6px;margin:8px 0";
   const importSpan = document.createElement("span");
-  importSpan.textContent = "Import ECDHE .asc or private JWK";
+  importSpan.textContent = "Import an ECDHE .pem, or paste a private JWK";
   importSpan.style.cssText = "font-size:12px;color:#d7dcff";
   const importFile = document.createElement("input");
   importFile.type = "file";
   importFile.id = "globe-ecdhe-import-file";
-  importFile.accept = "*/*";
+  importFile.accept = LAB_FILE_ACCEPT;
   importFile.style.cssText = "font-size:16px;min-height:44px";
   const importText = document.createElement("textarea");
   importText.id = "globe-ecdhe-import-text";
@@ -432,12 +438,7 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
 
   async function importMaterial(raw: string): Promise<void> {
     importNote.hidden = true;
-    const clean = sanitizeKeyMaterial(raw);
-    if (clean.kind === "openpgp-private") {
-      importNote.hidden = false;
-      importNote.textContent = "That .asc is an OpenPGP login key. Import it on the sign-in screen.";
-      return;
-    }
+    const clean = acceptLabPaste(raw);
     if (clean.kind !== "pkcs8" && clean.kind !== "private-jwk") {
       importNote.hidden = false;
       importNote.textContent =
@@ -477,12 +478,25 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
       importFile.value = "";
       return;
     }
-    void file.text().then((text) => importMaterial(text)).catch((error: unknown) => {
-      importNote.hidden = false;
-      importNote.textContent = error instanceof Error ? error.message : "Could not read that file.";
-    }).finally(() => {
-      importFile.value = "";
-    });
+    void file
+      .text()
+      .then((text) => {
+        const clean = readLabKeyFile({ name: file.name, type: file.type, text });
+        if (clean.kind !== "pkcs8") {
+          importNote.hidden = false;
+          importNote.textContent =
+            clean.kind === "rejected" ? clean.reason : "The lab needs an ECDHE .pem private key.";
+          return;
+        }
+        return importMaterial(clean.pem);
+      })
+      .catch((error: unknown) => {
+        importNote.hidden = false;
+        importNote.textContent = error instanceof Error ? error.message : "Could not read that file.";
+      })
+      .finally(() => {
+        importFile.value = "";
+      });
   });
 
   actions.append(generate, checks);
@@ -514,10 +528,10 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
   if (detail?.privateKeyPkcs8Pem && detail.privateKeyJwk?.d) {
     const downloadButton = document.createElement("button");
     downloadButton.type = "button";
-    downloadButton.id = "globe-ecdhe-download-asc";
-    downloadButton.textContent = "Download .asc";
+    downloadButton.id = "globe-ecdhe-download-pem";
+    downloadButton.textContent = "Download .pem";
     downloadButton.style.cssText = BUTTON_STYLE;
-    downloadButton.addEventListener("click", () => saveAsc(detail, ascNote));
+    downloadButton.addEventListener("click", () => savePem(detail, ascNote));
     derive.addEventListener("click", () => {
       void runDerive(detail, status, derive);
     });
@@ -558,7 +572,7 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
   root.append(close);
   document.body.append(root);
   if (autoDownload && detail?.privateKeyPkcs8Pem && detail.privateKeyJwk?.d) {
-    saveAsc(detail, ascNote);
+    savePem(detail, ascNote);
   }
 }
 
@@ -574,11 +588,12 @@ function onImport(event: Event): void {
   if (!material) return;
   showPanel(null, false);
   const note = panel?.querySelector("#globe-ecdhe-import-note");
-  const clean = sanitizeKeyMaterial(material);
+  const clean = acceptLabPaste(material);
   if (clean.kind !== "pkcs8" && clean.kind !== "private-jwk") {
     if (note instanceof HTMLElement) {
       note.hidden = false;
-      note.textContent = "That file is not an ECDHE private key.";
+      note.textContent =
+        clean.kind === "rejected" ? clean.reason : "That file is not an ECDHE private key.";
     }
     return;
   }

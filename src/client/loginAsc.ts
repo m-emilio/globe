@@ -1,11 +1,17 @@
 /**
- * Mobile-friendly OpenPGP .asc import on the sign-in screen.
- * The native picker was limited to text/plain, which hides .asc on phones.
- * Key text is sanitized locally. OpenPGP private keys stay on this device.
- * An ECDHE .asc opens the key lab instead of the login vault.
+ * OpenPGP import on the sign-in screen.
+ * The picker lists .asc, .pgp, and .gpg only. text/plain hides .asc on iOS,
+ * and accepting every file lets a .pem or HTML upload through.
+ * The file name and the armor both have to be an OpenPGP private key.
+ * An ECDHE .pem stays in the key lab.
  */
 
-import { KEY_MATERIAL_MAX_CHARS, sanitizeKeyMaterial } from "./keyMaterial";
+import {
+  acceptLoginPaste,
+  KEY_MATERIAL_MAX_CHARS,
+  LOGIN_FILE_ACCEPT,
+  readLoginKeyFile,
+} from "./keyMaterial";
 
 const FILE_STYLE = [
   "display:block",
@@ -49,15 +55,9 @@ function passToLogin(input: HTMLInputElement, armored: string): void {
   delete input.dataset.globeAscPass;
 }
 
-function sendToLab(material: string): void {
-  window.dispatchEvent(
-    new CustomEvent("globe-ecdhe-import", { detail: { material } }),
-  );
-}
-
-async function acceptMaterial(panel: HTMLElement, input: HTMLInputElement, raw: string): Promise<void> {
+async function acceptPaste(panel: HTMLElement, input: HTMLInputElement, raw: string): Promise<void> {
   clearReject(panel);
-  const clean = sanitizeKeyMaterial(raw);
+  const clean = acceptLoginPaste(raw);
   if (clean.kind === "openpgp-private") {
     try {
       passToLogin(input, clean.armored);
@@ -66,26 +66,16 @@ async function acceptMaterial(panel: HTMLElement, input: HTMLInputElement, raw: 
     }
     return;
   }
-  if (clean.kind === "pkcs8" || clean.kind === "private-jwk") {
-    sendToLab(clean.kind === "pkcs8" ? clean.pem : clean.json);
-    input.value = "";
-    return;
-  }
-  if (clean.kind === "public-jwk" || clean.kind === "spki") {
-    rejectNote(panel, "That file is a public key. Sign-in needs the private key .asc.");
-    input.value = "";
-    return;
-  }
-  rejectNote(panel, clean.reason);
+  rejectNote(panel, clean.kind === "rejected" ? clean.reason : "Sign-in needs an OpenPGP private key (.asc, .pgp, or .gpg).");
   input.value = "";
 }
 
-function allowEveryFile(input: HTMLInputElement): void {
-  input.accept = "*/*";
+function acceptLoginFiles(input: HTMLInputElement): void {
+  input.accept = LOGIN_FILE_ACCEPT;
 }
 
 function bindInput(panel: HTMLElement, input: HTMLInputElement): void {
-  allowEveryFile(input);
+  acceptLoginFiles(input);
   input.style.cssText = FILE_STYLE;
   if (input.dataset.globeKeyFile === "1") return;
   input.dataset.globeKeyFile = "1";
@@ -97,7 +87,21 @@ function bindInput(panel: HTMLElement, input: HTMLInputElement): void {
       const file = input.files?.[0];
       if (!file) return;
       void readBounded(file)
-        .then((text) => acceptMaterial(panel, input, text))
+        .then((text) => {
+          clearReject(panel);
+          const clean = readLoginKeyFile({ name: file.name, type: file.type, text });
+          if (clean.kind === "openpgp-private") {
+            passToLogin(input, clean.armored);
+            return;
+          }
+          rejectNote(
+            panel,
+            clean.kind === "rejected"
+              ? clean.reason
+              : "Sign-in needs an OpenPGP private key (.asc, .pgp, or .gpg).",
+          );
+          input.value = "";
+        })
         .catch((error: unknown) => {
           rejectNote(
             panel,
@@ -115,14 +119,14 @@ function ensurePaste(panel: HTMLElement, input: HTMLInputElement): void {
   const wrap = document.createElement("label");
   wrap.style.cssText = "display:flex;flex-direction:column;gap:6px;margin-top:10px";
   const span = document.createElement("span");
-  span.textContent = "Or paste the .asc";
+  span.textContent = "Or paste the OpenPGP key";
   span.style.cssText = "font-size:13px";
   const area = document.createElement("textarea");
   area.id = "globe-asc-paste";
   area.rows = 4;
   area.spellcheck = false;
   area.autocomplete = "off";
-  area.placeholder = "Paste an armored private key";
+  area.placeholder = "Paste an OpenPGP private key";
   area.maxLength = KEY_MATERIAL_MAX_CHARS;
   area.addEventListener("input", () => {
     if (!area.value.includes("\0")) return;
@@ -138,7 +142,7 @@ function ensurePaste(panel: HTMLElement, input: HTMLInputElement): void {
   const button = document.createElement("button");
   button.type = "button";
   button.id = "globe-asc-choose";
-  button.textContent = "Import pasted .asc";
+  button.textContent = "Import pasted key";
   button.style.cssText = [
     "margin-top:8px",
     "min-height:48px",
@@ -150,14 +154,14 @@ function ensurePaste(panel: HTMLElement, input: HTMLInputElement): void {
     "color:#e8fff2",
   ].join(";");
   button.addEventListener("click", () => {
-    void acceptMaterial(panel, input, area.value).finally(() => {
+    void acceptPaste(panel, input, area.value).finally(() => {
       area.value = "";
     });
   });
   const hint = document.createElement("p");
   hint.style.cssText = "margin:8px 0 0;font-size:13px;line-height:1.4";
   hint.textContent =
-    "OpenPGP private keys stay on this device for sign-in. An ECDHE .asc opens the key lab. Nothing here is uploaded.";
+    "OpenPGP private keys stay on this device. This field accepts .asc, .pgp, or .gpg only. An ECDHE .pem belongs in the key lab. Nothing here is uploaded.";
   wrap.append(span, area, button, hint);
   panel.append(wrap);
 }
@@ -202,8 +206,12 @@ function patchLoginImport(): void {
 function openFilePicker(event: Event): void {
   const target = event.target;
   if (!(target instanceof HTMLInputElement) || target.type !== "file") return;
-  if (target.dataset.globeKeyFile === "1" || target.id === "globe-ecdhe-import-file") {
-    allowEveryFile(target);
+  if (target.dataset.globeKeyFile === "1") {
+    acceptLoginFiles(target);
+    return;
+  }
+  if (target.id === "globe-ecdhe-import-file") {
+    target.accept = ".pem";
   }
 }
 

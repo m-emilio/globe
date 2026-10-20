@@ -10,7 +10,18 @@
  * Browser support: ECDH P-256/P-384/P-521 widely; X25519 is newer (Chrome/Firefox recent).
  */
 
-import { peerPublicMaterial, sanitizeKeyMaterial, KEY_MATERIAL_MAX_CHARS } from "./keyMaterial";
+import {
+  acceptLabPaste,
+  acceptLoginPaste,
+  isActiveUploadType,
+  KEY_MATERIAL_MAX_CHARS,
+  LAB_FILE_ACCEPT,
+  LOGIN_FILE_ACCEPT,
+  peerPublicMaterial,
+  readLabKeyFile,
+  readLoginKeyFile,
+  sanitizeKeyMaterial,
+} from "./keyMaterial";
 
 export type EcdheCurveId = "P-256" | "P-384" | "P-521" | "X25519";
 
@@ -120,20 +131,20 @@ function toPkcs8Pem(pkcs8B64: string): string {
   return `-----BEGIN PRIVATE KEY-----\n${lines.join("\n")}\n-----END PRIVATE KEY-----`;
 }
 
-/** ASCII-armored PKCS#8 for a local `.asc` download. Not an OpenPGP login key. */
-export function ecdhePrivateKeyAsc(pem: string): string {
+/** ASCII-armored PKCS#8 for a local `.pem` download. Not an OpenPGP login key. */
+export function ecdhePrivateKeyPem(pem: string): string {
   const trimmed = pem.trim();
   if (
     !trimmed.startsWith("-----BEGIN PRIVATE KEY-----") ||
     !trimmed.endsWith("-----END PRIVATE KEY-----")
   ) {
-    throw new Error("ECDHE .asc export needs a PKCS#8 private key.");
+    throw new Error("ECDHE .pem export needs a PKCS#8 private key.");
   }
   return `${trimmed}\n`;
 }
 
-export function ecdhePrivateKeyAscFilename(curve: EcdheCurveId): string {
-  return `globe-ecdhe-${curve}-private.asc`;
+export function ecdhePrivateKeyPemFilename(curve: EcdheCurveId): string {
+  return `globe-ecdhe-${curve}-private.pem`;
 }
 
 function publishEcdheExport(detail: {
@@ -533,13 +544,13 @@ export async function ecdheSelfTest(
   if (fromPem.sessionKey.extractable || fromJwk.sessionKey.extractable || d1.sessionKey.extractable) {
     throw new Error("ECDHE self-test failed: session key was extractable");
   }
-  const asc = ecdhePrivateKeyAsc(a.privateKeyPkcs8Pem);
+  const pemFile = ecdhePrivateKeyPem(a.privateKeyPkcs8Pem);
   if (
-    !asc.startsWith("-----BEGIN PRIVATE KEY-----") ||
-    !asc.endsWith("-----END PRIVATE KEY-----\n") ||
-    asc.includes("PGP PRIVATE KEY")
+    !pemFile.startsWith("-----BEGIN PRIVATE KEY-----") ||
+    !pemFile.endsWith("-----END PRIVATE KEY-----\n") ||
+    pemFile.includes("PGP PRIVATE KEY")
   ) {
-    throw new Error("ECDHE self-test failed: .asc armor was not PKCS#8");
+    throw new Error("ECDHE self-test failed: .pem armor was not PKCS#8");
   }
   return {
     ok: true,
@@ -668,11 +679,9 @@ export async function runEcdheSecurityChecks(
       `<script>alert(1)</script>\n${pair.privateKeyPkcs8Pem}\n`,
     );
     push(
-      "strip-html",
-      "HTML around a private key is removed",
-      sanitized.kind === "pkcs8" &&
-        sanitized.pem.startsWith("-----BEGIN PRIVATE KEY-----") &&
-        !sanitized.pem.includes("<"),
+      "reject-html",
+      "HTML around a private key is rejected",
+      sanitized.kind === "rejected",
     );
 
     const cleaned = sanitizeKeyMaterial(`\uFEFF\0${pair.privateKeyPkcs8Pem}`);
@@ -700,13 +709,20 @@ export async function runEcdheSecurityChecks(
       scriptUrl.kind === "rejected",
     );
 
-    const asc = ecdhePrivateKeyAsc(pair.privateKeyPkcs8Pem);
+    const pemFile = ecdhePrivateKeyPem(pair.privateKeyPkcs8Pem);
+    const pemName = ecdhePrivateKeyPemFilename(curve);
+    const saved = readLabKeyFile({
+      name: pemName,
+      type: "application/x-pem-file",
+      text: pemFile,
+    });
     push(
-      "asc-pkcs8",
-      "The .asc file is PKCS#8, not an OpenPGP login key",
-      asc.startsWith("-----BEGIN PRIVATE KEY-----") &&
-        asc.endsWith("-----END PRIVATE KEY-----\n") &&
-        !asc.includes("PGP PRIVATE KEY"),
+      "pem-pkcs8",
+      "The lab download is a .pem PKCS#8 file, not an OpenPGP login key",
+      pemName.endsWith(".pem") &&
+        saved.kind === "pkcs8" &&
+        !pemFile.includes("PGP PRIVATE KEY") &&
+        readLoginKeyFile({ name: pemName, type: "", text: pemFile }).kind === "rejected",
     );
 
     const other = await generateEcdheKeyPair(curve, { publish: false });
@@ -728,17 +744,135 @@ export async function runEcdheSecurityChecks(
         !agreed.sessionKey.extractable &&
         !changed.sessionKey.extractable,
     );
+
+    const pgpSample =
+      "-----BEGIN PGP PRIVATE KEY BLOCK-----\nAA==\n-----END PGP PRIVATE KEY BLOCK-----\n";
+    const loginAsc = readLoginKeyFile({ name: "device.asc", type: "", text: pgpSample });
+    const loginPgp = readLoginKeyFile({
+      name: "device.pgp",
+      type: "application/pgp-keys",
+      text: pgpSample,
+    });
+    const loginGpg = readLoginKeyFile({ name: "device.gpg", type: "", text: pgpSample });
+    push(
+      "login-ext",
+      "Sign-in accepts only an OpenPGP .asc, .pgp, or .gpg",
+      loginAsc.kind === "openpgp-private" &&
+        loginPgp.kind === "openpgp-private" &&
+        loginGpg.kind === "openpgp-private" &&
+        acceptLoginPaste(pgpSample).kind === "openpgp-private",
+    );
+    push(
+      "login-reject-pem",
+      "Sign-in rejects an ECDHE .pem",
+      readLoginKeyFile({ name: "device.pem", type: "", text: pair.privateKeyPkcs8Pem }).kind ===
+        "rejected" && acceptLoginPaste(pair.privateKeyPkcs8Pem).kind === "rejected",
+    );
+    push(
+      "login-reject-double-ext",
+      "Sign-in rejects a second extension",
+      readLoginKeyFile({ name: "device.asc.html", type: "", text: pgpSample }).kind === "rejected" &&
+        readLoginKeyFile({ name: "device.asc.txt", type: "", text: pgpSample }).kind === "rejected",
+    );
+    push(
+      "login-reject-path",
+      "Sign-in rejects a path in the file name",
+      readLoginKeyFile({ name: "../device.asc", type: "", text: pgpSample }).kind === "rejected" &&
+        readLoginKeyFile({ name: "folder/device.asc", type: "", text: pgpSample }).kind ===
+          "rejected",
+    );
+    push(
+      "login-reject-nul",
+      "Sign-in rejects a NUL in the file name",
+      readLoginKeyFile({ name: "device.asc\0.png", type: "", text: pgpSample }).kind === "rejected",
+    );
+    push(
+      "login-reject-mismatch",
+      "An OpenPGP extension with ECDHE contents is rejected",
+      readLoginKeyFile({ name: "device.asc", type: "", text: pair.privateKeyPkcs8Pem }).kind ===
+        "rejected",
+    );
+    push(
+      "login-reject-html",
+      "HTML or an encoded tag around an OpenPGP key is rejected",
+      readLoginKeyFile({
+        name: "device.asc",
+        type: "",
+        text: `<img src=x onerror=alert(1)>\n${pgpSample}`,
+      }).kind === "rejected" &&
+        readLoginKeyFile({
+          name: "device.asc",
+          type: "",
+          text: `&lt;script&gt;\n${pgpSample}`,
+        }).kind === "rejected",
+    );
+    push(
+      "login-reject-html-type",
+      "An HTML or SVG content type is rejected on sign-in",
+      isActiveUploadType("text/html") &&
+        isActiveUploadType("image/svg+xml") &&
+        readLoginKeyFile({ name: "device.asc", type: "text/html", text: pgpSample }).kind ===
+          "rejected" &&
+        readLoginKeyFile({ name: "device.asc", type: "image/svg+xml", text: pgpSample }).kind ===
+          "rejected",
+    );
+    push(
+      "lab-ext",
+      "The lab accepts its .pem download",
+      readLabKeyFile({
+        name: pemName,
+        type: "application/x-pem-file",
+        text: pemFile,
+      }).kind === "pkcs8" && acceptLabPaste(pair.privateKeyPkcs8Pem).kind === "pkcs8",
+    );
+    push(
+      "lab-reject-asc",
+      "The lab rejects an OpenPGP .asc",
+      readLabKeyFile({ name: "device.asc", type: "", text: pgpSample }).kind === "rejected" &&
+        readLabKeyFile({ name: "device.asc", type: "", text: pemFile }).kind === "rejected" &&
+        acceptLabPaste(pgpSample).kind === "rejected",
+    );
+    push(
+      "lab-reject-mismatch",
+      "A .pem whose contents are an OpenPGP key is rejected",
+      readLabKeyFile({ name: "device.pem", type: "", text: pgpSample }).kind === "rejected",
+    );
+    push(
+      "lab-reject-double-ext",
+      "The lab rejects a second extension or a trailing dot",
+      readLabKeyFile({ name: "device.pem.svg", type: "", text: pemFile }).kind === "rejected" &&
+        readLabKeyFile({ name: "device.pem.", type: "", text: pemFile }).kind === "rejected" &&
+        readLabKeyFile({ name: "device.pem ", type: "", text: pemFile }).kind === "rejected",
+    );
+    push(
+      "lab-reject-bidi",
+      "The lab rejects a bidirectional mark in the file name",
+      readLabKeyFile({ name: "device\u202E.pem", type: "", text: pemFile }).kind === "rejected",
+    );
   } catch {
     const missing: Array<[string, string]> = [
       ["reject-public-as-private", "A public key is rejected as a private key"],
       ["reject-empty-peer", "An empty peer field is rejected"],
       ["reject-private-peer", "A private key is rejected in the peer field"],
-      ["strip-html", "HTML around a private key is removed"],
+      ["reject-html", "HTML around a private key is rejected"],
       ["strip-controls", "A byte-order mark and NUL bytes are removed"],
       ["reject-mixed", "OpenPGP and PKCS#8 in one field are rejected"],
       ["reject-script-url", "A script URL in the key field is rejected"],
-      ["asc-pkcs8", "The .asc file is PKCS#8, not an OpenPGP login key"],
+      ["pem-pkcs8", "The lab download is a .pem PKCS#8 file, not an OpenPGP login key"],
       ["peer-changes-secret", "A different peer public key changes the shared secret"],
+      ["login-ext", "Sign-in accepts only an OpenPGP .asc, .pgp, or .gpg"],
+      ["login-reject-pem", "Sign-in rejects an ECDHE .pem"],
+      ["login-reject-double-ext", "Sign-in rejects a second extension"],
+      ["login-reject-path", "Sign-in rejects a path in the file name"],
+      ["login-reject-nul", "Sign-in rejects a NUL in the file name"],
+      ["login-reject-mismatch", "An OpenPGP extension with ECDHE contents is rejected"],
+      ["login-reject-html", "HTML or an encoded tag around an OpenPGP key is rejected"],
+      ["login-reject-html-type", "An HTML or SVG content type is rejected on sign-in"],
+      ["lab-ext", "The lab accepts its .pem download"],
+      ["lab-reject-asc", "The lab rejects an OpenPGP .asc"],
+      ["lab-reject-mismatch", "A .pem whose contents are an OpenPGP key is rejected"],
+      ["lab-reject-double-ext", "The lab rejects a second extension or a trailing dot"],
+      ["lab-reject-bidi", "The lab rejects a bidirectional mark in the file name"],
     ];
     for (let i = 0; i < missing.length; i++) {
       const item = missing[i]!;
@@ -752,6 +886,16 @@ export async function runEcdheSecurityChecks(
     "reject-oversize",
     "Oversized key material is rejected",
     oversized.kind === "rejected",
+  );
+  push(
+    "accept-lists",
+    "The pickers list their own extensions and do not accept every file",
+    LOGIN_FILE_ACCEPT === ".asc,.pgp,.gpg" &&
+      LAB_FILE_ACCEPT === ".pem" &&
+      !LOGIN_FILE_ACCEPT.includes("*") &&
+      !LAB_FILE_ACCEPT.includes("*") &&
+      !LOGIN_FILE_ACCEPT.includes("text/plain") &&
+      !LAB_FILE_ACCEPT.includes("text/plain"),
   );
   return checks;
 }
