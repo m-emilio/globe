@@ -1,5 +1,5 @@
 /**
- * Key lab outside the sign-in form.
+ * ECDHE key lab inside the sign-in window.
  * Generate, import a sanitized .asc or private JWK, derive, and run local checks.
  * OpenPGP login keys stay on the sign-in screen.
  */
@@ -89,34 +89,32 @@ function applyCopy(): void {
 let panel: HTMLElement | null = null;
 let selectedCurve: EcdheCurveId = "X25519";
 
-function mountLauncher(): void {
-  if (document.getElementById("globe-key-lab-open") || panel) return;
+function signInModal(): HTMLElement | null {
+  const modal = document.querySelector(".auth-modal:not(.admin-modal)");
+  return modal instanceof HTMLElement ? modal : null;
+}
+
+function showLabButton(modal: HTMLElement): void {
+  if (modal.querySelector("#globe-key-lab-open") || modal.querySelector("#globe-ecdhe-export")) return;
   const button = document.createElement("button");
   button.id = "globe-key-lab-open";
   button.type = "button";
-  button.textContent = "Key lab";
-  button.style.cssText = [
-    "position:fixed",
-    "left:max(12px, env(safe-area-inset-left))",
-    "bottom:max(108px, calc(env(safe-area-inset-bottom) + 100px))",
-    "z-index:1200",
-    "min-height:44px",
-    "padding:10px 14px",
-    "border-radius:999px",
-    "border:1px solid rgba(160,150,255,0.55)",
-    "background:#1c1830",
-    "color:#eef0ff",
-    "font:600 13px/1 system-ui,sans-serif",
-    "cursor:pointer",
-  ].join(";");
-  button.addEventListener("click", () => showPanel(null, false));
-  document.body.append(button);
+  button.textContent = "ECDHE key lab";
+  button.style.cssText = `${BUTTON_STYLE};margin-top:12px;width:100%`;
+  button.addEventListener("click", () => {
+    button.remove();
+    showPanel(null, false);
+  });
+  modal.append(button);
 }
 
 function hidePanel(): void {
+  const modal = panel?.closest(".auth-modal");
   panel?.remove();
   panel = null;
-  mountLauncher();
+  if (modal instanceof HTMLElement && !modal.classList.contains("admin-modal")) {
+    showLabButton(modal);
+  }
 }
 
 const AREA_STYLE = [
@@ -288,19 +286,16 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
   panel = root;
   root.id = "globe-ecdhe-export";
   root.style.cssText = [
-    "position:fixed",
-    "left:max(12px, env(safe-area-inset-left))",
-    "bottom:max(108px, calc(env(safe-area-inset-bottom) + 100px))",
-    "z-index:1002",
-    "width:min(440px, calc(100vw - 24px))",
-    "max-height:min(62dvh, 640px)",
+    "margin-top:16px",
+    "width:100%",
+    "box-sizing:border-box",
+    "max-height:min(52dvh, 560px)",
     "overflow:auto",
     "padding:14px",
     "border-radius:12px",
     "border:1px solid rgba(160,150,255,0.4)",
-    "background:rgba(18,16,32,0.96)",
+    "background:#121020",
     "color:#eef0ff",
-    "box-shadow:0 12px 40px rgba(0,0,0,0.35)",
     "font:14px/1.4 system-ui,sans-serif",
   ].join(";");
 
@@ -570,7 +565,9 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
     root.append(waiting);
   }
   root.append(close);
-  document.body.append(root);
+  const modal = signInModal();
+  if (modal) modal.append(root);
+  else document.body.append(root);
   if (autoDownload && detail?.privateKeyPkcs8Pem && detail.privateKeyJwk?.d) {
     savePem(detail, ascNote);
   }
@@ -637,9 +634,16 @@ function watchAuthCopy(): void {
   modalCopyWatch = new MutationObserver(() => applyCopy());
   modalCopyWatch.observe(modal, { subtree: true, childList: true, characterData: true });
   applyCopy();
+  const openModal = signInModal();
+  if (
+    openModal &&
+    !openModal.querySelector("#globe-ecdhe-export") &&
+    !openModal.querySelector("#globe-key-lab-open")
+  ) {
+    showPanel(null, false);
+  }
 }
 
 const shellObserver = new MutationObserver(() => watchAuthCopy());
 shellObserver.observe(document.documentElement, { subtree: true, childList: true });
 watchAuthCopy();
-mountLauncher();
