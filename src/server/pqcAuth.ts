@@ -169,8 +169,20 @@ export async function registerPqcUser(
   let publicKey: Uint8Array;
   try {
     assertMlDsaLengths(suite);
-    publicKey = b64ToFixedBytes(publicKeyB64, ML_DSA_SUITES[suite].publicKey);
-    rejectPrivateSizedKey(publicKey);
+    const peeked = b64ToFixedBytes(publicKeyB64, atob(publicKeyB64.replace(/\s+/g, "")).length);
+    if (
+      peeked.length === ML_DSA_SUITES["ml-dsa44"].secretKey ||
+      peeked.length === ML_DSA_SUITES["ml-dsa65"].secretKey ||
+      peeked.length === ML_DSA_SUITES["ml-dsa87"].secretKey
+    ) {
+      peeked.fill(0);
+      throw new Error("private_key_rejected");
+    }
+    if (peeked.length !== ML_DSA_SUITES[suite].publicKey) {
+      peeked.fill(0);
+      throw new Error("invalid_length");
+    }
+    publicKey = peeked;
   } catch (error) {
     if (error instanceof Error && error.message === "private_key_rejected") {
       return privateKeyRejected(applySecurityHeaders);
