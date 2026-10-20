@@ -320,6 +320,36 @@ export async function signMlDsaLogin(
   }
 }
 
+/** Sign an admin elevation challenge with the post-quantum key stored on this device. */
+export async function signStoredPqcMessage(fingerprint: string, message: string): Promise<string> {
+  const fp = fingerprint.replace(/[\s:]/g, "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(fp)) throw new Error("This account does not use a post-quantum device key.");
+  if (!message.startsWith("globe-admin-elevate:v1|") || message.length > 2000) {
+    throw new Error("This device will only sign an admin elevation challenge.");
+  }
+  const rows = await withDb<StoredKey[]>("readonly", KEY_STORE, (store) =>
+    idbReq(store.getAll() as IDBRequest<StoredKey[]>),
+  );
+  const row = rows.find((item) => item.fingerprint === fp && isPqcSigSuite(item.suite));
+  if (!row) throw new Error("Create the post-quantum admin key on this device first.");
+  const secret = await unwrapSecret(row);
+  try {
+    const signature = SIGNERS[row.suite].sign(new TextEncoder().encode(message), secret, {
+      context: pqcLoginContext(),
+    });
+    try {
+      if (signature.length !== PQC_SIG_SUITES[row.suite].signature) {
+        throw new Error("Could not sign the admin elevation challenge.");
+      }
+      return bytesToB64(signature);
+    } finally {
+      wipe(signature);
+    }
+  } finally {
+    wipe(secret);
+  }
+}
+
 export async function mlDsaLoginSelfTest(): Promise<{ ok: true; suites: number }> {
   const origin = "https://globe.example";
   let count = 0;

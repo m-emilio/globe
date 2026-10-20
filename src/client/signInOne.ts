@@ -61,7 +61,7 @@ function buildShell(): HTMLElement {
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const copy = document.createElement("p");
   copy.style.cssText = "margin:0 0 10px;font-size:13px;line-height:1.45;color:#d5ffe9";
-  copy.textContent = "Device key, post-quantum signature, and post-quantum key agreement are one sign-in. Each one proves this device holds the private key. The server stores the public key and, after the proof matches, sets the same session cookie. The private key is not uploaded. One network can register 3 keys, then it has to sign in with a key it already created.";
+  copy.textContent = "Device key, post-quantum signature, and post-quantum key agreement are one sign-in. Each one proves this device holds the private key. The server stores the public key and, after the proof matches, sets the same session cookie. The private key is not uploaded. One network can register 3 keys, then it has to sign in with a key it already created. A paid Stripe checkout under $20 unlocks further keys for every network that already holds that account. An admin grants or revokes that unlock with the same step-up used for transit.";
   const label = document.createElement("label");
   label.style.cssText = "display:flex;flex-direction:column;gap:6px;font-size:13px";
   const span = document.createElement("span");
