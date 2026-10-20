@@ -41,6 +41,16 @@ function watch(): void {
         delete admin.dataset.globeLoginLog;
       });
   }
+  if (admin instanceof HTMLElement && admin.dataset.globeKeyGrant !== "1") {
+    admin.dataset.globeKeyGrant = "1";
+    void import("./adminKeyGrant")
+      .then((mod) => {
+        mod.mountAdminKeyGrant();
+      })
+      .catch(() => {
+        delete admin.dataset.globeKeyGrant;
+      });
+  }
   const modal = document.querySelector(".auth-modal:not(.admin-modal)");
   if (!(modal instanceof HTMLElement)) return;
   if (arrangeSignIn) arrangeSignIn();
