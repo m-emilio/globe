@@ -17,8 +17,10 @@ import {
 import {
   acceptLabPaste,
   describeKeyMaterial,
+  appleTouchPicker,
   LAB_FILE_ACCEPT,
   peerPublicMaterial,
+  pickerAccept,
   readLabKeyFile,
 } from "./keyMaterial";
 import { exportSavedLabPrivateKey, loadLabMaterial, signInWithLabKey } from "./labVault";
@@ -397,7 +399,7 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
   const importFile = document.createElement("input");
   importFile.type = "file";
   importFile.id = "globe-ecdhe-import-file";
-  importFile.accept = LAB_FILE_ACCEPT;
+  importFile.accept = pickerAccept(LAB_FILE_ACCEPT, appleTouchPicker());
   importFile.style.cssText = "font-size:16px;min-height:44px";
   const importText = document.createElement("textarea");
   importText.id = "globe-ecdhe-import-text";

@@ -1,15 +1,18 @@
 /**
  * OpenPGP import on the sign-in screen.
- * The picker lists .asc, .pgp, and .gpg only. text/plain hides .asc on iOS,
- * and accepting every file lets a .pem or HTML upload through.
+ * Desktop lists .asc, .pgp, and .gpg. iOS also allows public.data, because
+ * an extension-only list is treated as text/plain and the .asc stays disabled.
  * The file name and the armor both have to be an OpenPGP private key.
  * An ECDHE .pem stays in the key lab.
  */
 
 import {
   acceptLoginPaste,
+  appleTouchPicker,
   KEY_MATERIAL_MAX_CHARS,
+  LAB_FILE_ACCEPT,
   LOGIN_FILE_ACCEPT,
+  pickerAccept,
   readLoginKeyFile,
 } from "./keyMaterial";
 
@@ -75,7 +78,7 @@ async function acceptPaste(panel: HTMLElement, input: HTMLInputElement, raw: str
 }
 
 function acceptLoginFiles(input: HTMLInputElement): void {
-  input.accept = LOGIN_FILE_ACCEPT;
+  input.accept = pickerAccept(LOGIN_FILE_ACCEPT, appleTouchPicker());
 }
 
 function bindInput(panel: HTMLElement, input: HTMLInputElement): void {
@@ -220,7 +223,7 @@ function openFilePicker(event: Event): void {
     return;
   }
   if (target.id === "globe-ecdhe-import-file") {
-    target.accept = ".pem";
+    target.accept = pickerAccept(LAB_FILE_ACCEPT, appleTouchPicker());
   }
 }
 

@@ -97,10 +97,29 @@ export function sanitizeKeyMaterial(input: string): SanitizedKeyMaterial {
   return { kind: "rejected", reason: "Unrecognized key material." };
 }
 
-/** Sign-in picker. Extensions only — a MIME such as text/plain hides .asc on iOS. */
+/** Sign-in picker on desktop. iOS must not use this string alone. */
 export const LOGIN_FILE_ACCEPT = ".asc,.pgp,.gpg";
 /** Lab picker. PKCS#8 uses .pem so it cannot be confused with an OpenPGP .asc. */
 export const LAB_FILE_ACCEPT = ".pem";
+
+/**
+ * iOS Safari maps ".asc" to text/plain. The Files picker then shows the
+ * key and leaves it disabled, because a saved .asc is public.data, not
+ * plain text. application/octet-stream is public.data, so the file can
+ * be chosen. The name and the armor are still checked after that.
+ * text/plain is not added: as the only type, it is what disables the file.
+ */
+export function pickerAccept(extensions: string, ios: boolean): string {
+  if (!ios || extensions.includes("application/octet-stream")) return extensions;
+  return `${extensions},application/octet-stream`;
+}
+
+export function appleTouchPicker(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  if (/iPhone|iPad|iPod/.test(ua)) return true;
+  return navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+}
 
 const LOGIN_EXTENSIONS = new Set([".asc", ".pgp", ".gpg"]);
 const LAB_EXTENSIONS = new Set([".pem"]);

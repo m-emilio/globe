@@ -19,6 +19,7 @@ import {
   LAB_FILE_ACCEPT,
   LOGIN_FILE_ACCEPT,
   peerPublicMaterial,
+  pickerAccept,
   readLabKeyFile,
   readLoginKeyFile,
   sanitizeKeyMaterial,
@@ -926,13 +927,16 @@ export async function runEcdheSecurityChecks(
   );
   push(
     "accept-lists",
-    "The pickers list their own extensions and do not accept every file",
+    "Desktop pickers list their own extensions. iOS adds public.data so a saved .asc can be chosen",
     LOGIN_FILE_ACCEPT === ".asc,.pgp,.gpg" &&
       LAB_FILE_ACCEPT === ".pem" &&
+      pickerAccept(LOGIN_FILE_ACCEPT, false) === ".asc,.pgp,.gpg" &&
+      pickerAccept(LOGIN_FILE_ACCEPT, true) === ".asc,.pgp,.gpg,application/octet-stream" &&
+      pickerAccept(LAB_FILE_ACCEPT, true) === ".pem,application/octet-stream" &&
       !LOGIN_FILE_ACCEPT.includes("*") &&
       !LAB_FILE_ACCEPT.includes("*") &&
-      !LOGIN_FILE_ACCEPT.includes("text/plain") &&
-      !LAB_FILE_ACCEPT.includes("text/plain"),
+      !pickerAccept(LOGIN_FILE_ACCEPT, true).includes("text/plain") &&
+      !pickerAccept(LOGIN_FILE_ACCEPT, true).includes("*"),
   );
   return checks;
 }
