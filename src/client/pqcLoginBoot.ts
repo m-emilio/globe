@@ -32,9 +32,257 @@ function ensureIdentityLayer(): void {
   if (document.getElementById("globe-identity-layer")) return;
   const style = document.createElement("style");
   style.id = "globe-identity-layer";
-  style.textContent =
-    ".auth-modal-backdrop{z-index:14000!important}.pki-hub-header-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}";
+  style.textContent = [
+    ".auth-modal-backdrop{z-index:14000!important}",
+    ".pki-hub-header-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}",
+    ".menu-dropdown .menu-section-location .menu-section-title{padding-right:46px}",
+    ".pki-hub .pki-hub-cve-list,.pki-panel .pki-cve-list{max-height:none!important;overflow:visible!important}",
+    "#globe-menu-close{width:36px;height:36px;border:1px solid rgba(0,217,255,.65);border-radius:4px;background:rgba(0,0,0,.92);color:#00d9ff;font:22px/1 inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}",
+    "#globe-feed-resize{z-index:1160;width:36px;height:36px}",
+    "#globe-pki-cve-pager{display:flex;align-items:center;gap:8px;box-sizing:border-box;padding:6px 8px;background:rgba(8,10,16,.96);border:1px solid rgba(255,125,160,.55);border-radius:10px}",
+    "#globe-pki-cve-pager button{min-height:36px;min-width:64px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:rgba(255,255,255,.06);color:#f2f4f7;font:600 12px inherit;cursor:pointer}",
+    "#globe-pki-cve-pager button:disabled{opacity:.35;cursor:not-allowed}",
+    "#globe-pki-cve-pager span{flex:1;min-width:0;font-size:12px;color:#e8edf4}",
+  ].join("");
   document.head.append(style);
+}
+
+function closeMenu(): void {
+  const toggle = document.querySelector(".nav-menu-btn");
+  if (!(toggle instanceof HTMLElement)) return;
+  if (!document.querySelector(".menu-dropdown")) return;
+  toggle.click();
+  window.setTimeout(() => {
+    if (!document.querySelector(".menu-dropdown")) return;
+    toggle.click();
+  }, 560);
+}
+
+function placeMenuClose(): void {
+  const menu = document.querySelector(".menu-dropdown");
+  const existing = document.getElementById("globe-menu-close");
+  if (!(menu instanceof HTMLElement)) {
+    existing?.remove();
+    return;
+  }
+  let button: HTMLButtonElement;
+  if (existing instanceof HTMLButtonElement) {
+    button = existing;
+  } else {
+    existing?.remove();
+    button = document.createElement("button");
+    button.type = "button";
+    button.id = "globe-menu-close";
+    button.setAttribute("aria-label", "Close menu");
+    button.textContent = "×";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu();
+    });
+    document.body.append(button);
+  }
+  const rect = menu.getBoundingClientRect();
+  button.style.position = "fixed";
+  button.style.left = `${Math.max(8, rect.right - 44)}px`;
+  button.style.top = `${rect.top + 6}px`;
+  button.style.zIndex = "1300";
+}
+
+type FeedResize = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  width: number;
+  height: number;
+  left: number;
+  top: number;
+};
+
+let feedResize: FeedResize | null = null;
+
+function resizeFeed(feed: HTMLElement, width: number, height: number): void {
+  const host = feed.closest(".live-feed-app-host");
+  if (host instanceof HTMLElement && host.dataset.globeFeedAnchored !== "1") {
+    const hostRect = host.getBoundingClientRect();
+    host.style.top = `${hostRect.top}px`;
+    host.style.left = `${hostRect.left}px`;
+    host.style.bottom = "auto";
+    host.style.right = "auto";
+    host.dataset.globeFeedAnchored = "1";
+  }
+  feed.style.width = `${width}px`;
+  feed.style.height = `${height}px`;
+  feed.style.maxWidth = "none";
+  feed.style.maxHeight = "none";
+  feed.style.overflow = "hidden";
+  if (host instanceof HTMLElement) {
+    host.style.maxWidth = "none";
+    host.style.width = `${width}px`;
+  }
+  const floating = feed.parentElement;
+  if (floating instanceof HTMLElement) {
+    floating.style.maxWidth = "none";
+    floating.style.width = `${width}px`;
+  }
+  const regions = feed.querySelectorAll(".activity-list, .un-tv-panel, .activity-lock-panel");
+  for (let i = 0; i < regions.length; i++) {
+    const region = regions[i];
+    if (!(region instanceof HTMLElement)) continue;
+    region.style.maxHeight = "none";
+    region.style.flex = "1 1 auto";
+    region.style.minHeight = "0";
+  }
+}
+
+function resetFeedHost(): void {
+  const host = document.querySelector(".live-feed-app-host");
+  if (!(host instanceof HTMLElement) || host.dataset.globeFeedAnchored !== "1") return;
+  host.style.top = "";
+  host.style.left = "";
+  host.style.bottom = "";
+  host.style.right = "";
+  host.style.width = "";
+  host.style.maxWidth = "";
+  delete host.dataset.globeFeedAnchored;
+  const floating = host.querySelector(".activity-floating");
+  if (floating instanceof HTMLElement) {
+    floating.style.width = "";
+    floating.style.maxWidth = "";
+  }
+}
+
+function placeFeedResize(): void {
+  const feed = document.getElementById("live-feed-menu");
+  let grip = document.getElementById("globe-feed-resize");
+  if (!(feed instanceof HTMLElement)) {
+    grip?.remove();
+    if (!feedResize) resetFeedHost();
+    return;
+  }
+  if (!(grip instanceof HTMLElement)) {
+    grip = document.createElement("div");
+    grip.id = "globe-feed-resize";
+    grip.className = "floating-chrome-resize";
+    grip.setAttribute("role", "separator");
+    grip.setAttribute("aria-label", "Resize live feed");
+    grip.title = "Drag to resize";
+    grip.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const current = document.getElementById("live-feed-menu");
+      if (!(current instanceof HTMLElement)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = current.getBoundingClientRect();
+      feedResize = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        width: rect.width,
+        height: rect.height,
+        left: rect.left,
+        top: rect.top,
+      };
+      if (grip instanceof HTMLElement) {
+        try {
+          grip.setPointerCapture(event.pointerId);
+        } catch {
+          // The window listener still receives the move.
+        }
+      }
+    });
+    document.body.append(grip);
+  }
+  const rect = feed.getBoundingClientRect();
+  grip.style.position = "fixed";
+  grip.style.left = `${rect.right - 36}px`;
+  grip.style.top = `${rect.bottom - 36}px`;
+  grip.style.right = "auto";
+  grip.style.bottom = "auto";
+}
+
+const PANEL_CVE_PAGE_SIZE = 8;
+let panelCvePage = 0;
+let panelCveKey = "";
+
+function placePanelCvePager(): void {
+  const panel = document.querySelector(".pki-panel:not(.un-panel-minimized)");
+  const list = panel?.querySelector(".pki-cve-list");
+  let bar = document.getElementById("globe-pki-cve-pager");
+  if (!(panel instanceof HTMLElement) || !(list instanceof HTMLElement)) {
+    bar?.remove();
+    panelCvePage = 0;
+    panelCveKey = "";
+    return;
+  }
+  const cards = Array.from(list.querySelectorAll(":scope > .pki-cve-card"));
+  const key = cards
+    .map((card) => card.querySelector("strong")?.textContent || "")
+    .join("|");
+  if (key !== panelCveKey) {
+    panelCveKey = key;
+    panelCvePage = 0;
+  }
+  const pageCount = Math.max(1, Math.ceil(cards.length / PANEL_CVE_PAGE_SIZE));
+  if (panelCvePage > pageCount - 1) panelCvePage = pageCount - 1;
+  for (let i = 0; i < cards.length; i++) {
+    const card = cards[i];
+    if (!(card instanceof HTMLElement)) continue;
+    const visible = Math.floor(i / PANEL_CVE_PAGE_SIZE) === panelCvePage;
+    card.style.display = visible ? "" : "none";
+  }
+  list.style.maxHeight = "none";
+  list.style.overflow = "visible";
+  const scroll = panel.querySelector(".trade-pulse-panel-scroll");
+  if (scroll instanceof HTMLElement) scroll.style.paddingBottom = "52px";
+  if (!(bar instanceof HTMLElement)) {
+    bar = document.createElement("div");
+    bar.id = "globe-pki-cve-pager";
+    bar.setAttribute("role", "group");
+    bar.setAttribute("aria-label", "CVE pages");
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.id = "globe-pki-cve-prev";
+    prev.textContent = "← Prev";
+    prev.addEventListener("click", () => {
+      panelCvePage = Math.max(0, panelCvePage - 1);
+      placePanelCvePager();
+    });
+    const status = document.createElement("span");
+    status.id = "globe-pki-cve-status";
+    const next = document.createElement("button");
+    next.type = "button";
+    next.id = "globe-pki-cve-next";
+    next.textContent = "Next →";
+    next.addEventListener("click", () => {
+      panelCvePage += 1;
+      placePanelCvePager();
+    });
+    bar.append(prev, status, next);
+    document.body.append(bar);
+  }
+  const status = bar.querySelector("#globe-pki-cve-status");
+  const prev = bar.querySelector("#globe-pki-cve-prev");
+  const next = bar.querySelector("#globe-pki-cve-next");
+  const shown = cards.filter((card) => card instanceof HTMLElement && card.style.display !== "none").length;
+  const label = cards.length
+    ? `Page ${panelCvePage + 1}/${pageCount} · ${shown} of ${cards.length}`
+    : "Page 1/1";
+  if (status && status.textContent !== label) status.textContent = label;
+  if (prev instanceof HTMLButtonElement) prev.disabled = panelCvePage <= 0;
+  if (next instanceof HTMLButtonElement) next.disabled = panelCvePage >= pageCount - 1;
+  const rect = panel.getBoundingClientRect();
+  bar.style.position = "fixed";
+  bar.style.left = `${rect.left + 8}px`;
+  bar.style.top = `${Math.max(8, rect.bottom - 48)}px`;
+  bar.style.width = `${Math.max(160, rect.width - 44)}px`;
+  bar.style.zIndex = "1300";
+}
+
+function placeFloatingControls(): void {
+  placeMenuClose();
+  placeFeedResize();
+  placePanelCvePager();
 }
 
 function dismissSignedInBanner(): void {
@@ -81,6 +329,7 @@ function mountIdentityMenu(): void {
 
 function watch(): void {
   ensureIdentityLayer();
+  placeFloatingControls();
   mountIdentityMenu();
   patchSessionLabel();
   const admin = document.querySelector(".admin-modal");
@@ -159,5 +408,36 @@ window.addEventListener("globe-mldsa87-import", (event) => {
 const observer = new MutationObserver(() => watch());
 observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
 watch();
+
+window.addEventListener("pointermove", (event) => {
+  if (feedResize && event.pointerId === feedResize.pointerId) {
+    const feed = document.getElementById("live-feed-menu");
+    if (feed instanceof HTMLElement) {
+      event.preventDefault();
+      const minW = 220;
+      const minH = 180;
+      const maxW = Math.max(minW, window.innerWidth - feedResize.left - 8);
+      const maxH = Math.max(minH, window.innerHeight - feedResize.top - 8);
+      resizeFeed(
+        feed,
+        Math.min(maxW, Math.max(minW, feedResize.width + (event.clientX - feedResize.startX))),
+        Math.min(maxH, Math.max(minH, feedResize.height + (event.clientY - feedResize.startY))),
+      );
+    }
+  }
+  placeFloatingControls();
+}, { passive: false });
+window.addEventListener("pointerup", (event) => {
+  if (!feedResize || event.pointerId !== feedResize.pointerId) return;
+  feedResize = null;
+  placeFloatingControls();
+});
+window.addEventListener("pointercancel", (event) => {
+  if (!feedResize || event.pointerId !== feedResize.pointerId) return;
+  feedResize = null;
+  placeFloatingControls();
+});
+window.addEventListener("resize", () => placeFloatingControls());
+window.addEventListener("scroll", () => placeFloatingControls(), true);
 
 export {};

@@ -26,6 +26,11 @@ import {
 import { exportSavedLabPrivateKey, loadLabMaterial, signInWithLabKey } from "./labVault";
 import { downloadLocalPrivateFile } from "./privateKeyFile";
 
+/** Sign-in file checks still run. The lab list only shows derivation rows. */
+function isHiddenSignInCheck(item: { id: string; label: string }): boolean {
+  return item.id.startsWith("login-") || item.id === "accept-lists" || item.label.startsWith("Sign-in");
+}
+
 type EcdheExportDetail = {
   curve: string;
   privateKeyPkcs8Pem: string;
@@ -372,10 +377,16 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
     void runEcdheSecurityChecks(selectedCurve)
       .then((results) => {
         checkList.textContent = "";
-        for (let i = 0; i < results.length; i++) {
+        const visible = results.filter((item) => !isHiddenSignInCheck(item));
+        for (let i = 0; i < visible.length; i++) {
           const row = document.createElement("div");
-          const item = results[i]!;
+          const item = visible[i]!;
           row.textContent = `${item.pass ? "pass" : "fail"} · ${item.label}`;
+          checkList.append(row);
+        }
+        if (results.some((item) => isHiddenSignInCheck(item) && !item.pass)) {
+          const row = document.createElement("div");
+          row.textContent = "fail · A file check did not pass";
           checkList.append(row);
         }
         checkList.id = results.every((item) => item.pass)

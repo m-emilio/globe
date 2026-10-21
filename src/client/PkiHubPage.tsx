@@ -76,6 +76,41 @@ function openIdentity(): void {
   window.dispatchEvent(new Event("globe-open-identity"));
 }
 
+function CvePager(props: {
+  page: number;
+  pageCount: number;
+  shown: number;
+  total: number;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  const { page, pageCount, shown, total, onPrev, onNext } = props;
+  return (
+    <div className="pki-hub-pager" role="group" aria-label="CVE pages">
+      <button
+        type="button"
+        className="un-hub-chip"
+        disabled={page <= 0}
+        onClick={onPrev}
+      >
+        ← Prev
+      </button>
+      <span className="pki-hub-pager-status">
+        Page {page + 1}/{pageCount}
+        {total > 0 ? ` · ${shown} of ${total}` : ""}
+      </span>
+      <button
+        type="button"
+        className="un-hub-chip"
+        disabled={page >= pageCount - 1}
+        onClick={onNext}
+      >
+        Next →
+      </button>
+    </div>
+  );
+}
+
 export function PkiHubPage(props: PkiHubProps) {
   const {
     onClose,
@@ -113,10 +148,10 @@ export function PkiHubPage(props: PkiHubProps) {
 
   const listSignature = `${catalog}|${sort}|${category}|${Array.from(severities).sort().join(",")}|${visibleCves.map((cve) => cve.id).join(",")}`;
   const [cvePage, setCvePage] = React.useState(0);
-  const [seenList, setSeenList] = React.useState(listSignature);
-  if (seenList !== listSignature) {
-    setSeenList(listSignature);
-    setCvePage(0);
+  const seenList = React.useRef(listSignature);
+  if (seenList.current !== listSignature) {
+    seenList.current = listSignature;
+    if (cvePage !== 0) setCvePage(0);
   }
   const cvePageCount = Math.max(1, Math.ceil(visibleCves.length / CVE_PAGE_SIZE));
   const safeCvePage = Math.min(cvePage, cvePageCount - 1);
@@ -124,13 +159,9 @@ export function PkiHubPage(props: PkiHubProps) {
     safeCvePage * CVE_PAGE_SIZE,
     safeCvePage * CVE_PAGE_SIZE + CVE_PAGE_SIZE,
   );
-  const listRef = React.useRef<HTMLDivElement>(null);
   const showCvePage = (next: number) => {
     const page = Math.max(0, Math.min(cvePageCount - 1, next));
     setCvePage(page);
-    window.setTimeout(() => {
-      listRef.current?.scrollIntoView({ block: "start" });
-    }, 0);
   };
 
   return (
@@ -179,9 +210,122 @@ export function PkiHubPage(props: PkiHubProps) {
 
       <div className="un-hub-scroll">
         <p className="un-hub-intro">
-          Toggle certificate and PKI vulnerability arcs on the globe. Filter,
-          sort, and page for performance — then return to the map.
+          Filter the exposure layer, then page the CVE list. Each page replaces
+          the cards in place.
         </p>
+
+        {(layerOn || preview) && (status === "ready" || preview) && (
+          <section className="un-hub-card" aria-labelledby="pki-hub-cve-title">
+            <div className="un-hub-card-head">
+              <div>
+                <h2 id="pki-hub-cve-title">CVE list</h2>
+                <span className="un-hub-status">
+                  {visibleCves.length}
+                  {preview ? ` of ${preview.cveCount}` : ""} CVEs
+                </span>
+              </div>
+            </div>
+            <CvePager
+              page={safeCvePage}
+              pageCount={cvePageCount}
+              shown={pageCves.length}
+              total={visibleCves.length}
+              onPrev={() => showCvePage(safeCvePage - 1)}
+              onNext={() => showCvePage(safeCvePage + 1)}
+            />
+            <div
+              className="pki-hub-cve-list"
+              aria-label="PKI-related CVEs"
+              style={{ maxHeight: "none", overflow: "visible" }}
+            >
+              {pageCves.length === 0 && (
+                <p className="un-hub-status">No CVEs match these filters.</p>
+              )}
+              {pageCves.map((cve) => {
+                const destCount = exposureCount(cve);
+                const focused = focusCve === cve.id;
+                const cvss =
+                  typeof cve.cvss === "number" && Number.isFinite(cve.cvss)
+                    ? cve.cvss
+                    : null;
+                const categories = Array.isArray(cve.categories) ? cve.categories : [];
+                return (
+                  <article
+                    key={cve.id}
+                    className={`pki-hub-cve-card severity-${cve.severity}${
+                      focused ? " focused" : ""
+                    }`}
+                  >
+                    <div className="pki-hub-cve-heading">
+                      <strong>{cve.id}</strong>
+                      <span
+                        className="pki-hub-sev-pill"
+                        style={{ background: severityColors[cve.severity] }}
+                      >
+                        {cve.severity}
+                        {cvss != null ? ` · CVSS ${cvss.toFixed(1)}` : ""}
+                      </span>
+                      {cve.knownExploited ? (
+                        <span className="pki-hub-kev-pill">KEV</span>
+                      ) : (
+                        <span className="pki-hub-nvd-pill">NVD</span>
+                      )}
+                    </div>
+                    <p className="pki-hub-cve-title">{cve.title}</p>
+                    <p className="pki-hub-cve-meta">
+                      {[cve.vendor, cve.product].filter(Boolean).join(" · ") ||
+                        "Vendor / product unspecified"}
+                      {" · "}
+                      {destCount} exposure {destCount === 1 ? "country" : "countries"}
+                    </p>
+                    <div className="pki-hub-cve-tags">
+                      {categories.map((cat) => (
+                        <span key={`${cve.id}-${cat}`}>{categoryLabels[cat] || cat}</span>
+                      ))}
+                    </div>
+                    <div className="pki-hub-cve-actions">
+                      <button
+                        type="button"
+                        className={focused ? "active" : ""}
+                        onClick={() => onFocusCve(focused ? null : cve.id)}
+                      >
+                        {focused ? "Unfocus map" : "Show on map"}
+                      </button>
+                      {safeGlobeHref(cve.nvdUrl) && (
+                        <a
+                          href={safeGlobeHref(cve.nvdUrl)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          NVD
+                        </a>
+                      )}
+                      {safeGlobeHref(cve.cisaUrl) && (
+                        <a
+                          href={safeGlobeHref(cve.cisaUrl)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          CISA KEV
+                        </a>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+            {cvePageCount > 1 && (
+              <CvePager
+                page={safeCvePage}
+                pageCount={cvePageCount}
+                shown={pageCves.length}
+                total={visibleCves.length}
+                onPrev={() => showCvePage(safeCvePage - 1)}
+                onNext={() => showCvePage(safeCvePage + 1)}
+              />
+            )}
+          </section>
+        )}
 
         <section className="un-hub-card" aria-labelledby="pki-hub-main-title">
           <div className="un-hub-card-head">
@@ -350,42 +494,6 @@ export function PkiHubPage(props: PkiHubProps) {
                     ))}
                   </div>
 
-                  <div className="un-hub-row-label">CVE pages</div>
-                  <div
-                    className="pki-hub-pager"
-                    role="group"
-                    aria-label="CVE pages"
-                    style={{
-                      position: "sticky",
-                      top: 0,
-                      zIndex: 2,
-                      background: "#0a0d14",
-                      padding: "6px 0",
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className="un-hub-chip"
-                      disabled={safeCvePage <= 0}
-                      onClick={() => showCvePage(safeCvePage - 1)}
-                    >
-                      ← Prev
-                    </button>
-                    <span className="pki-hub-pager-status">
-                      Page {safeCvePage + 1}/{cvePageCount}
-                      {visibleCves.length > 0
-                        ? ` · ${pageCves.length} of ${visibleCves.length}`
-                        : ""}
-                    </span>
-                    <button
-                      type="button"
-                      className="un-hub-chip"
-                      disabled={safeCvePage >= cvePageCount - 1}
-                      onClick={() => showCvePage(safeCvePage + 1)}
-                    >
-                      Next →
-                    </button>
-                  </div>
                   {arcStats.pageCount > 1 && (
                     <>
                       <div className="un-hub-row-label">Map arcs</div>
@@ -432,119 +540,6 @@ export function PkiHubPage(props: PkiHubProps) {
                     <span className="pki-hub-legend-line solid">KEV solid</span>
                     <span className="pki-hub-legend-line dotted">NVD dotted</span>
                   </div>
-
-                  <div className="un-hub-row-label">
-                    CVEs ({visibleCves.length}
-                    {preview ? ` / ${preview.cveCount}` : ""})
-                  </div>
-                  <div
-                    className="pki-hub-cve-list"
-                    aria-label="PKI-related CVEs"
-                    ref={listRef}
-                    style={{ maxHeight: "none", overflow: "visible" }}
-                  >
-                    {pageCves.length === 0 && (
-                      <p className="un-hub-status">No CVEs match these filters.</p>
-                    )}
-                    {pageCves.map((cve) => {
-                      const destCount = exposureCount(cve);
-                      const focused = focusCve === cve.id;
-                      return (
-                        <article
-                          key={cve.id}
-                          className={`pki-hub-cve-card severity-${cve.severity}${
-                            focused ? " focused" : ""
-                          }`}
-                        >
-                          <div className="pki-hub-cve-heading">
-                            <strong>{cve.id}</strong>
-                            <span
-                              className="pki-hub-sev-pill"
-                              style={{ background: severityColors[cve.severity] }}
-                            >
-                              {cve.severity}
-                              {cve.cvss != null
-                                ? ` · CVSS ${cve.cvss.toFixed(1)}`
-                                : ""}
-                            </span>
-                            {cve.knownExploited ? (
-                              <span className="pki-hub-kev-pill">KEV</span>
-                            ) : (
-                              <span className="pki-hub-nvd-pill">NVD</span>
-                            )}
-                          </div>
-                          <p className="pki-hub-cve-title">{cve.title}</p>
-                          <p className="pki-hub-cve-meta">
-                            {[cve.vendor, cve.product]
-                              .filter(Boolean)
-                              .join(" · ") || "Vendor / product unspecified"}
-                            {" · "}
-                            {destCount} exposure{" "}
-                            {destCount === 1 ? "country" : "countries"}
-                          </p>
-                          <div className="pki-hub-cve-tags">
-                            {cve.categories.map((cat) => (
-                              <span key={`${cve.id}-${cat}`}>
-                                {categoryLabels[cat] || cat}
-                              </span>
-                            ))}
-                          </div>
-                          <div className="pki-hub-cve-actions">
-                            <button
-                              type="button"
-                              className={focused ? "active" : ""}
-                              onClick={() =>
-                                onFocusCve(focused ? null : cve.id)
-                              }
-                            >
-                              {focused ? "Unfocus map" : "Show on map"}
-                            </button>
-                            {safeGlobeHref(cve.nvdUrl) && (
-                              <a
-                                href={safeGlobeHref(cve.nvdUrl)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              >
-                                NVD
-                              </a>
-                            )}
-                            {safeGlobeHref(cve.cisaUrl) && (
-                              <a
-                                href={safeGlobeHref(cve.cisaUrl)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              >
-                                CISA KEV
-                              </a>
-                            )}
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                  {cvePageCount > 1 && (
-                    <div className="pki-hub-pager" role="group" aria-label="CVE pages continued">
-                      <button
-                        type="button"
-                        className="un-hub-chip"
-                        disabled={safeCvePage <= 0}
-                        onClick={() => showCvePage(safeCvePage - 1)}
-                      >
-                        ← Prev
-                      </button>
-                      <span className="pki-hub-pager-status">
-                        Page {safeCvePage + 1}/{cvePageCount}
-                      </span>
-                      <button
-                        type="button"
-                        className="un-hub-chip"
-                        disabled={safeCvePage >= cvePageCount - 1}
-                        onClick={() => showCvePage(safeCvePage + 1)}
-                      >
-                        Next →
-                      </button>
-                    </div>
-                  )}
 
                   <button
                     type="button"
