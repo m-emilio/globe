@@ -388,12 +388,25 @@ export async function signMlDsaLogin(
   }
 }
 
-/** Sign an admin elevation challenge with the post-quantum key stored on this device. */
+function allowedAdminSignature(message: string): boolean {
+  if (message.length > 2000) return false;
+  if (message.startsWith("globe-admin-elevate:v1|")) return true;
+  if (!message.startsWith("globe-unlimited-keys:v1|")) return false;
+  const parts = message.split("|");
+  return (
+    parts.length === 4 &&
+    (parts[1] === "grant" || parts[1] === "revoke") &&
+    /^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(parts[2] || "") &&
+    /^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(parts[3] || "")
+  );
+}
+
+/** Sign an admin elevation or unlimited-key statement with the post-quantum key on this device. */
 export async function signStoredPqcMessage(fingerprint: string, message: string): Promise<string> {
   const fp = fingerprint.replace(/[\s:]/g, "").toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(fp)) throw new Error("This account does not use a post-quantum device key.");
-  if (!message.startsWith("globe-admin-elevate:v1|") || message.length > 2000) {
-    throw new Error("This device will only sign an admin elevation challenge.");
+  if (!allowedAdminSignature(message)) {
+    throw new Error("This device will only sign an admin elevation or unlimited-key statement.");
   }
   const rows = await withDb<StoredKey[]>("readonly", KEY_STORE, (store) =>
     idbReq(store.getAll() as IDBRequest<StoredKey[]>),

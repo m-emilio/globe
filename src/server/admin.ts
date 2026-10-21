@@ -27,6 +27,7 @@ import {
   rateLimitDurable,
   setUserTransitPaid,
   setUserUnlimitedKeys,
+  unlimitedKeySealMatches,
   type AuthEnv,
   type UserRecord,
 } from "./auth";
@@ -48,6 +49,8 @@ import {
   chainHash,
   isPqcLogHash,
   networkHash,
+  privilegeSeal,
+  userSeal,
   type AuditSealFields,
 } from "./pqcLogHash";
 
@@ -73,18 +76,28 @@ type AuditEntry = {
 };
 
 type ElevChallenge = {
-  userId: string;
-  fingerprint: string;
-  message: string;
+  v?: number;
+  adminHash?: string;
+  userHash?: string;
+  nonce?: string;
+  expiresAtMs?: number;
   createdAt: string;
   expiresAt: string;
+  /** Present only on challenges created before the seal. */
+  userId?: string;
+  fingerprint?: string;
+  message?: string;
 };
 
 type ElevToken = {
-  userId: string;
-  fingerprint: string;
+  v?: number;
+  adminHash?: string;
+  userHash?: string;
   createdAt: string;
   expiresAt: string;
+  /** Present only on tokens created before the seal. */
+  userId?: string;
+  fingerprint?: string;
 };
 
 const ELEV_CHALLENGE_TTL_SEC = 120; // 2 minutes
@@ -126,7 +139,7 @@ function publicUser(u: UserRecord) {
     fingerprint: u.fingerprint,
     primaryUserId: u.primaryUserId,
     transitPaid: Boolean(u.transitPaid),
-    unlimitedKeys: Boolean(u.unlimitedKeys),
+    unlimitedKeys: unlimitedKeySealMatches(u),
     createdAt: u.createdAt,
   };
 }
@@ -208,9 +221,16 @@ async function requireElevation(
     };
   }
 
+  const sealedToSession =
+    Boolean(elevRec.adminHash && elevRec.userHash) &&
+    elevRec.adminHash === privilegeSeal("unlock", user.fingerprint) &&
+    elevRec.userHash === userSeal(user.id);
+  const legacySession =
+    !elevRec.adminHash &&
+    elevRec.userId === user.id &&
+    elevRec.fingerprint === user.fingerprint;
   if (
-    elevRec.userId !== user.id ||
-    elevRec.fingerprint !== user.fingerprint ||
+    (!sealedToSession && !legacySession) ||
     new Date(elevRec.expiresAt).getTime() <= Date.now()
   ) {
     await env.BILLING_KV.delete(elevTokenKey(elev));
@@ -538,6 +558,76 @@ export async function adminStatus(
  * Issue a short-lived message the admin private key must sign.
  * Session must already be an allowlisted admin.
  */
+const UNLIMITED_KEY_PROTOCOL = "globe-unlimited-keys:v1";
+
+function elevationMessage(request: Request, user: UserRecord, challenge: ElevChallenge): string | null {
+  if (new Date(challenge.expiresAt).getTime() <= Date.now()) return null;
+  if (challenge.message && challenge.userId && challenge.fingerprint) {
+    if (challenge.userId !== user.id || challenge.fingerprint !== user.fingerprint) return null;
+    return challenge.message;
+  }
+  if (
+    !challenge.nonce ||
+    typeof challenge.expiresAtMs !== "number" ||
+    !challenge.adminHash ||
+    !challenge.userHash ||
+    !/^[a-f0-9]{16,64}$/.test(challenge.nonce)
+  ) {
+    return null;
+  }
+  if (challenge.expiresAtMs <= Date.now()) return null;
+  if (challenge.adminHash !== privilegeSeal("unlock", user.fingerprint)) return null;
+  if (challenge.userHash !== userSeal(user.id)) return null;
+  return [
+    ADMIN_PROTOCOL,
+    new URL(request.url).origin,
+    user.id,
+    user.fingerprint,
+    challenge.nonce,
+    String(challenge.expiresAtMs),
+  ].join("|");
+}
+
+async function verifyHeldKey(
+  user: UserRecord,
+  message: string,
+  pqcSignature: string,
+  signatureArmored: string,
+): Promise<boolean> {
+  try {
+    const storedPqc = decodeStoredPublicKey(user.publicKeyArmored);
+    if (storedPqc) {
+      if (!pqcSignature || pqcSignature.length > 70_000) return false;
+      const signature = b64ToFixedBytes(pqcSignature, PQC_SIG_SUITES[storedPqc.suite].signature);
+      return verifyPqcSignature(storedPqc.suite, signature, message, storedPqc.publicKey);
+    }
+    if (!signatureArmored || signatureArmored.length > MAX_SIGNATURE_CHARS) return false;
+    if (/BEGIN PGP PRIVATE KEY BLOCK/i.test(signatureArmored)) return false;
+    const publicKey = await openpgp.readKey({ armoredKey: user.publicKeyArmored });
+    const signed = await openpgp.createMessage({ text: message });
+    const signature = await openpgp.readSignature({ armoredSignature: signatureArmored });
+    const result = await openpgp.verify({
+      message: signed,
+      signature,
+      verificationKeys: publicKey,
+    });
+    const sig = result.signatures[0];
+    if (!sig) return false;
+    await sig.verified;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function unlimitedKeyPrivilegeMessage(
+  action: "grant" | "revoke",
+  targetFingerprint: string,
+  adminFingerprint: string,
+): string {
+  return `${UNLIMITED_KEY_PROTOCOL}|${action}|${targetFingerprint}|${adminFingerprint}`;
+}
+
 export async function adminElevateChallenge(
   request: Request,
   env: AdminEnv,
@@ -571,6 +661,15 @@ export async function adminElevateChallenge(
   const expiresAtMs = Date.now() + ELEV_CHALLENGE_TTL_SEC * 1000;
   const expiresAt = new Date(expiresAtMs).toISOString();
   const origin = new URL(request.url).origin;
+  const adminHash = privilegeSeal("unlock", gate.user.fingerprint);
+  const sessionUserHash = userSeal(gate.user.id);
+  if (!adminHash || !sessionUserHash) {
+    return json(
+      { error: "admin_misconfigured", message: "This admin key has no fingerprint seal." },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
   const message = [
     ADMIN_PROTOCOL,
     origin,
@@ -581,9 +680,11 @@ export async function adminElevateChallenge(
   ].join("|");
 
   const record: ElevChallenge = {
-    userId: gate.user.id,
-    fingerprint: gate.user.fingerprint,
-    message,
+    v: 1,
+    adminHash,
+    userHash: sessionUserHash,
+    nonce,
+    expiresAtMs,
     createdAt: new Date().toISOString(),
     expiresAt,
   };
@@ -707,11 +808,8 @@ export async function adminElevate(
     );
   }
 
-  if (
-    challenge.userId !== gate.user.id ||
-    challenge.fingerprint !== gate.user.fingerprint ||
-    new Date(challenge.expiresAt).getTime() <= Date.now()
-  ) {
+  const signedMessage = elevationMessage(request, gate.user, challenge);
+  if (!signedMessage) {
     return json(
       {
         error: "invalid_challenge",
@@ -722,39 +820,8 @@ export async function adminElevate(
     );
   }
 
-  try {
-    const storedPqc = decodeStoredPublicKey(gate.user.publicKeyArmored);
-    if (storedPqc) {
-      if (!pqcSignature || pqcSignature.length > 70_000) throw new Error("missing_signature");
-      const signature = b64ToFixedBytes(pqcSignature, PQC_SIG_SUITES[storedPqc.suite].signature);
-      const ok = verifyPqcSignature(
-        storedPqc.suite,
-        signature,
-        challenge.message,
-        storedPqc.publicKey,
-      );
-      if (!ok) throw new Error("bad_signature");
-    } else {
-      if (!signatureArmored || signatureArmored.length > MAX_SIGNATURE_CHARS) {
-        throw new Error("missing_signature");
-      }
-      const publicKey = await openpgp.readKey({
-        armoredKey: gate.user.publicKeyArmored,
-      });
-      const message = await openpgp.createMessage({ text: challenge.message });
-      const signature = await openpgp.readSignature({
-        armoredSignature: signatureArmored,
-      });
-      const result = await openpgp.verify({
-        message,
-        signature,
-        verificationKeys: publicKey,
-      });
-      const sig = result.signatures[0];
-      if (!sig) throw new Error("no_signature");
-      await sig.verified;
-    }
-  } catch {
+  const signatureOk = await verifyHeldKey(gate.user, signedMessage, pqcSignature, signatureArmored);
+  if (!signatureOk) {
     await writeAudit(env, {
       at: new Date().toISOString(),
       adminUserId: gate.user.id,
@@ -779,8 +846,9 @@ export async function adminElevate(
     Date.now() + ELEV_TOKEN_TTL_SEC * 1000,
   ).toISOString();
   const elevRec: ElevToken = {
-    userId: gate.user.id,
-    fingerprint: gate.user.fingerprint,
+    v: 1,
+    adminHash: privilegeSeal("unlock", gate.user.fingerprint),
+    userHash: userSeal(gate.user.id),
     createdAt: new Date().toISOString(),
     expiresAt,
   };
@@ -1000,57 +1068,108 @@ export async function adminRevokeTransit(
   );
 }
 
-export async function adminGrantUnlimitedKeys(
+async function mutateUnlimitedKeys(
   request: Request,
   env: AdminEnv,
-  applySecurityHeaders?: SecurityHeadersFn,
+  applySecurityHeaders: SecurityHeadersFn | undefined,
+  grant: boolean,
 ): Promise<Response> {
   const gate = await requireAdminMutation(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
 
-  let body: { userId?: string; fingerprint?: string; note?: string } = {};
+  let body: {
+    userId?: string;
+    fingerprint?: string;
+    note?: string;
+    pqcSignature?: string;
+    signatureArmored?: string;
+  } = {};
   try {
     body = (await request.json()) as typeof body;
     assertNoPrivateKeyMaterial(body);
-  } catch {
-    body = {};
+  } catch (error) {
+    if (error instanceof Error && error.message === "private_key_rejected") {
+      return json(
+        { error: "private_key_rejected", message: "Send a detached signature only — never a private key." },
+        { status: 400 },
+        applySecurityHeaders,
+      );
+    }
+    return json({ error: "invalid_json" }, { status: 400 }, applySecurityHeaders);
   }
 
-  let user: UserRecord | null = null;
-  if (body.userId?.trim()) {
-    user = await getUserById(env, body.userId.trim());
-  }
-  if (!user && body.fingerprint?.trim()) {
-    user = await getUserByFingerprint(env, body.fingerprint.trim());
-  }
-  if (!user) {
+  const target = normalizeFingerprint(body.fingerprint || "");
+  const adminFingerprint = normalizeFingerprint(gate.user.fingerprint);
+  if (!target || !adminFingerprint) {
     return json(
       {
-        error: "user_not_found",
-        message: "Provide a valid userId or fingerprint.",
+        error: "fingerprint_required",
+        message: "Enter the account fingerprint. Unlimited keys follow that key.",
       },
+      { status: 400 },
+      applySecurityHeaders,
+    );
+  }
+
+  const action = grant ? "grant" : "revoke";
+  const signed = await verifyHeldKey(
+    gate.user,
+    unlimitedKeyPrivilegeMessage(action, target, adminFingerprint),
+    body.pqcSignature?.trim() || "",
+    body.signatureArmored?.trim() || "",
+  );
+  if (!signed) {
+    await writeAudit(env, {
+      at: new Date().toISOString(),
+      adminUserId: gate.user.id,
+      adminFingerprint: gate.user.fingerprint,
+      action: grant ? "grant_unlimited_keys" : "revoke_unlimited_keys",
+      detail: "bad_privilege_signature",
+      ip: clientIp(request),
+      ok: false,
+    });
+    return json(
+      {
+        error: "privilege_signature_required",
+        message: "The admin key must sign this account fingerprint. A swapped account id is rejected.",
+      },
+      { status: 401 },
+      applySecurityHeaders,
+    );
+  }
+
+  const user = await getUserByFingerprint(env, target);
+  if (!user) {
+    return json(
+      { error: "user_not_found", message: "No account is registered for that fingerprint." },
       { status: 404 },
       applySecurityHeaders,
     );
   }
-
-  const updated = await setUserUnlimitedKeys(env, user.id, true);
-  if (!updated) {
+  if (body.userId?.trim() && body.userId.trim().toLowerCase() !== user.id.toLowerCase()) {
     return json(
-      { error: "update_failed" },
-      { status: 500 },
+      {
+        error: "fingerprint_mismatch",
+        message: "The account id does not match the signed fingerprint.",
+      },
+      { status: 409 },
       applySecurityHeaders,
     );
+  }
+
+  const updated = await setUserUnlimitedKeys(env, user.id, grant);
+  if (!updated) {
+    return json({ error: "update_failed" }, { status: 500 }, applySecurityHeaders);
   }
 
   await writeAudit(env, {
     at: new Date().toISOString(),
     adminUserId: gate.user.id,
     adminFingerprint: gate.user.fingerprint,
-    action: "grant_unlimited_keys",
+    action: grant ? "grant_unlimited_keys" : "revoke_unlimited_keys",
     targetUserId: user.id,
     targetFingerprint: user.fingerprint,
-    detail: body.note?.slice(0, 200) || "manual grant",
+    detail: body.note?.slice(0, 200) || (grant ? "manual grant" : "manual revoke"),
     ip: clientIp(request),
     ok: true,
   });
@@ -1059,11 +1178,21 @@ export async function adminGrantUnlimitedKeys(
     {
       ok: true,
       user: publicUser(updated),
-      message: "Unlimited sign-in keys granted for networks that hold this account.",
+      message: grant
+        ? "Unlimited sign-in keys granted for this key. The seal is a SHAKE256 digest of its fingerprint."
+        : "Unlimited sign-in keys revoked for this key. Networks that only held this key return to 3 keys.",
     },
     { status: 200 },
     applySecurityHeaders,
   );
+}
+
+export async function adminGrantUnlimitedKeys(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  return mutateUnlimitedKeys(request, env, applySecurityHeaders, true);
 }
 
 export async function adminRevokeUnlimitedKeys(
@@ -1071,65 +1200,7 @@ export async function adminRevokeUnlimitedKeys(
   env: AdminEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const gate = await requireAdminMutation(request, env, applySecurityHeaders);
-  if (!gate.ok) return gate.response;
-
-  let body: { userId?: string; fingerprint?: string; note?: string } = {};
-  try {
-    body = (await request.json()) as typeof body;
-    assertNoPrivateKeyMaterial(body);
-  } catch {
-    body = {};
-  }
-
-  let user: UserRecord | null = null;
-  if (body.userId?.trim()) {
-    user = await getUserById(env, body.userId.trim());
-  }
-  if (!user && body.fingerprint?.trim()) {
-    user = await getUserByFingerprint(env, body.fingerprint.trim());
-  }
-  if (!user) {
-    return json(
-      {
-        error: "user_not_found",
-        message: "Provide a valid userId or fingerprint.",
-      },
-      { status: 404 },
-      applySecurityHeaders,
-    );
-  }
-
-  const updated = await setUserUnlimitedKeys(env, user.id, false);
-  if (!updated) {
-    return json(
-      { error: "update_failed" },
-      { status: 500 },
-      applySecurityHeaders,
-    );
-  }
-
-  await writeAudit(env, {
-    at: new Date().toISOString(),
-    adminUserId: gate.user.id,
-    adminFingerprint: gate.user.fingerprint,
-    action: "revoke_unlimited_keys",
-    targetUserId: user.id,
-    targetFingerprint: user.fingerprint,
-    detail: body.note?.slice(0, 200) || "manual revoke",
-    ip: clientIp(request),
-    ok: true,
-  });
-
-  return json(
-    {
-      ok: true,
-      user: publicUser(updated),
-      message: "Unlimited sign-in keys revoked. This network is back to 3 keys.",
-    },
-    { status: 200 },
-    applySecurityHeaders,
-  );
+  return mutateUnlimitedKeys(request, env, applySecurityHeaders, false);
 }
 
 /**

@@ -72,3 +72,19 @@ export function chainHash(prevHash: string, recordHash: string): string {
 export function isPqcLogHash(value: string): boolean {
   return /^[a-f0-9]{64}$/.test(value);
 }
+
+/** SHAKE256 seal for a privilege bound to one key fingerprint. */
+export function privilegeSeal(kind: "unlock" | "unlimited-key", fingerprint: string): string {
+  const hexId = fingerprint.replace(/[\s:]/g, "").toLowerCase();
+  if (!/^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(hexId)) return "";
+  return pqcLogDigest(kind, hexId);
+}
+
+/** SHAKE256 seal for an elevation user id or challenge message. */
+export function userSeal(userId: string): string {
+  return pqcLogDigest("elev-user", userId);
+}
+
+export function messageSeal(message: string): string {
+  return pqcLogDigest("elev-message", message);
+}

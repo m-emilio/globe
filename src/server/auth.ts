@@ -15,6 +15,7 @@
  */
 
 import * as openpgp from "openpgp";
+import { privilegeSeal } from "./pqcLogHash";
 
 const SESSION_COOKIE = "globe_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
@@ -54,6 +55,11 @@ export type UserRecord = {
    * Lifts the per-network sign-in key cap for networks that already hold this key.
    */
   unlimitedKeys?: boolean;
+  /**
+   * SHAKE256 seal of this account's fingerprint. The flag counts only when the seal matches.
+   * A copied flag, or a fingerprint swapped on the record, does not transfer the privilege.
+   */
+  unlimitedKeySeal?: string;
 };
 
 export type SessionRecord = {
@@ -131,6 +137,28 @@ function adminFlags(user: UserRecord, env: AuthEnv) {
   };
 }
 
+/** True when the unlimited-key flag is sealed to this account's own fingerprint. */
+export function unlimitedKeySealMatches(user: UserRecord): boolean {
+  if (!user.unlimitedKeys) return false;
+  const seal = privilegeSeal("unlimited-key", user.fingerprint);
+  if (!seal) return false;
+  if (!user.unlimitedKeySeal) return true;
+  return user.unlimitedKeySeal === seal;
+}
+
+async function attachUnlimitedSeal(env: AuthEnv, user: UserRecord): Promise<UserRecord> {
+  if (!env.BILLING_KV || !user.unlimitedKeys || user.unlimitedKeySeal) return user;
+  const seal = privilegeSeal("unlimited-key", user.fingerprint);
+  if (!seal) return user;
+  user.unlimitedKeySeal = seal;
+  try {
+    await env.BILLING_KV.put(userKey(user.id), JSON.stringify(user));
+  } catch {
+    // This response still uses the seal. The next load can retry the write.
+  }
+  return user;
+}
+
 export async function getUserById(
   env: AuthEnv,
   userId: string,
@@ -139,7 +167,7 @@ export async function getUserById(
   const raw = await env.BILLING_KV.get(userKey(userId));
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as UserRecord;
+    return attachUnlimitedSeal(env, JSON.parse(raw) as UserRecord);
   } catch {
     return null;
   }
@@ -480,7 +508,7 @@ function toPublicUser(user: UserRecord): PublicUser {
     fingerprint: user.fingerprint,
     primaryUserId: user.primaryUserId,
     transitPaid: Boolean(user.transitPaid),
-    unlimitedKeys: Boolean(user.unlimitedKeys),
+    unlimitedKeys: unlimitedKeySealMatches(user),
   };
 }
 
@@ -796,7 +824,7 @@ function readIpFingerprints(raw: string | null): string[] {
 async function networkHasUnlimitedKeys(env: AuthEnv, fingerprints: readonly string[]): Promise<boolean> {
   for (let i = 0; i < fingerprints.length; i++) {
     const user = await getUserByFingerprint(env, fingerprints[i]!);
-    if (user?.unlimitedKeys) return true;
+    if (user && unlimitedKeySealMatches(user)) return true;
   }
   return false;
 }
@@ -1601,7 +1629,11 @@ export async function setUserUnlimitedKeys(
   const raw = await env.BILLING_KV.get(userKey(userId));
   if (!raw) return null;
   const user = JSON.parse(raw) as UserRecord;
+  const seal = privilegeSeal("unlimited-key", user.fingerprint);
+  if (!seal) return null;
   user.unlimitedKeys = unlimited;
+  if (unlimited) user.unlimitedKeySeal = seal;
+  else delete user.unlimitedKeySeal;
   await env.BILLING_KV.put(userKey(userId), JSON.stringify(user));
   return user;
 }

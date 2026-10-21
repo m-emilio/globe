@@ -5,9 +5,90 @@
  */
 
 const ELEVATION_PREFIX = "globe-admin-elevate:v1|";
+const PRIVILEGE_PROTOCOL = "globe-unlimited-keys:v1";
 
 let elevationToken = "";
 let elevationExpiresAt = 0;
+let adminFingerprint = "";
+
+function normalizeKeyId(value: string): string {
+  const hexId = value.replace(/[\s:]/g, "").toLowerCase();
+  return /^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(hexId) ? hexId : "";
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.href;
+  return input.url;
+}
+
+async function signPrivilege(
+  action: "grant" | "revoke",
+  target: string,
+): Promise<{ pqcSignature?: string; signatureArmored?: string }> {
+  if (!adminFingerprint) {
+    throw new Error("Unlock privileges first so the signature is tied to this admin key.");
+  }
+  const message = `${PRIVILEGE_PROTOCOL}|${action}|${target}|${adminFingerprint}`;
+  if (/^[a-f0-9]{64}$/.test(adminFingerprint)) {
+    const { signStoredPqcMessage } = await import("./mlDsa");
+    return { pqcSignature: await signStoredPqcMessage(adminFingerprint, message) };
+  }
+  const pgp = await import("./pgpAuth");
+  const device = (await pgp.getDeviceKey(adminFingerprint)) || (await pgp.getPreferredDeviceKey());
+  if (!device) throw new Error("No device private key on this browser matches the admin account.");
+  const passphrase = document.querySelector("#globe-admin-key-grant-passphrase");
+  const passphraseValue = passphrase instanceof HTMLInputElement ? passphrase.value : "";
+  if (device.encrypted && !passphraseValue) {
+    const wrap = passphrase?.parentElement;
+    if (wrap instanceof HTMLElement) wrap.hidden = false;
+    throw new Error("This OpenPGP key is encrypted. Enter its passphrase, then try again.");
+  }
+  return {
+    signatureArmored: await pgp.signChallenge(
+      message,
+      device.privateKeyArmored,
+      device.encrypted ? passphraseValue : undefined,
+    ),
+  };
+}
+
+function installPrivilegeFetch(): void {
+  const holder = window as unknown as { __globePrivilegeFetch?: boolean };
+  if (holder.__globePrivilegeFetch) return;
+  holder.__globePrivilegeFetch = true;
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = requestUrl(input);
+    let nextInit = init;
+    const action = url.includes("/api/admin/grant-unlimited-keys")
+      ? "grant"
+      : url.includes("/api/admin/revoke-unlimited-keys")
+        ? "revoke"
+        : "";
+    if (action && typeof init?.body === "string" && (init.method || "GET").toUpperCase() === "POST") {
+      const parsed = JSON.parse(init.body) as Record<string, unknown>;
+      const target = typeof parsed.fingerprint === "string" ? normalizeKeyId(parsed.fingerprint) : "";
+      if (target && typeof parsed.pqcSignature !== "string" && typeof parsed.signatureArmored !== "string") {
+        const signed = await signPrivilege(action, target);
+        nextInit = { ...init, body: JSON.stringify({ ...parsed, fingerprint: target, ...signed }) };
+      }
+    }
+    const response = await nativeFetch(input, nextInit);
+    if (response.ok && url.includes("/api/admin/elevate-challenge")) {
+      try {
+        const data = (await response.clone().json()) as { fingerprint?: unknown };
+        if (typeof data.fingerprint === "string") {
+          const fp = normalizeKeyId(data.fingerprint);
+          if (fp) adminFingerprint = fp;
+        }
+      } catch {
+        // The caller still receives the challenge response.
+      }
+    }
+    return response;
+  };
+}
 
 function field(label: string, input: HTMLInputElement): HTMLLabelElement {
   const wrap = document.createElement("label");
@@ -68,6 +149,7 @@ function messageOf(data: Record<string, unknown>, fallback: string): string {
 }
 
 export function mountAdminKeyGrant(): void {
+  installPrivilegeFetch();
   const modal = document.querySelector(".admin-modal");
   if (!(modal instanceof HTMLElement) || modal.querySelector("#globe-admin-key-grant")) return;
 
@@ -86,7 +168,7 @@ export function mountAdminKeyGrant(): void {
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const note = document.createElement("p");
   note.style.cssText = "margin:0 0 8px;font-size:13px;line-height:1.45;color:#d5ffe9";
-  note.textContent = "Same rule as transit: an allowlisted admin session, the action secret, and a fresh signature from the key on this device. No key passphrase. A paid Stripe checkout under $20 grants this on its own. Grant lets every network that already holds the account register more keys. Revoke puts those networks back to 3 keys. The private key is not uploaded.";
+  note.textContent = "Unlock privileges signs a challenge with the key on this device. The server stores a SHAKE256 seal of that key, not the raw fingerprint. Grant and revoke sign the target account fingerprint with the same key, and the unlimited-key seal is stored on that account. A swapped account id does not match the signature. A paid Stripe checkout under $20 seals the paying account. Networks that already hold the sealed key can register more keys. No key passphrase unless the OpenPGP key itself is encrypted. The private key is not uploaded.";
   const status = document.createElement("p");
   status.id = "globe-admin-key-grant-status";
   status.setAttribute("role", "status");
@@ -202,11 +284,27 @@ export function mountAdminKeyGrant(): void {
         setStatus("Enter the user id or fingerprint first.", true);
         return;
       }
+      const lookedUp = await fetch(`/api/admin/lookup?q=${encodeURIComponent(query)}`, {
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const looked = (await lookedUp.json()) as {
+        found?: boolean;
+        user?: { id?: string; fingerprint?: string };
+      };
+      const target = lookedUp.ok && looked.found && typeof looked.user?.fingerprint === "string"
+        ? normalizeKeyId(looked.user.fingerprint)
+        : "";
+      const typed = normalizeKeyId(query);
+      const lookedId = typeof looked.user?.id === "string" ? looked.user.id.toLowerCase() : "";
+      if (!target || (typed && typed !== target && typed !== lookedId)) {
+        setStatus("No account fingerprint matched that user id.", true);
+        return;
+      }
       const response = await postJson(
         grantKeys ? "/api/admin/grant-unlimited-keys" : "/api/admin/revoke-unlimited-keys",
         {
-          userId: /^[a-f0-9]{16,64}$/i.test(query) ? query : undefined,
-          fingerprint: query,
+          fingerprint: target,
           note: auditNote.value.trim() || undefined,
         },
         {
