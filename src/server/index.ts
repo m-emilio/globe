@@ -139,10 +139,6 @@ const COMTRADE_FREE_IMPORT_URL =
 const COMTRADE_FREE_AVAILABILITY_URL =
   `${COMTRADE_API_BASE}/data/v1/getDa/C/A/HS?reporterCode=${COMTRADE_REPORTER_CODE}` +
   `&period=${COMTRADE_PERIOD}`;
-/** @deprecated alias — public preview export (kept for response.apiUrl fallbacks) */
-const COMTRADE_EXPORT_URL = COMTRADE_PUBLIC_EXPORT_URL;
-const COMTRADE_IMPORT_URL = COMTRADE_PUBLIC_IMPORT_URL;
-const COMTRADE_AVAILABILITY_URL = COMTRADE_PUBLIC_AVAILABILITY_URL;
 const COMTRADE_REFERENCES_URL =
   `${COMTRADE_API_BASE}/files/v1/app/reference/ListofReferences.json`;
 const COMTRADE_REPORTERS_URL =
