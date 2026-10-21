@@ -8,6 +8,87 @@ import { ActivityFeed, type ActivityFilter } from "./ActivityFeed";
 import { formatFingerprint, getKeyGenProfile, keyGenProfilesBySafety, SAFETY_LEVEL_META, shortFingerprint, S2K_PROTOCOLS, SYMMETRIC_CIPHERS, type AeadModeId, type KeyGenProfileId, type S2kProtocolId, type SymmetricCipherId } from "./pgpAuth";
 import { NearbyMap, TransitPanelContent } from "./lazyPanels";
 import { DEFAULT_WEATHER_LOCATION, formatForecastDay, formatForecastHour } from "./globeModel";
+
+type AccessMark = "stripe" | "admin" | "unrecorded" | null;
+
+function accessMark(
+  active: boolean | undefined,
+  origin: string | null | undefined,
+): AccessMark {
+  if (!active) return null;
+  if (origin === "stripe" || origin === "admin") return origin;
+  return "unrecorded";
+}
+
+function accessPhrase(
+  active: boolean | undefined,
+  origin: string | null | undefined,
+): string {
+  const mark = accessMark(active, origin);
+  if (mark === "stripe") return "Stripe payment";
+  if (mark === "admin") return "Admin grant";
+  if (mark === "unrecorded") return "Old mark, no Stripe receipt";
+  return "Locked";
+}
+
+function AccessBadge({
+  active,
+  origin,
+  kind,
+}: {
+  active: boolean | undefined;
+  origin: string | null | undefined;
+  kind: "transit" | "keys";
+}) {
+  const mark = accessMark(active, origin);
+  if (kind === "keys" && !mark) return null;
+  const label =
+    kind === "keys"
+      ? mark === "stripe"
+        ? "K·STRIPE"
+        : mark === "admin"
+          ? "K·ADMIN"
+          : "K·OLD"
+      : mark === "stripe"
+        ? "STRIPE"
+        : mark === "admin"
+          ? "ADMIN"
+          : mark === "unrecorded"
+            ? "OLD"
+            : "LOCKED";
+  const title =
+    mark === "stripe"
+      ? kind === "keys"
+        ? "Unlimited keys from a Stripe payment"
+        : "Stripe payment"
+      : mark === "admin"
+        ? kind === "keys"
+          ? "Unlimited keys granted by an admin"
+          : "Admin grant"
+        : mark === "unrecorded"
+          ? kind === "keys"
+            ? "Unlimited keys marked with no Stripe receipt"
+            : "Marked paid with no Stripe receipt"
+          : "Locked";
+  const style =
+    mark === "admin"
+      ? { background: "#8a5a12", color: "#fff8e8" }
+      : mark === "unrecorded"
+        ? { background: "#4a5160", color: "#e8eef6" }
+        : undefined;
+  const className =
+    mark === "stripe"
+      ? "admin-user-badge paid"
+      : mark === null
+        ? "admin-user-badge locked"
+        : "admin-user-badge";
+  return (
+    <span className={className} style={style} title={title}>
+      {label}
+    </span>
+  );
+}
+
 export function AppChunk0({ b }: { b: GlobeApi }) {
   const { activityFeed, activityFilter, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, counter, deviceKeys, dismissSiteTour, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generatedPublic, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadLocalTransit, loadNearbyPaths, loadWeatherFeed, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, paymentRequired, refreshDeviceKeys, regPublicKey, registerWithPublicKey, runRateLimitedButtonAction, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setKeyGenProfile, setKeyPassphrase, setRegPublicKey, setSelectedDeviceFp, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowTransitPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, showActivityMenu, showAdminPanel, showAuthPanel, showImportDevice, showNearbyPanel, showSiteTour, showTransitPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, transitDistanceM, transitError, transitPreview, transitStatus, unlockAdminPrivileges, weatherError, weatherFeed, weatherGlow, weatherStatus } = b;
   return (
@@ -713,7 +794,9 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                 <div className="auth-section-title">All users</div>
                 <p className="auth-modal-copy">
                   Directory for elevated admins. The signed key must be on the
-                  fingerprint allowlist. Public fields only — no keys.
+                  fingerprint allowlist. STRIPE is a payment, ADMIN is a grant,
+                  and OLD is an earlier mark with no Stripe receipt. Public
+                  fields only — no keys.
                 </p>
                 <div className="auth-modal-actions auth-row admin-users-filters">
                   <button
@@ -734,7 +817,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                     disabled={adminBusy}
                     onClick={() => setAdminUsersFilter("paid")}
                   >
-                    Paid
+                    Transit
                   </button>
                   <button
                     type="button"
@@ -800,18 +883,16 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                           }}
                           title="Select for grant / revoke / remove"
                         >
-                          <span
-                            className={
-                              u.transitPaid
-                                ? "admin-user-badge paid"
-                                : "admin-user-badge locked"
-                            }
-                          >
-                            {u.transitPaid ? "PAID" : "LOCKED"}
-                          </span>
-                          {u.unlimitedKeys ? (
-                            <span className="admin-user-badge paid">KEYS</span>
-                          ) : null}
+                          <AccessBadge
+                            active={u.transitPaid}
+                            origin={u.transitOrigin}
+                            kind="transit"
+                          />
+                          <AccessBadge
+                            active={u.unlimitedKeys}
+                            origin={u.unlimitedKeyOrigin}
+                            kind="keys"
+                          />
                           <code className="admin-user-id">{u.id}</code>
                           <code className="admin-user-fp">
                             {formatFingerprint(u.fingerprint)}
@@ -885,15 +966,19 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                     <div>
                       Transit:{" "}
                       <strong>
-                        {adminLookupUser.transitPaid
-                          ? "PAID / unlocked"
-                          : "LOCKED"}
+                        {accessPhrase(
+                          adminLookupUser.transitPaid,
+                          adminLookupUser.transitOrigin,
+                        )}
                       </strong>
                     </div>
                     <div>
                       Unlimited keys:{" "}
                       <strong>
-                        {adminLookupUser.unlimitedKeys ? "UNLOCKED" : "LOCKED"}
+                        {accessPhrase(
+                          adminLookupUser.unlimitedKeys,
+                          adminLookupUser.unlimitedKeyOrigin,
+                        )}
                       </strong>
                     </div>
                     <label className="auth-field" style={{ marginTop: 10 }}>
@@ -945,7 +1030,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                         }
                         onClick={() => void adminGrantKind("keys", true)}
                       >
-                        Grant unlimited keys
+                        Grant keys to selected account
                       </button>
                       <button
                         type="button"
