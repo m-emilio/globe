@@ -494,26 +494,42 @@ const isTradePulsePreview = getIsTradePulsePreview();
       if (!adminElevationValid()) {
         throw new Error("Unlock privileges first (device-key signature).");
       }
-      const res = await authFetch("/api/admin/delete-user", {
-        method: "POST",
-        headers: adminHeaders(),
-        body: JSON.stringify({
-          userId: user.id,
-          fingerprint: user.fingerprint,
-          confirm: "DELETE",
-        }),
-      });
-      const data = (await res.json()) as {
-        ok?: boolean;
-        message?: string;
-        error?: string;
+      const postDelete = async (confirm: string) => {
+        const res = await authFetch("/api/admin/delete-user", {
+          method: "POST",
+          headers: adminHeaders(),
+          body: JSON.stringify({
+            userId: user.id,
+            fingerprint: user.fingerprint,
+            confirm,
+          }),
+        });
+        const data = (await res.json()) as {
+          ok?: boolean;
+          message?: string;
+          error?: string;
+        };
+        return { res, data };
       };
+      let { res, data } = await postDelete("DELETE");
+      if (!res.ok && data.error === "admin_delete_confirm") {
+        const again = window.confirm(
+          data.message ||
+            "This account is on the admin allowlist. Delete it from the database?",
+        );
+        if (!again) {
+          setAdminMessage("Delete cancelled.");
+          return;
+        }
+        ({ res, data } = await postDelete("DELETE ADMIN"));
+      }
       if (!res.ok) {
         throw new Error(data.message || data.error || "Delete failed");
       }
       setAdminLookupUser(null);
       setAdminUsers((prev) => prev.filter((u) => u.id !== user.id));
       setAdminMessage(data.message || "User deleted.");
+      if (authUser && user.id === authUser.id) await refreshAuth();
       await loadAdminAudit();
     } catch (error) {
       setAdminError(
