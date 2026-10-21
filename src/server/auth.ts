@@ -55,6 +55,10 @@ export type UserRecord = {
    * Lifts the per-network sign-in key cap for networks that already hold this key.
    */
   unlimitedKeys?: boolean;
+  /** Why transit is on. Missing on older records; a Stripe receipt can still identify those. */
+  transitSource?: "stripe" | "admin";
+  /** Why unlimited keys are on. Missing on older records. */
+  unlimitedKeySource?: "stripe" | "admin";
   /**
    * SHAKE256 seal of this account's fingerprint. The flag counts only when the seal matches.
    * A copied flag, or a fingerprint swapped on the record, does not transfer the privilege.
@@ -1627,12 +1631,15 @@ export async function setUserTransitPaid(
   env: AuthEnv,
   userId: string,
   paid: boolean,
+  source?: "stripe" | "admin",
 ): Promise<UserRecord | null> {
   if (!env.BILLING_KV) return null;
   const raw = await env.BILLING_KV.get(userKey(userId));
   if (!raw) return null;
   const user = JSON.parse(raw) as UserRecord;
   user.transitPaid = paid;
+  if (!paid) delete user.transitSource;
+  else if (source) user.transitSource = source;
   await env.BILLING_KV.put(userKey(userId), JSON.stringify(user));
   return user;
 }
@@ -1642,6 +1649,7 @@ export async function setUserUnlimitedKeys(
   env: AuthEnv,
   userId: string,
   unlimited: boolean,
+  source?: "stripe" | "admin",
 ): Promise<UserRecord | null> {
   if (!env.BILLING_KV) return null;
   const raw = await env.BILLING_KV.get(userKey(userId));
@@ -1650,8 +1658,13 @@ export async function setUserUnlimitedKeys(
   const seal = privilegeSeal("unlimited-key", user.fingerprint);
   if (!seal) return null;
   user.unlimitedKeys = unlimited;
-  if (unlimited) user.unlimitedKeySeal = seal;
-  else delete user.unlimitedKeySeal;
+  if (unlimited) {
+    user.unlimitedKeySeal = seal;
+    if (source) user.unlimitedKeySource = source;
+  } else {
+    delete user.unlimitedKeySeal;
+    delete user.unlimitedKeySource;
+  }
   await env.BILLING_KV.put(userKey(userId), JSON.stringify(user));
   return user;
 }

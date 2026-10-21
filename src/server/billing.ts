@@ -159,6 +159,24 @@ function entitlementUserKey(userId: string) {
   return `entitlement:user:${userId}`;
 }
 
+/** Active Stripe receipt for this account, if one was stored. */
+export async function readUserEntitlement(
+  env: BillingEnv,
+  userId: string,
+): Promise<EntitlementRecord | null> {
+  if (!env.BILLING_KV || !userId) return null;
+  const raw = await env.BILLING_KV.get(entitlementUserKey(userId));
+  if (!raw) return null;
+  try {
+    const record = JSON.parse(raw) as EntitlementRecord;
+    if (record.status !== "active") return null;
+    if (record.kind !== "transit" && record.kind !== "unlimited_keys") return null;
+    return record;
+  } catch {
+    return null;
+  }
+}
+
 function paymentSessionKey(sessionId: string) {
   return `payment:session:${sessionId}`;
 }
@@ -354,8 +372,8 @@ export async function grantPaidToUser(
 
   const user =
     kind === "transit"
-      ? await setUserTransitPaid(env, input.userId, true)
-      : await setUserUnlimitedKeys(env, input.userId, true);
+      ? await setUserTransitPaid(env, input.userId, true, "stripe")
+      : await setUserUnlimitedKeys(env, input.userId, true, "stripe");
   if (!user) return null;
 
   const record: EntitlementRecord = {

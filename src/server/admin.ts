@@ -32,7 +32,7 @@ import {
   type AuthEnv,
   type UserRecord,
 } from "./auth";
-import { grantPaidToUser, type BillingEnv } from "./billing";
+import { grantPaidToUser, readUserEntitlement, type BillingEnv } from "./billing";
 import {
   b64ToFixedBytes,
   decodeStoredPublicKey,
@@ -125,15 +125,46 @@ function randomHex(bytes = 32): string {
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+type AccessOrigin = "stripe" | "admin" | "unrecorded";
+
+function storedOrigin(
+  active: boolean,
+  source: "stripe" | "admin" | undefined,
+): AccessOrigin | null {
+  if (!active) return null;
+  if (source === "stripe" || source === "admin") return source;
+  return "unrecorded";
+}
+
 function publicUser(u: UserRecord) {
+  const unlimitedKeys = unlimitedKeySealMatches(u);
   return {
     id: u.id,
     fingerprint: u.fingerprint,
     primaryUserId: u.primaryUserId,
     transitPaid: Boolean(u.transitPaid),
-    unlimitedKeys: unlimitedKeySealMatches(u),
+    transitOrigin: storedOrigin(Boolean(u.transitPaid), u.transitSource),
+    unlimitedKeys,
+    unlimitedKeyOrigin: storedOrigin(unlimitedKeys, u.unlimitedKeySource),
     createdAt: u.createdAt,
   };
+}
+
+/** Older flags have no source field. A stored Stripe receipt still counts as payment. */
+async function withReceiptOrigin(env: AdminEnv, user: UserRecord) {
+  const view = publicUser(user);
+  if (view.transitOrigin !== "unrecorded" && view.unlimitedKeyOrigin !== "unrecorded") {
+    return view;
+  }
+  const receipt = await readUserEntitlement(env, user.id);
+  if (!receipt) return view;
+  if (view.transitOrigin === "unrecorded" && receipt.kind === "transit") {
+    view.transitOrigin = "stripe";
+  }
+  if (view.unlimitedKeyOrigin === "unrecorded" && receipt.kind === "unlimited_keys") {
+    view.unlimitedKeyOrigin = "stripe";
+  }
+  return view;
 }
 
 function elevChallengeKey(id: string) {
@@ -915,7 +946,7 @@ export async function adminLookupUser(
   });
 
   return json(
-    { found: true, user: publicUser(user) },
+    { found: true, user: await withReceiptOrigin(env, user) },
     { status: 200 },
     applySecurityHeaders,
   );
@@ -955,7 +986,7 @@ export async function adminGrantTransit(
     );
   }
 
-  const updated = await setUserTransitPaid(env, user.id, true);
+  const updated = await setUserTransitPaid(env, user.id, true, "admin");
   if (!updated) {
     return json(
       { error: "update_failed" },
@@ -1139,7 +1170,7 @@ async function mutateUnlimitedKeys(
     );
   }
 
-  const updated = await setUserUnlimitedKeys(env, user.id, grant);
+  const updated = await setUserUnlimitedKeys(env, user.id, grant, grant ? "admin" : undefined);
   if (!updated) {
     return json({ error: "update_failed" }, { status: 500 }, applySecurityHeaders);
   }
@@ -1536,7 +1567,7 @@ export async function adminListUsers(
           const rec = JSON.parse(raw) as UserRecord;
           if (!rec?.id || !rec?.fingerprint) continue;
           // Never include private key material even if a corrupt record had extra fields
-          const pub = publicUser(rec);
+          const pub = await withReceiptOrigin(env, rec);
           if (paidOnly && !pub.transitPaid) continue;
           if (lockedOnly && pub.transitPaid) continue;
           if (seenIds.has(pub.id)) continue;
