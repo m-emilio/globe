@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { rememberAdminElevation } from "./adminElevation";
 import { type GlobeArc, type GlobeChoroplethRegion, type GlobeHeatZone } from "./CobeGlobe";
 import { SiteTour, markSiteTourSeen, shouldShowSiteTour } from "./SiteTour";
 import { ActivityFeed, createActivityEvent, prependActivityEvent, type ActivityEvent, type ActivityFilter, type GlobeSocketStatus, type LiveFeedAccess } from "./ActivityFeed";
@@ -265,6 +266,9 @@ const isTradePulsePreview = getIsTradePulsePreview();
   const [adminElevationExpiresAt, setAdminElevationExpiresAt] = useState<
     string | null
   >(null);
+  useEffect(() => {
+    rememberAdminElevation(adminElevationToken);
+  }, [adminElevationToken]);
   const [adminNote, setAdminNote] = useState("");
   const [adminAudit, setAdminAudit] = useState<
     {
@@ -674,8 +678,8 @@ const isTradePulsePreview = getIsTradePulsePreview();
         const hex = user.fingerprint.replace(/[\s:]/g, "").toLowerCase();
         setAdminError(
           !data.adminAllowlistConfigured
-            ? `No admin allowlist on the server. Set Cloudflare secret ADMIN_FINGERPRINTS to your fingerprint (no spaces):\n${hex}`
-            : `This signed-in key is not on ADMIN_FINGERPRINTS.\n\nYour full fingerprint (copy into Cloudflare Worker secret ADMIN_FINGERPRINTS):\n${hex}\n\nFormatted:\n${fp}`,
+            ? `No admin allowlist on the server. Set Cloudflare secret ADMIN_FINGERPRINT_SECRET to your fingerprint (no spaces):\n${hex}`
+            : `This signed-in key is not on ADMIN_FINGERPRINT_SECRET.\n\nYour full fingerprint (copy into Cloudflare Worker secret ADMIN_FINGERPRINT_SECRET):\n${hex}\n\nFormatted:\n${fp}`,
         );
         // Still open panel so the message + fingerprint are visible
         setShowAdminPanel(true);
@@ -877,6 +881,45 @@ const isTradePulsePreview = getIsTradePulsePreview();
       }
     } catch (error) {
       setAdminError(error instanceof Error ? error.message : "Claim failed");
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const adminClaimAll = async () => {
+    setAdminBusy(true);
+    setAdminError("");
+    setAdminMessage("");
+    try {
+      if (!adminElevationValid()) {
+        throw new Error(
+          "Unlock privileges first. Claiming Stripe sessions needs a fresh signature from the allowlisted key.",
+        );
+      }
+      const res = await authFetch("/api/admin/claim-stripe-all", {
+        method: "POST",
+        headers: adminHeaders(),
+        body: "{}",
+      });
+      const data = (await res.json()) as {
+        message?: string;
+        error?: string;
+        claimed?: number;
+        already?: number;
+        skipped?: number;
+        unmatched?: number;
+      };
+      if (!res.ok) {
+        throw new Error(data.message || data.error || "Stripe claim failed");
+      }
+      setAdminMessage(
+        data.message ||
+          `Claimed ${data.claimed ?? 0}. Already matched ${data.already ?? 0}.`,
+      );
+      await loadAdminAudit();
+      await refreshAuth();
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : "Stripe claim failed");
     } finally {
       setAdminBusy(false);
     }
@@ -3324,7 +3367,7 @@ const isTradePulsePreview = getIsTradePulsePreview();
     ...pkiGlobeArcs,
     ...contractsGlobeArcs,
   ];
-  return { activityFeed, activityFilter, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, applyLocationPreference, applyManualLocation, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, closeContractsHub, closePkiHub, closeUnHub, comtradeError, comtradePreview, comtradeSections, comtradeStatus, comtradeValueMode, contractsError, contractsLayerOn, contractsPreview, contractsStatus, counter, deviceKeys, disableUnGlobalLayer, dismissSiteTour, enabledComtradeSectionCount, enabledTradePulseLayerCount, enabledUnGlobalSectionCount, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generatedPublic, globeChoroplethRegions, globeHeatZones, globeMarkerColor, globeOverlayMarkers, globeOverlayRoutes, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, isPkiPanelMinimized, isTradePulsePanelMinimized, isUnGlobalPanelMinimized, isUnodcPanelMinimized, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadComtradePreview, loadLocalTransit, loadNearbyPaths, loadPkiVulns, loadSamContracts, loadTradePulsePreview, loadUnGlobalPreview, loadUnodcHotspots, loadWeatherFeed, locationBusy, locationDraftAddress, locationDraftLabel, locationDraftLat, locationDraftLng, locationMessage, locationPref, logout, lookupAddressLocation, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, openAdminPanel, openContractsHub, openPkiHub, openUnHub, paymentRequired, pkiArcSelection, pkiCatalog, pkiCategory, pkiDensity, pkiError, pkiFocusCve, pkiGlobeArcs, pkiPreview, pkiSeverities, pkiShowMap, pkiSort, pkiStatus, pkiVisibleCves, positions, refreshDeviceKeys, regPublicKey, registerWithPublicKey, requestBrowserLocation, runRateLimitedButtonAction, selectTradePulsePeriod, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setContractsLayerOn, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setIsPkiPanelMinimized, setIsTradePulsePanelMinimized, setIsUnGlobalPanelMinimized, setIsUnodcPanelMinimized, setKeyGenProfile, setKeyPassphrase, setLocationDraftAddress, setLocationDraftLabel, setLocationDraftLat, setLocationDraftLng, setLocationMessage, setPkiArcPage, setPkiCatalog, setPkiCategory, setPkiDensity, setPkiFocusCve, setPkiSeverities, setPkiShowMap, setPkiSort, setRegPublicKey, setSelectedDeviceFp, setShowAbout, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowComtradePanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowPkiPanel, setShowTradePulsePanel, setShowTransitPanel, setShowUnGlobalPanel, setShowUnodcPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, setUnodcFocusMode, showAbout, showActivityMenu, showAdminPanel, showAuthPanel, showComtradePanel, showContractsHub, showImportDevice, showMenu, showNearbyPanel, showPkiHub, showPkiPanel, showSiteTour, showTradePulsePanel, showTransitPanel, showUnGlobalPanel, showUnHub, showUnodcPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, toggleAllTradePulseLayers, toggleAllUnGlobalSections, toggleTradePulseLayer, toggleUnGlobalSection, toggleUnodcTheme, tradePulseError, tradePulseLayers, tradePulsePeriod, tradePulsePreview, tradePulseStatus, tradePulseYearOptions, transitDistanceM, transitError, transitPreview, transitStatus, unGlobalError, unGlobalPreview, unGlobalSections, unGlobalStatus, unlockAdminPrivileges, unodcCountryPolygons, unodcError, unodcPreview, unodcStatus, unodcThemes, visibleTradePulseRoutes, visibleUnMissionLocations, weatherError, weatherFeed, weatherGlow, weatherStatus };
+  return { activityFeed, activityFilter, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminClaimAll, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, applyLocationPreference, applyManualLocation, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, closeContractsHub, closePkiHub, closeUnHub, comtradeError, comtradePreview, comtradeSections, comtradeStatus, comtradeValueMode, contractsError, contractsLayerOn, contractsPreview, contractsStatus, counter, deviceKeys, disableUnGlobalLayer, dismissSiteTour, enabledComtradeSectionCount, enabledTradePulseLayerCount, enabledUnGlobalSectionCount, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generatedPublic, globeChoroplethRegions, globeHeatZones, globeMarkerColor, globeOverlayMarkers, globeOverlayRoutes, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, isPkiPanelMinimized, isTradePulsePanelMinimized, isUnGlobalPanelMinimized, isUnodcPanelMinimized, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadComtradePreview, loadLocalTransit, loadNearbyPaths, loadPkiVulns, loadSamContracts, loadTradePulsePreview, loadUnGlobalPreview, loadUnodcHotspots, loadWeatherFeed, locationBusy, locationDraftAddress, locationDraftLabel, locationDraftLat, locationDraftLng, locationMessage, locationPref, logout, lookupAddressLocation, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, openAdminPanel, openContractsHub, openPkiHub, openUnHub, paymentRequired, pkiArcSelection, pkiCatalog, pkiCategory, pkiDensity, pkiError, pkiFocusCve, pkiGlobeArcs, pkiPreview, pkiSeverities, pkiShowMap, pkiSort, pkiStatus, pkiVisibleCves, positions, refreshDeviceKeys, regPublicKey, registerWithPublicKey, requestBrowserLocation, runRateLimitedButtonAction, selectTradePulsePeriod, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setContractsLayerOn, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setIsPkiPanelMinimized, setIsTradePulsePanelMinimized, setIsUnGlobalPanelMinimized, setIsUnodcPanelMinimized, setKeyGenProfile, setKeyPassphrase, setLocationDraftAddress, setLocationDraftLabel, setLocationDraftLat, setLocationDraftLng, setLocationMessage, setPkiArcPage, setPkiCatalog, setPkiCategory, setPkiDensity, setPkiFocusCve, setPkiSeverities, setPkiShowMap, setPkiSort, setRegPublicKey, setSelectedDeviceFp, setShowAbout, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowComtradePanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowPkiPanel, setShowTradePulsePanel, setShowTransitPanel, setShowUnGlobalPanel, setShowUnodcPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, setUnodcFocusMode, showAbout, showActivityMenu, showAdminPanel, showAuthPanel, showComtradePanel, showContractsHub, showImportDevice, showMenu, showNearbyPanel, showPkiHub, showPkiPanel, showSiteTour, showTradePulsePanel, showTransitPanel, showUnGlobalPanel, showUnHub, showUnodcPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, toggleAllTradePulseLayers, toggleAllUnGlobalSections, toggleTradePulseLayer, toggleUnGlobalSection, toggleUnodcTheme, tradePulseError, tradePulseLayers, tradePulsePeriod, tradePulsePreview, tradePulseStatus, tradePulseYearOptions, transitDistanceM, transitError, transitPreview, transitStatus, unGlobalError, unGlobalPreview, unGlobalSections, unGlobalStatus, unlockAdminPrivileges, unodcCountryPolygons, unodcError, unodcPreview, unodcStatus, unodcThemes, visibleTradePulseRoutes, visibleUnMissionLocations, weatherError, weatherFeed, weatherGlow, weatherStatus };
 }
 
 export type GlobeApi = ReturnType<typeof useGlobeApp>;
