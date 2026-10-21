@@ -690,6 +690,25 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                     {new Date(adminElevationExpiresAt).toLocaleTimeString()}
                   </div>
                 )}
+                {adminElevationValid() && authUser && (
+                  <div className="auth-modal-actions auth-row">
+                    <button
+                      type="button"
+                      disabled={adminBusy}
+                      onClick={() =>
+                        void adminGrantKind("keys", true, {
+                          id: authUser.id,
+                          fingerprint: authUser.fingerprint,
+                          primaryUserId: authUser.primaryUserId,
+                          transitPaid: authUser.transitPaid,
+                          unlimitedKeys: authUser.unlimitedKeys,
+                        })
+                      }
+                    >
+                      Grant unlimited keys to this account
+                    </button>
+                  </div>
+                )}
 
                 <div className="auth-section-title">All users</div>
                 <p className="auth-modal-copy">

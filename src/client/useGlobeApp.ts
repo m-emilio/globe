@@ -616,8 +616,7 @@ const isTradePulsePreview = getIsTradePulsePreview();
       setAdminElevationToken(elev.elevationToken);
       setAdminElevationExpiresAt(elev.expiresAt || null);
       setAdminMessage(
-        elev.message ||
-          "Privileged window unlocked (~10 min). Grant / revoke / claim now available.",
+        "Privileged window open for about 10 minutes. Grant unlimited keys to this account is ready.",
       );
       await loadAdminAudit();
     } catch (error) {
@@ -720,18 +719,58 @@ const isTradePulsePreview = getIsTradePulsePreview();
     }
   };
 
-  const adminGrantKind = async (kind: "transit" | "keys", grant: boolean) => {
+  const signUnlimitedKeyPrivilege = async (
+    action: "grant" | "revoke",
+    targetFingerprint: string,
+  ) => {
+    const target = targetFingerprint.replace(/[\s:]/g, "").toLowerCase();
+    const adminFp = (authUser?.fingerprint || "").replace(/[\s:]/g, "").toLowerCase();
+    if (
+      !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(target) ||
+      !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(adminFp)
+    ) {
+      throw new Error("Unlimited keys follow a fingerprint. Use this account, or look the key up again.");
+    }
+    const message = `globe-unlimited-keys:v1|${action}|${target}|${adminFp}`;
+    if (/^[a-f0-9]{64}$/.test(adminFp)) {
+      const { signStoredPqcMessage } = await import("./mlDsa");
+      return { fingerprint: target, pqcSignature: await signStoredPqcMessage(adminFp, message) };
+    }
+    const device =
+      (await getDeviceKey(adminFp)) || (await getPreferredDeviceKey());
+    if (!device) {
+      throw new Error("No device private key on this browser matches this admin key.");
+    }
+    return {
+      fingerprint: target,
+      signatureArmored: await signChallenge(
+        message,
+        device.privateKeyArmored,
+        device.encrypted ? keyPassphrase || undefined : undefined,
+      ),
+    };
+  };
+
+  const adminGrantKind = async (
+    kind: "transit" | "keys",
+    grant: boolean,
+    explicitTarget?: AdminUserRow | null,
+  ) => {
     setAdminBusy(true);
     setAdminError("");
     setAdminMessage("");
     try {
-      const target = adminLookupUser;
+      const target = explicitTarget || adminLookupUser;
       if (!target) throw new Error("Lookup a user first.");
       if (!adminElevationValid()) {
         throw new Error(
           "Unlock privileges first. Grant and revoke need a fresh signature from the allowlisted key.",
         );
       }
+      const signed =
+        kind === "keys"
+          ? await signUnlimitedKeyPrivilege(grant ? "grant" : "revoke", target.fingerprint)
+          : null;
       const path =
         kind === "transit"
           ? grant
@@ -747,8 +786,10 @@ const isTradePulsePreview = getIsTradePulsePreview();
           headers: adminHeaders(),
           body: JSON.stringify({
             userId: target.id,
-            fingerprint: target.fingerprint,
+            fingerprint: signed?.fingerprint || target.fingerprint,
             note: adminNote.trim() || undefined,
+            pqcSignature: signed && "pqcSignature" in signed ? signed.pqcSignature : undefined,
+            signatureArmored: signed && "signatureArmored" in signed ? signed.signatureArmored : undefined,
           }),
         },
       );
