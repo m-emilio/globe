@@ -1,7 +1,7 @@
 /**
  * Admin grant and revoke for unlimited sign-in keys.
- * Uses the same session, action secret, and device-key step-up as transit.
- * The action secret and elevation token stay in this page's memory.
+ * Uses the same session and device-key step-up as transit.
+ * The elevation token stays in this page's memory. Approval is the signed allowlisted key.
  */
 
 const ELEVATION_PREFIX = "globe-admin-elevate:v1|";
@@ -168,7 +168,7 @@ export function mountAdminKeyGrant(): void {
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const note = document.createElement("p");
   note.style.cssText = "margin:0 0 8px;font-size:13px;line-height:1.45;color:#d5ffe9";
-  note.textContent = "Unlock privileges signs a challenge with the key on this device. The server stores a SHAKE256 seal of that key, not the raw fingerprint. Grant and revoke sign the target account fingerprint with the same key, and the unlimited-key seal is stored on that account. A swapped account id does not match the signature. A paid Stripe checkout under $20 seals the paying account. Networks that already hold the sealed key can register more keys. No key passphrase unless the OpenPGP key itself is encrypted. The private key is not uploaded.";
+  note.textContent = "Unlock privileges signs a challenge with the key on this device. The server accepts that signature only when the key is on ADMIN_FINGERPRINTS. Grant and revoke sign the target account fingerprint with the same key. No shared action secret is sent. A paid Stripe checkout under $20 seals the paying account. Networks that already hold the sealed key can register more keys. No key passphrase unless the OpenPGP key itself is encrypted. The private key is not uploaded.";
   const status = document.createElement("p");
   status.id = "globe-admin-key-grant-status";
   status.setAttribute("role", "status");
@@ -178,8 +178,6 @@ export function mountAdminKeyGrant(): void {
   account.placeholder = "user id or fingerprint";
   const auditNote = inputBox("text");
   auditNote.placeholder = "audit note";
-  const secret = inputBox("password");
-  secret.placeholder = "ADMIN_ACTION_SECRET";
   const passphrase = inputBox("password");
   passphrase.id = "globe-admin-key-grant-passphrase";
   passphrase.placeholder = "only if this OpenPGP key is encrypted";
@@ -196,7 +194,6 @@ export function mountAdminKeyGrant(): void {
     note,
     field("Account", account),
     field("Note", auditNote),
-    field("Action secret", secret),
     passphraseField,
     status,
     row,
@@ -272,11 +269,7 @@ export function mountAdminKeyGrant(): void {
     setStatus(grantKeys ? "Granting unlimited keys…" : "Revoking unlimited keys…");
     void (async () => {
       if (!elevated()) {
-        setStatus("Unlock privileges first. Grant and revoke need a fresh device-key step-up.", true);
-        return;
-      }
-      if (secret.value.trim().length < 16) {
-        setStatus("Enter the action secret before granting or revoking.", true);
+        setStatus("Unlock privileges first. Grant and revoke need a fresh signature from the allowlisted key.", true);
         return;
       }
       const query = account.value.trim();
@@ -308,7 +301,6 @@ export function mountAdminKeyGrant(): void {
           note: auditNote.value.trim() || undefined,
         },
         {
-          "x-admin-action-secret": secret.value.trim(),
           "x-admin-elevation": elevationToken,
         },
       );
