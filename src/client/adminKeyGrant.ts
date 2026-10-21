@@ -184,11 +184,12 @@ export function mountAdminKeyGrant(): void {
   const passphraseField = field("Key passphrase", passphrase);
   passphraseField.hidden = true;
   const unlock = button("Unlock privileges");
+  const grantSelf = button("Grant unlimited keys to this key");
   const grant = button("Grant unlimited keys");
   const revoke = button("Revoke unlimited keys");
   const row = document.createElement("div");
   row.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:8px";
-  row.append(unlock, grant, revoke);
+  row.append(unlock, grantSelf, grant, revoke);
   root.append(
     title,
     note,
@@ -258,7 +259,8 @@ export function mountAdminKeyGrant(): void {
       elevationToken = token;
       const expires = elevatedResponse.data.expiresAt;
       elevationExpiresAt = typeof expires === "string" ? Date.parse(expires) : Date.now() + 10 * 60 * 1000;
-      setStatus(messageOf(elevatedResponse.data, "Privileged window unlocked. Grant and revoke are available."));
+      if (!account.value.trim() && adminFingerprint) account.value = adminFingerprint;
+      setStatus("Privileged window open for about 10 minutes. Grant unlimited keys to this key is ready.");
     })().catch((error: unknown) => {
       elevationToken = "";
       setStatus(error instanceof Error ? error.message : "Could not unlock privileges.", true);
@@ -314,6 +316,27 @@ export function mountAdminKeyGrant(): void {
     });
   };
 
+  grantSelf.addEventListener("click", () => {
+    setStatus("Granting unlimited keys to this key…");
+    void (async () => {
+      if (!elevated() || !adminFingerprint) {
+        setStatus("Unlock privileges first. This key signs the grant.", true);
+        return;
+      }
+      const response = await postJson(
+        "/api/admin/grant-unlimited-keys",
+        { fingerprint: adminFingerprint },
+        { "x-admin-elevation": elevationToken },
+      );
+      if (!response.ok) {
+        setStatus(messageOf(response.data, "Grant to this key failed."), true);
+        return;
+      }
+      setStatus(messageOf(response.data, "Unlimited keys granted to this key."));
+    })().catch((error: unknown) => {
+      setStatus(error instanceof Error ? error.message : "Grant to this key failed.", true);
+    });
+  });
   grant.addEventListener("click", () => mutate(true));
   revoke.addEventListener("click", () => mutate(false));
 }

@@ -854,7 +854,7 @@ export async function adminElevate(
       expiresAt,
       ttlSeconds: ELEV_TOKEN_TTL_SEC,
       message:
-        "Privileged admin window open. Send x-admin-elevation on grant, revoke, and claim. The signed key must stay on ADMIN_FINGERPRINTS.",
+        "Privileged window open for about 10 minutes. Grant unlimited keys to this account is ready.",
     },
     { status: 200 },
     applySecurityHeaders,
