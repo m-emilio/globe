@@ -43,6 +43,14 @@ function ensureIdentityLayer(): void {
     "#globe-pki-cve-pager button{min-height:36px;min-width:64px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:rgba(255,255,255,.06);color:#f2f4f7;font:600 12px inherit;cursor:pointer}",
     "#globe-pki-cve-pager button:disabled{opacity:.35;cursor:not-allowed}",
     "#globe-pki-cve-pager span{flex:1;min-width:0;font-size:12px;color:#e8edf4}",
+    ".nav-center:not(:empty){display:flex!important;flex:1 1 auto!important;width:auto!important;order:0!important;justify-content:center!important;align-items:center!important;min-width:0!important;grid-template-columns:none!important}",
+    "#globe-header-identity{height:32px;min-height:32px;max-width:100%;padding:0 12px;border:1.5px solid #6e7681;border-radius:3px;background:rgba(0,0,0,.82);color:#9aa4b2;font:700 11px/1 var(--font-ui,inherit);letter-spacing:.08em;text-transform:uppercase;cursor:pointer;white-space:nowrap;box-sizing:border-box}",
+    "#globe-header-identity[data-level=guest]{border-color:#6e7681;color:#9aa4b2;background:rgba(0,0,0,.72);box-shadow:none}",
+    "#globe-header-identity[data-level=session]{border-color:#00d9ff;color:#00d9ff;background:rgba(0,217,255,.14);box-shadow:0 0 10px rgba(0,217,255,.28)}",
+    "#globe-header-identity[data-level=keys]{border-color:#00ff88;color:#00ff88;background:rgba(0,255,136,.12);box-shadow:0 0 10px rgba(0,255,136,.25)}",
+    "#globe-header-identity[data-level=transit]{border-color:#d4af37;color:#f0d78c;background:rgba(212,175,55,.16);box-shadow:0 0 10px rgba(212,175,55,.28)}",
+    "#globe-header-identity[data-level=admin]{border-color:#ffb020;color:#1a1206;background:#ffd08a;box-shadow:0 0 12px rgba(255,176,32,.45)}",
+    "@media (max-width:480px){#globe-header-identity{height:28px;min-height:28px;padding:0 8px;font-size:10px;letter-spacing:.04em}}",
   ].join("");
   document.head.append(style);
 }
@@ -307,6 +315,95 @@ window.addEventListener("globe-open-identity", () => {
   window.setTimeout(dismissSignedInBanner, 60);
 });
 
+type IdentityLevel = "guest" | "session" | "keys" | "transit" | "admin";
+
+const IDENTITY_TITLE: Record<IdentityLevel, string> = {
+  guest: "Identity — signed out",
+  session: "Identity — signed in",
+  keys: "Identity — unlimited keys",
+  transit: "Identity — Stripe access",
+  admin: "Identity — admin",
+};
+
+let identityLevel: IdentityLevel = "guest";
+let identityFetchAt = 0;
+let identityFetchBusy = false;
+let authModalWasOpen = false;
+
+function levelFromMe(data: unknown): IdentityLevel {
+  if (!data || typeof data !== "object") return "guest";
+  const row = data as {
+    authenticated?: unknown;
+    isAdmin?: unknown;
+    user?: { transitPaid?: unknown; unlimitedKeys?: unknown } | null;
+  };
+  if (row.authenticated !== true || !row.user) return "guest";
+  if (row.isAdmin === true) return "admin";
+  if (row.user.transitPaid === true) return "transit";
+  if (row.user.unlimitedKeys === true) return "keys";
+  return "session";
+}
+
+function applyIdentityLevel(button: HTMLButtonElement): void {
+  if (button.dataset.level !== identityLevel) button.dataset.level = identityLevel;
+  const title = IDENTITY_TITLE[identityLevel];
+  if (button.title !== title) button.title = title;
+  if (button.getAttribute("aria-label") !== title) button.setAttribute("aria-label", title);
+}
+
+function mountHeaderIdentity(): void {
+  const center = document.querySelector(".nav-bar .nav-center");
+  if (!(center instanceof HTMLElement)) return;
+  const existing = document.getElementById("globe-header-identity");
+  if (existing instanceof HTMLButtonElement && existing.parentElement === center) {
+    applyIdentityLevel(existing);
+    return;
+  }
+  existing?.remove();
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "globe-header-identity";
+  button.textContent = "Identity";
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openIdentity();
+  });
+  applyIdentityLevel(button);
+  center.append(button);
+}
+
+async function refreshIdentityLevel(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && now - identityFetchAt < 8000) return;
+  if (identityFetchBusy) return;
+  identityFetchBusy = true;
+  identityFetchAt = now;
+  try {
+    const response = await fetch("/api/auth/me", {
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) identityLevel = "guest";
+      return;
+    }
+    identityLevel = levelFromMe(await response.json());
+  } catch {
+    // Keep the last level when the session check cannot be reached.
+  } finally {
+    identityFetchBusy = false;
+    const button = document.getElementById("globe-header-identity");
+    if (button instanceof HTMLButtonElement) applyIdentityLevel(button);
+  }
+}
+
+function noteAuthModal(): void {
+  const open = Boolean(document.querySelector(".auth-modal"));
+  if (authModalWasOpen && !open) void refreshIdentityLevel(true);
+  authModalWasOpen = open;
+}
+
 function mountIdentityMenu(): void {
   const section = document.querySelector(".menu-section-links");
   const signedIn = Boolean(document.querySelector(".auth-user-meta"));
@@ -330,6 +427,9 @@ function mountIdentityMenu(): void {
 function watch(): void {
   ensureIdentityLayer();
   placeFloatingControls();
+  mountHeaderIdentity();
+  noteAuthModal();
+  void refreshIdentityLevel();
   mountIdentityMenu();
   patchSessionLabel();
   const admin = document.querySelector(".admin-modal");
@@ -439,5 +539,11 @@ window.addEventListener("pointercancel", (event) => {
 });
 window.addEventListener("resize", () => placeFloatingControls());
 window.addEventListener("scroll", () => placeFloatingControls(), true);
+window.setInterval(() => {
+  void refreshIdentityLevel(true);
+}, 20000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void refreshIdentityLevel(true);
+});
 
 export {};
