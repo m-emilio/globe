@@ -59,7 +59,7 @@ export function mountAdminLoginLog(): void {
   const note = document.createElement("p");
   note.style.cssText = "margin:0 0 8px;font-size:13px;line-height:1.4;color:#d5ffe9";
   note.textContent =
-    "Visible to an admin session only. Attempts are kept for 30 days and audits for 180 days. Each new row stores a SHAKE256 digest of the network and the account, plus a record hash and a hash chain. SHAKE256 is the hash inside ML-DSA and SLH-DSA. The raw network and account are not stored. An unsalted digest of an IPv4 can still be guessed if this export leaks. fail2ban needs a host firewall, which this Worker does not have. After 8 rejected sign-ins in 10 minutes, that network is paused for 15 minutes. Private keys, signatures, MACs, challenges, and session cookies are not stored.";
+    "Visible to an admin session only. Attempts are kept for 30 days and audits for 180 days. Each new row stores a SHAKE256 digest of the network and the account, plus a record hash and a hash chain. SHAKE256 is the hash inside ML-DSA and SLH-DSA. The raw network and account are not stored. An unsalted digest of an IPv4 can still be guessed if this export leaks. After 8 rejected sign-ins in 10 minutes, that network is paused for 15 minutes. Private keys, signatures, MACs, challenges, and session cookies are not stored.";
   const status = document.createElement("p");
   status.id = "globe-admin-login-log-status";
   status.setAttribute("role", "status");

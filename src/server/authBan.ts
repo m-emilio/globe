@@ -1,9 +1,7 @@
 /**
  * Pause a network after repeated rejected sign-ins.
- * fail2ban watches a host log and inserts firewall rules. This Worker has no
- * host firewall, so the pause is a short KV record keyed by the SHAKE256
- * network hash. An unknown address is never paused, because every such
- * request would share one bucket.
+ * The pause is a short KV record keyed by the SHAKE256 network hash.
+ * An unknown address is never paused, because every such request would share one bucket.
  */
 import { clientIp, type AuthEnv } from "./auth";
 import { networkHash } from "./pqcLogHash";

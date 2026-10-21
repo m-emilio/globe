@@ -541,20 +541,9 @@ export function clearLastFingerprint() {
 }
 
 /**
- * Sessions use HttpOnly cookies only. These helpers clear legacy JS storage
- * and never persist session ids where XSS can read them.
+ * Sessions use HttpOnly cookies only. This clears legacy JS storage and
+ * never persists a session id where page script can read it.
  */
-export function getSessionToken(): string | null {
-  // Intentionally always null — do not read session tokens from JS storage.
-  clearSessionToken();
-  return null;
-}
-
-/** @deprecated No-op: session ids must not be stored in sessionStorage. */
-export function setSessionToken(_token: string | null) {
-  clearSessionToken();
-}
-
 export function clearSessionToken() {
   try {
     sessionStorage.removeItem(LEGACY_SESSION_TOKEN_KEY);

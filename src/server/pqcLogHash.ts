@@ -80,11 +80,7 @@ export function privilegeSeal(kind: "unlock" | "unlimited-key", fingerprint: str
   return pqcLogDigest(kind, hexId);
 }
 
-/** SHAKE256 seal for an elevation user id or challenge message. */
+/** SHAKE256 seal for an elevation user id. */
 export function userSeal(userId: string): string {
   return pqcLogDigest("elev-user", userId);
-}
-
-export function messageSeal(message: string): string {
-  return pqcLogDigest("elev-message", message);
 }
