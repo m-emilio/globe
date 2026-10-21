@@ -3,6 +3,12 @@
  * The wrapped secret stays in IndexedDB. The server receives a public key and a MAC.
  */
 import { labLoginMessageMatches, type LabFamily } from "../server/labMac";
+import {
+  ecdheSavedPemFile,
+  globePrivateFile,
+  privateFileMatches,
+  type PrivateKeyFile,
+} from "./privateKeyFile";
 
 const DB_NAME = "globe-lab-login";
 const DB_VERSION = 1;
@@ -160,6 +166,27 @@ function fixed(code: string, status: number): string {
   if (code === "key_limit") return "This network already has 3 sign-in keys. Sign in with an existing key from this device.";
   if (code === "kv_missing") return "Sign-in storage is not available right now.";
   return "Lab sign-in failed.";
+}
+
+/** Read the lab private key saved in this browser and return a downloadable file. */
+export async function exportSavedLabPrivateKey(family: LabFamily, suite: string): Promise<PrivateKeyFile> {
+  const saved = await loadLabMaterial(family, suite);
+  if (!saved) throw new Error("No private key for this method is stored in this browser.");
+  let publicKey: Uint8Array | undefined;
+  try {
+    publicKey = fromB64(saved.publicKeyB64);
+    if (family === "ecdhe") {
+      return ecdheSavedPemFile(suite, new TextDecoder().decode(saved.material));
+    }
+    const file = globePrivateFile({ kind: "kem", suite, publicKey, secretKey: saved.material });
+    if (!privateFileMatches(file.text, publicKey, saved.material)) {
+      throw new Error("Could not export that private key.");
+    }
+    return file;
+  } finally {
+    wipe(saved.material);
+    wipe(publicKey);
+  }
 }
 
 export async function signInWithLabKey(args: {

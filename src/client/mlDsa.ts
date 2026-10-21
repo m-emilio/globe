@@ -21,6 +21,12 @@ import {
   type SlhDsaSuiteId,
 } from "../server/pqcVerify";
 import { decodeMldsa87PrivateAsc } from "../server/mldsaAsc";
+import {
+  globePrivateFile,
+  mldsa87PrivateFile,
+  privateFileMatches,
+  type PrivateKeyFile,
+} from "./privateKeyFile";
 import { ml_dsa44, ml_dsa65, ml_dsa87 } from "@noble/post-quantum/ml-dsa.js";
 import {
   slh_dsa_sha2_128f,
@@ -297,6 +303,31 @@ export async function importMldsa87PrivateAsc(armored: string): Promise<{ finger
   } finally {
     wipe(decoded.secretKey);
     wipe(decoded.publicKey);
+  }
+}
+
+/** Download the private key already wrapped in this browser. Nothing is uploaded. */
+export async function exportStoredPqcPrivateKey(suite: PqcSigSuiteId): Promise<PrivateKeyFile> {
+  const rows = await withDb<StoredKey[]>("readonly", KEY_STORE, (store) =>
+    idbReq(store.getAll() as IDBRequest<StoredKey[]>),
+  ).catch(() => [] as StoredKey[]);
+  const row = rows
+    .filter((item) => item.suite === suite)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  if (!row) throw new Error(`No ${PQC_SIG_SUITES[suite].label} private key is stored in this browser.`);
+  const secret = await unwrapSecret(row);
+  const publicKey = b64ToFixedBytes(row.publicKeyB64, PQC_SIG_SUITES[suite].publicKey);
+  try {
+    const file = suite === "ml-dsa87"
+      ? mldsa87PrivateFile(publicKey, secret)
+      : globePrivateFile({ kind: "pqc", suite, publicKey, secretKey: secret });
+    if (!privateFileMatches(file.text, publicKey, secret)) {
+      throw new Error("Could not export that private key.");
+    }
+    return file;
+  } finally {
+    wipe(secret);
+    wipe(publicKey);
   }
 }
 

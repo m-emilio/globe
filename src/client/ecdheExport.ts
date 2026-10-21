@@ -21,7 +21,8 @@ import {
   peerPublicMaterial,
   readLabKeyFile,
 } from "./keyMaterial";
-import { loadLabMaterial, signInWithLabKey } from "./labVault";
+import { exportSavedLabPrivateKey, loadLabMaterial, signInWithLabKey } from "./labVault";
+import { downloadLocalPrivateFile } from "./privateKeyFile";
 
 type EcdheExportDetail = {
   curve: string;
@@ -546,7 +547,32 @@ function showPanel(detail: EcdheExportDetail | null, autoDownload: boolean): voi
       })
       .catch((error: unknown) => failSignIn(signInSaved, error));
   });
-  actions.append(signInSaved);
+  const exportSaved = document.createElement("button");
+  exportSaved.type = "button";
+  exportSaved.id = "globe-ecdhe-export-saved";
+  exportSaved.textContent = "Export saved private key";
+  exportSaved.style.cssText = BUTTON_STYLE;
+  exportSaved.addEventListener("click", () => {
+    const curve = selectedCurve;
+    exportSaved.disabled = true;
+    ascNote.hidden = false;
+    ascNote.id = "globe-ecdhe-export-saved-status";
+    ascNote.textContent = "Exporting the saved ECDHE private key…";
+    void exportSavedLabPrivateKey("ecdhe", curve)
+      .then((file) => {
+        downloadLocalPrivateFile(file);
+        ascNote.id = "globe-ecdhe-export-saved-status";
+        ascNote.textContent = `Saved ${file.filename}. The private key was not uploaded.`;
+      })
+      .catch((error: unknown) => {
+        ascNote.id = "globe-ecdhe-pem-error";
+        ascNote.textContent = error instanceof Error ? error.message : "Could not export that private key.";
+      })
+      .finally(() => {
+        exportSaved.disabled = false;
+      });
+  });
+  actions.append(signInSaved, exportSaved);
   const close = document.createElement("button");
   close.type = "button";
   close.textContent = "Close lab";

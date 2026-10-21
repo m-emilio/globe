@@ -18,7 +18,8 @@ import {
   type PqcKemId,
   type PqcLocalPublic,
 } from "./pqc";
-import { loadLabMaterial, signInWithLabKey } from "./labVault";
+import { exportSavedLabPrivateKey, loadLabMaterial, signInWithLabKey } from "./labVault";
+import { decodeBase64, downloadLocalPrivateFile, globePrivateFile, privateFileMatches } from "./privateKeyFile";
 
 let localKey: PqcLocalPublic | null = null;
 
@@ -129,9 +130,13 @@ export function mountPqcLab(): void {
   signIn.id = "globe-pqc-lab-signin";
   const savedSignIn = button("Sign in with saved lab key");
   savedSignIn.id = "globe-pqc-lab-saved-signin";
+  const exportThis = button("Export this key");
+  exportThis.id = "globe-pqc-lab-export";
+  const exportSaved = button("Export saved private key");
+  exportSaved.id = "globe-pqc-lab-export-saved";
   const selfTest = button("Self-test all suites");
   const close = button("Close");
-  row.append(generate, signIn, savedSignIn, selfTest, close);
+  row.append(generate, signIn, savedSignIn, exportThis, exportSaved, selfTest, close);
 
   const publicArea = el("textarea");
   publicArea.readOnly = true;
@@ -190,7 +195,7 @@ export function mountPqcLab(): void {
     }
   };
   const setBusy = (busy: boolean) => {
-    const nodes = [generate, signIn, savedSignIn, selfTest, encapsulate, decapsulate, clear, close, suiteSelect];
+    const nodes = [generate, signIn, savedSignIn, exportThis, exportSaved, selfTest, encapsulate, decapsulate, clear, close, suiteSelect];
     for (let i = 0; i < nodes.length; i++) nodes[i]!.disabled = busy;
   };
   const showFp = (hex: string) => {
@@ -339,6 +344,54 @@ export function mountPqcLab(): void {
       } finally {
         secret.fill(0);
       }
+    });
+  });
+  const exportBusy = (label: string, run: () => Promise<void>) => {
+    setBusy(true);
+    setStatus(label);
+    void run()
+      .catch((error: unknown) => {
+        setStatus(error instanceof Error ? error.message : "Could not export that private key.", true);
+      })
+      .finally(() => setBusy(false));
+  };
+  exportThis.addEventListener("click", () => {
+    if (!localKey) {
+      setStatus("Generate a key first.", true);
+      return;
+    }
+    const current = localKey;
+    const secret = copyPqcSecret(current.id);
+    if (!secret) {
+      setStatus("Generate a key first.", true);
+      return;
+    }
+    exportBusy("Exporting this key-agreement private key…", async () => {
+      const publicKey = decodeBase64(current.publicKeyB64);
+      try {
+        const file = globePrivateFile({
+          kind: "kem",
+          suite: current.suite,
+          publicKey,
+          secretKey: secret,
+        });
+        if (!privateFileMatches(file.text, publicKey, secret)) {
+          throw new Error("Could not export that private key.");
+        }
+        downloadLocalPrivateFile(file);
+        setStatus(`Saved ${file.filename}. The private key was not uploaded.`);
+      } finally {
+        publicKey.fill(0);
+        secret.fill(0);
+      }
+    });
+  });
+  exportSaved.addEventListener("click", () => {
+    const suite = selectedSuite();
+    exportBusy("Exporting the saved lab private key…", async () => {
+      const file = await exportSavedLabPrivateKey("kem", suite);
+      downloadLocalPrivateFile(file);
+      setStatus(`Saved ${file.filename}. The private key was not uploaded.`);
     });
   });
   savedSignIn.addEventListener("click", () => {

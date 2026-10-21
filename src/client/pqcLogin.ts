@@ -13,9 +13,12 @@ import {
 import {
   createMlDsaDeviceKey,
   deleteMlDsaDeviceKey,
+  exportStoredPqcPrivateKey,
   listMlDsaDeviceKeys,
   signMlDsaLogin,
 } from "./mlDsa";
+import { downloadLocalPrivateFile } from "./privateKeyFile";
+import { mountDeviceKeyExport } from "./deviceKeyExport";
 
 const ML_ORDER: MlDsaSuiteId[] = ["ml-dsa65", "ml-dsa87", "ml-dsa44"];
 const SLH_SHA2: SlhDsaSuiteId[] = [
@@ -130,7 +133,7 @@ export function mountPqcLogin(): void {
 
   const title = el("h3", "Post-quantum");
   title.style.cssText = "margin:0 0 6px;font-size:15px";
-  const hint = el("p", "ML-DSA-65 is the usual choice.");
+  const hint = el("p", "ML-DSA-65 is the usual choice. Export downloads the private key stored in this browser.");
   hint.style.cssText = "margin:0 0 10px;font-size:13px;line-height:1.4;color:#d5ffe9";
 
   const suiteLabel = el("label");
@@ -179,12 +182,16 @@ export function mountPqcLogin(): void {
   signIn.type = "button";
   signIn.id = "globe-pqc-login-signin";
   signIn.style.cssText = buttonStyle;
+  const exportKey = el("button", "Export stored private key");
+  exportKey.type = "button";
+  exportKey.id = "globe-pqc-login-export";
+  exportKey.style.cssText = buttonStyle;
   const remove = el("button", "Remove key");
   remove.type = "button";
   remove.id = "globe-pqc-login-remove";
   remove.style.cssText = buttonStyle;
 
-  root.append(title, hint, suiteLabel, status, create, signIn, remove);
+  root.append(title, hint, suiteLabel, status, create, signIn, exportKey, remove);
   modal.append(root);
 
   const selected = (): PqcSigSuiteId => {
@@ -198,6 +205,7 @@ export function mountPqcLogin(): void {
   const setBusy = (busy: boolean) => {
     create.disabled = busy;
     signIn.disabled = busy;
+    exportKey.disabled = busy;
     remove.disabled = busy;
     suiteSelect.disabled = busy;
   };
@@ -284,6 +292,20 @@ export function mountPqcLogin(): void {
       setBusy(false);
     });
   });
+  exportKey.addEventListener("click", () => {
+    const suite = selected();
+    setBusy(true);
+    setStatus("Exporting the private key stored in this browser…");
+    void exportStoredPqcPrivateKey(suite)
+      .then((file) => {
+        downloadLocalPrivateFile(file);
+        setStatus(`Saved ${file.filename}. The private key was not uploaded.`);
+      })
+      .catch((error: unknown) => {
+        setStatus(error instanceof Error ? error.message : "Could not export that private key.", true);
+      })
+      .finally(() => setBusy(false));
+  });
   remove.addEventListener("click", () => {
     const suite = selected();
     setBusy(true);
@@ -309,6 +331,7 @@ function watchLogin(): void {
     if (modal instanceof HTMLElement && !modal.querySelector("#globe-pqc-login")) {
       mountPqcLogin();
     }
+    if (modal instanceof HTMLElement) mountDeviceKeyExport();
   } finally {
     patching = false;
   }
