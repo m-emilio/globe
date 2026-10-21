@@ -96,7 +96,7 @@ window.addEventListener("globe-mldsa87-import", (event) => {
   void import("./mlDsa")
     .then((mod) => mod.importMldsa87PrivateAsc(armored))
     .then(() => {
-      show("ML-DSA-87 key is on this device. Choose Post-quantum signature and sign in. The private key was not uploaded.", false);
+      show("ML-DSA-87 key is on this device. Choose Post-quantum and sign in. The private key was not uploaded.", false);
     })
     .catch((error: unknown) => {
       show(error instanceof Error ? error.message : "Could not save the ML-DSA-87 key on this device.", true);

@@ -132,7 +132,7 @@ export function mountPqcLogin(): void {
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const hint = el(
     "p",
-    "This is the signature method of the same sign-in. ML-DSA-65 is the default. SLH-DSA-SHA2-128s is the smaller hash-based set. The private key is wrapped in this browser and is not uploaded. A matching signature gets the same session as a device key.",
+    "ML-DSA-65 is the usual choice. The private key stays in this browser and is not uploaded.",
   );
   hint.style.cssText = "margin:0 0 10px;font-size:13px;line-height:1.4;color:#d5ffe9";
 

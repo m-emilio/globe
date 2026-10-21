@@ -45,6 +45,31 @@ function applyMethod(modal: HTMLElement, method: Method): void {
   show(modal.querySelector("#globe-key-lab-open"), method === "ecdhe");
 }
 
+const METHOD_BUTTON =
+  "min-height:44px;padding:8px 12px;border-radius:10px;border:1px solid rgba(61,255,168,0.45);background:#16382c;color:#e7fff3;font:600 15px/1.2 system-ui,sans-serif";
+
+function choose(shell: HTMLElement, method: Method): void {
+  const buttons = shell.querySelectorAll<HTMLButtonElement>("[data-sign-method]");
+  for (let i = 0; i < buttons.length; i++) {
+    const button = buttons[i]!;
+    const on = button.dataset.signMethod === method;
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+    button.style.outline = on ? "2px solid #3dffa8" : "none";
+  }
+  shell.dataset.method = method;
+  const modal = shell.closest(".auth-modal");
+  if (modal instanceof HTMLElement) applyMethod(modal, method);
+}
+
+function methodButton(method: Method, label: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.dataset.signMethod = method;
+  button.textContent = label;
+  button.style.cssText = METHOD_BUTTON;
+  return button;
+}
+
 function buildShell(): HTMLElement {
   const shell = document.createElement("section");
   shell.id = "globe-sign-in";
@@ -57,36 +82,45 @@ function buildShell(): HTMLElement {
     "color:#e7fff3",
   ].join(";");
   const title = document.createElement("h2");
+  title.id = "globe-sign-in-title";
   title.textContent = "Sign in";
-  title.style.cssText = "margin:0 0 6px;font-size:16px";
+  title.style.cssText = "margin:0 0 6px;font-size:18px";
   const copy = document.createElement("p");
-  copy.style.cssText = "margin:0 0 10px;font-size:13px;line-height:1.45;color:#d5ffe9";
-  copy.textContent = "Device key, post-quantum signature, and post-quantum key agreement are one sign-in. Each one proves this device holds the private key. The server stores the public key and, after the proof matches, sets the same session cookie. The private key is not uploaded. One network can register 3 keys, then it has to sign in with a key it already created. A paid Stripe checkout under $20 unlocks further keys for every network that already holds that account. An admin grants or revokes that unlock with the same step-up used for transit.";
-  const label = document.createElement("label");
-  label.style.cssText = "display:flex;flex-direction:column;gap:6px;font-size:13px";
-  const span = document.createElement("span");
-  span.textContent = "Sign-in method";
-  const select = document.createElement("select");
-  select.id = "globe-sign-in-method";
-  select.style.cssText = "min-height:48px;font-size:16px;padding:8px";
-  const options: Array<[Method, string]> = [
-    ["device", "Device key"],
-    ["pqc", "Post-quantum signature"],
-    ["agreement", "Post-quantum key agreement"],
-    ["ecdhe", "ECDHE key agreement"],
+  copy.style.cssText = "margin:0 0 10px;font-size:14px;line-height:1.4;color:#d5ffe9";
+  copy.textContent = "The private key stays on this device. Sign-in sends a proof, then you get one session.";
+
+  const row = document.createElement("div");
+  row.id = "globe-sign-in-methods";
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", "Sign-in method");
+  row.style.cssText = "display:flex;flex-wrap:wrap;gap:8px";
+  const choices: Array<[Method, string]> = [
+    ["device", "This device"],
+    ["pqc", "Post-quantum"],
+    ["agreement", "Key agreement"],
   ];
-  for (let i = 0; i < options.length; i++) {
-    const option = document.createElement("option");
-    option.value = options[i]![0];
-    option.textContent = options[i]![1];
-    select.append(option);
+  for (let i = 0; i < choices.length; i++) {
+    const button = methodButton(choices[i]![0], choices[i]![1]);
+    button.addEventListener("click", () => choose(shell, choices[i]![0]));
+    row.append(button);
   }
-  label.append(span, select);
-  shell.append(title, copy, label);
-  select.addEventListener("change", () => {
-    const modal = shell.closest(".auth-modal");
-    if (modal instanceof HTMLElement && isMethod(select.value)) applyMethod(modal, select.value);
-  });
+
+  const more = document.createElement("details");
+  more.style.cssText = "margin-top:8px";
+  const summary = document.createElement("summary");
+  summary.textContent = "Other ways";
+  summary.style.cssText = "cursor:pointer;font-size:13px;color:#d5ffe9";
+  const ecdhe = methodButton("ecdhe", "ECDHE key lab");
+  ecdhe.style.marginTop = "8px";
+  ecdhe.addEventListener("click", () => choose(shell, "ecdhe"));
+  more.append(summary, ecdhe);
+
+  const note = document.createElement("p");
+  note.style.cssText = "margin:10px 0 0;font-size:12px;line-height:1.4;color:#b7ebcf";
+  note.textContent = "A network can register 3 keys. A paid checkout under $20 can unlock more.";
+
+  shell.append(title, copy, row, more, note);
+  choose(shell, "device");
   return shell;
 }
 
@@ -94,13 +128,16 @@ export function mountUnifiedSignIn(): void {
   const modal = document.querySelector(".auth-modal:not(.admin-modal)");
   if (!(modal instanceof HTMLElement)) return;
   let shell = modal.querySelector("#globe-sign-in");
-  if (!(shell instanceof HTMLElement)) {
-    shell = buildShell();
-    const header = modal.querySelector(".auth-modal-header");
-    if (header) header.insertAdjacentElement("afterend", shell);
-    else modal.prepend(shell);
+  if (!(shell instanceof HTMLElement) || !shell.querySelector("#globe-sign-in-methods")) {
+    const next = buildShell();
+    if (shell instanceof HTMLElement) shell.replaceWith(next);
+    else {
+      const header = modal.querySelector(".auth-modal-header");
+      if (header) header.insertAdjacentElement("afterend", next);
+      else modal.prepend(next);
+    }
+    shell = next;
   }
-  const select = shell.querySelector("#globe-sign-in-method");
-  const method = select instanceof HTMLSelectElement && isMethod(select.value) ? select.value : "device";
-  applyMethod(modal, method);
+  const method = shell.dataset.method;
+  applyMethod(modal, isMethod(method || "") ? (method as Method) : "device");
 }

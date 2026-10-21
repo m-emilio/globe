@@ -170,13 +170,13 @@ function ensurePaste(panel: HTMLElement, input: HTMLInputElement): void {
   const hint = document.createElement("p");
   hint.style.cssText = "margin:8px 0 0;font-size:13px;line-height:1.4";
   hint.textContent =
-    "OpenPGP and ML-DSA-87 private keys stay on this device. This field accepts .asc, .pgp, or .gpg only. An ML-DSA-87 .asc keeps the same sign-in account. An ECDHE .pem belongs in the key lab. Nothing here is uploaded.";
+    "Paste an OpenPGP or ML-DSA-87 private key. It stays on this device and is not uploaded.";
   wrap.append(span, area, button, hint);
   panel.append(wrap);
 }
 
 function patchPasswords(): void {
-  const modal = document.querySelector(".auth-modal");
+  const modal = document.querySelector(".auth-modal:not(.admin-modal)");
   if (!(modal instanceof HTMLElement)) return;
   const nodes = modal.querySelectorAll('input[type="password"]');
   for (let i = 0; i < nodes.length; i++) {
@@ -191,7 +191,7 @@ let patchingLogin = false;
 
 function patchLoginImport(): void {
   if (patchingLogin) return;
-  const modal = document.querySelector(".auth-modal");
+  const modal = document.querySelector(".auth-modal:not(.admin-modal)");
   if (!(modal instanceof HTMLElement)) return;
   patchingLogin = true;
   loginObserver.disconnect();
