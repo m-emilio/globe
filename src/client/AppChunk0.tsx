@@ -9,7 +9,7 @@ import { formatFingerprint, getKeyGenProfile, keyGenProfilesBySafety, SAFETY_LEV
 import { NearbyMap, TransitPanelContent } from "./lazyPanels";
 import { DEFAULT_WEATHER_LOCATION, formatForecastDay, formatForecastHour } from "./globeModel";
 export function AppChunk0({ b }: { b: GlobeApi }) {
-  const { activityFeed, activityFilter, adminActionSecret, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSecretConfigured, adminSecretRevealOnce, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, counter, deviceKeys, dismissSiteTour, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generateAdminActionSecret, generatedPublic, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadLocalTransit, loadNearbyPaths, loadWeatherFeed, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, paymentRequired, refreshDeviceKeys, regPublicKey, registerWithPublicKey, runRateLimitedButtonAction, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminActionSecret, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSecretRevealOnce, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setKeyGenProfile, setKeyPassphrase, setRegPublicKey, setSelectedDeviceFp, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowTransitPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, showActivityMenu, showAdminPanel, showAuthPanel, showImportDevice, showNearbyPanel, showSiteTour, showTransitPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, transitDistanceM, transitError, transitPreview, transitStatus, unlockAdminPrivileges, weatherError, weatherFeed, weatherGlow, weatherStatus } = b;
+  const { activityFeed, activityFilter, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, counter, deviceKeys, dismissSiteTour, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generatedPublic, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadLocalTransit, loadNearbyPaths, loadWeatherFeed, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, paymentRequired, refreshDeviceKeys, regPublicKey, registerWithPublicKey, runRateLimitedButtonAction, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setKeyGenProfile, setKeyPassphrase, setRegPublicKey, setSelectedDeviceFp, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowTransitPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, showActivityMenu, showAdminPanel, showAuthPanel, showImportDevice, showNearbyPanel, showSiteTour, showTransitPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, transitDistanceM, transitError, transitPreview, transitStatus, unlockAdminPrivileges, weatherError, weatherFeed, weatherGlow, weatherStatus } = b;
   return (
     <>
 {(authMessage || authError) && (
@@ -580,8 +580,6 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
             if (e.target === e.currentTarget) {
               setShowAdminPanel(false);
               clearAdminElevation();
-              setAdminActionSecret("");
-              setAdminSecretRevealOnce(null);
               setAdminUsers([]);
             }
           }}
@@ -599,8 +597,6 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                 onClick={() => {
                   setShowAdminPanel(false);
                   clearAdminElevation();
-                  setAdminActionSecret("");
-                  setAdminSecretRevealOnce(null);
                   setAdminUsers([]);
                 }}
                 aria-label="Close"
@@ -609,10 +605,10 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
               </button>
             </div>
             <p className="auth-modal-copy">
-              Privileged ops are server-enforced: allowlisted fingerprint +
-              action secret + fresh PGP step-up (not the client{" "}
-              <code>isAdmin</code> flag). Lookups need session only; grant /
-              revoke / claim need full elevation. Audited.
+              Privileged ops are server-enforced: an allowlisted session, a
+              fresh signature from that device key, then an exact{" "}
+              <code>ADMIN_FINGERPRINTS</code> match. A shared action secret is
+              not used. Lookups need the session only. Audited.
             </p>
 
             {authUser && (
@@ -654,99 +650,18 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
 
             {isAdmin && (
               <>
-                <div className="auth-section-title">
-                  1 · Action secret (generate here)
-                </div>
-                {!adminSecretConfigured && (
-                  <div className="auth-inline-error">
-                    Server has no strong{" "}
-                    <code>ADMIN_ACTION_SECRET</code> Worker secret yet.
-                    Generate below (browser only), then run{" "}
-                    <code>
-                      npx wrangler secret put ADMIN_ACTION_SECRET --name globe
-                    </code>
-                    . Never KV or git.
-                  </div>
-                )}
+                <div className="auth-section-title">1 · Unlock with your key</div>
                 <p className="auth-modal-copy">
-                  Creates a random value <strong>in this browser only</strong> —
-                  not saved on the server. You must set it as a Cloudflare Worker
-                  secret, then paste it here for grant/revoke/claim.
+                  Signs a one-time server challenge with the private key already
+                  on this device. The server keeps the privileged window only
+                  when that key's fingerprint is on{" "}
+                  <code>ADMIN_FINGERPRINTS</code>. Elevation lasts about 10
+                  minutes. The private key is not uploaded.
                 </p>
                 <div className="auth-modal-actions auth-row">
                   <button
                     type="button"
-                    className="admin-generate-secret-btn"
                     disabled={adminBusy}
-                    title="Create a random secret in browser memory (not stored on server)"
-                    onClick={() => generateAdminActionSecret()}
-                  >
-                    Generate action secret
-                  </button>
-                </div>
-                {adminSecretRevealOnce && (
-                  <div className="auth-fp-block admin-secret-reveal">
-                    <strong>Copy now — browser memory only</strong>
-                    <p className="auth-modal-copy">
-                      Not stored on the server. Set it as a Worker secret, then
-                      use it in the field below.
-                    </p>
-                    <code className="admin-fp-hex" style={{ userSelect: "all" }}>
-                      {adminSecretRevealOnce}
-                    </code>
-                    <div className="auth-modal-actions auth-row">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void navigator.clipboard
-                            ?.writeText(adminSecretRevealOnce)
-                            .then(() =>
-                              setAdminMessage(
-                                "Copied. Next: wrangler secret put ADMIN_ACTION_SECRET --name globe — not git or chat.",
-                              ),
-                            )
-                            .catch(() =>
-                              setAdminError(
-                                "Clipboard blocked — select the secret above and copy manually.",
-                              ),
-                            );
-                        }}
-                      >
-                        Copy secret
-                      </button>
-                      <button
-                        type="button"
-                        className="auth-switch"
-                        onClick={() => setAdminSecretRevealOnce(null)}
-                      >
-                        Hide from screen
-                      </button>
-                    </div>
-                  </div>
-                )}
-                <label className="auth-field">
-                  <span>Action secret (memory only)</span>
-                  <input
-                    type="password"
-                    value={adminActionSecret}
-                    onChange={(e) => setAdminActionSecret(e.target.value)}
-                    autoComplete="off"
-                    spellCheck={false}
-                    placeholder="paste Worker secret (needed only for mutations)"
-                  />
-                </label>
-
-                <div className="auth-section-title">2 · Unlock with your key</div>
-                <p className="auth-modal-copy">
-                  Signs a one-time server challenge with your{" "}
-                  <strong>device private key</strong>. Elevation lasts ~10
-                  minutes. Requires{" "}
-                  <code>ADMIN_ACTION_SECRET</code> set on the Worker first.
-                </p>
-                <div className="auth-modal-actions auth-row">
-                  <button
-                    type="button"
-                    disabled={adminBusy || !adminSecretConfigured}
                     onClick={() => void unlockAdminPrivileges()}
                   >
                     {adminBusy
@@ -778,8 +693,8 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
 
                 <div className="auth-section-title">All users</div>
                 <p className="auth-modal-copy">
-                  Directory for elevated admins only (action secret + unlock).
-                  Public fields only — no private or public keys.
+                  Directory for elevated admins. The signed key must be on the
+                  fingerprint allowlist. Public fields only — no keys.
                 </p>
                 <div className="auth-modal-actions auth-row admin-users-filters">
                   <button
@@ -816,15 +731,12 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                     type="button"
                     disabled={
                       adminBusy ||
-                      !adminElevationValid() ||
-                      !adminActionSecret.trim()
+                      !adminElevationValid()
                     }
                     title={
-                      !adminElevationValid()
-                        ? "Unlock privileges first"
-                        : !adminActionSecret.trim()
-                          ? "Enter action secret first"
-                          : "Load user directory"
+                      adminElevationValid()
+                        ? "Load user directory"
+                        : "Unlock privileges first"
                     }
                     onClick={() => void loadAdminUsers()}
                   >
@@ -836,8 +748,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                       className="auth-switch"
                       disabled={
                         adminBusy ||
-                        !adminElevationValid() ||
-                        !adminActionSecret.trim()
+                        !adminElevationValid()
                       }
                       onClick={() =>
                         void loadAdminUsers({
@@ -902,8 +813,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                           className="admin-user-remove"
                           disabled={
                             adminBusy ||
-                            !adminElevationValid() ||
-                            !adminActionSecret.trim()
+                            !adminElevationValid()
                           }
                           title="Permanently delete this user"
                           onClick={(e) => {
@@ -981,8 +891,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                         type="button"
                         disabled={
                           adminBusy ||
-                          !adminElevationValid() ||
-                          !adminActionSecret.trim()
+                          !adminElevationValid()
                         }
                         title={
                           adminElevationValid()
@@ -998,8 +907,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                         className="auth-switch"
                         disabled={
                           adminBusy ||
-                          !adminElevationValid() ||
-                          !adminActionSecret.trim()
+                          !adminElevationValid()
                         }
                         onClick={() => void adminGrant(false)}
                       >
@@ -1009,8 +917,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                         type="button"
                         disabled={
                           adminBusy ||
-                          !adminElevationValid() ||
-                          !adminActionSecret.trim()
+                          !adminElevationValid()
                         }
                         title={
                           adminElevationValid()
@@ -1026,8 +933,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                         className="auth-switch"
                         disabled={
                           adminBusy ||
-                          !adminElevationValid() ||
-                          !adminActionSecret.trim()
+                          !adminElevationValid()
                         }
                         onClick={() => void adminGrantKind("keys", false)}
                       >
@@ -1038,8 +944,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                         className="admin-user-remove"
                         disabled={
                           adminBusy ||
-                          !adminElevationValid() ||
-                          !adminActionSecret.trim()
+                          !adminElevationValid()
                         }
                         title="Permanently delete this user account"
                         onClick={() => void adminDeleteUser(adminLookupUser)}
@@ -1067,8 +972,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                     disabled={
                       adminBusy ||
                       !adminSessionId.trim() ||
-                      !adminElevationValid() ||
-                      !adminActionSecret.trim()
+                      !adminElevationValid()
                     }
                     title={
                       adminElevationValid()

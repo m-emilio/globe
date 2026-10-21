@@ -245,8 +245,6 @@ const isTradePulsePreview = getIsTradePulsePreview();
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminAllowlistConfigured, setAdminAllowlistConfigured] =
     useState(false);
-  const [adminSecretRequired, setAdminSecretRequired] = useState(true);
-  const [adminSecretConfigured, setAdminSecretConfigured] = useState(false);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [adminQuery, setAdminQuery] = useState("");
   const [adminLookupUser, setAdminLookupUser] = useState<{
@@ -258,16 +256,7 @@ const isTradePulsePreview = getIsTradePulsePreview();
     createdAt?: string;
   } | null>(null);
   const [adminSessionId, setAdminSessionId] = useState("");
-  /** Memory-only — never persisted; required for grant/revoke/claim. */
-  const [adminActionSecret, setAdminActionSecret] = useState("");
-  /**
-   * One-time reveal after Generate/Rotate. Memory only; cleared when panel closes.
-   * Never written to localStorage / IndexedDB.
-   */
-  const [adminSecretRevealOnce, setAdminSecretRevealOnce] = useState<
-    string | null
-  >(null);
-  /** Memory-only elevation after PGP step-up (10 min server TTL). */
+  /** Memory-only elevation after a device-key signature (10 min server TTL). */
   const [adminElevationToken, setAdminElevationToken] = useState<string | null>(
     null,
   );
@@ -347,7 +336,6 @@ const isTradePulsePreview = getIsTradePulsePreview();
         authenticated?: boolean;
         user?: AuthUser | null;
         isAdmin?: boolean;
-        adminActionSecretRequired?: boolean;
         adminAllowlistConfigured?: boolean;
         paymentRequired?: boolean;
       };
@@ -357,13 +345,11 @@ const isTradePulsePreview = getIsTradePulsePreview();
       if (data.authenticated && data.user?.fingerprint) {
         setAuthUser(data.user);
         setIsAdmin(Boolean(data.isAdmin));
-        setAdminSecretRequired(Boolean(data.adminActionSecretRequired));
         setAdminAllowlistConfigured(Boolean(data.adminAllowlistConfigured));
         return data.user;
       }
       setAuthUser(null);
       setIsAdmin(false);
-      setAdminSecretRequired(false);
       setAdminAllowlistConfigured(false);
       return null;
     } catch {
@@ -384,9 +370,6 @@ const isTradePulsePreview = getIsTradePulsePreview();
       accept: "application/json",
       "content-type": "application/json",
     };
-    if (adminActionSecret.trim()) {
-      h["x-admin-action-secret"] = adminActionSecret.trim();
-    }
     if (adminElevationToken) {
       h["x-admin-elevation"] = adminElevationToken;
     }
@@ -404,8 +387,8 @@ const isTradePulsePreview = getIsTradePulsePreview();
   };
 
   /**
-   * Elevated directory: requires unlock + action secret (same gate as mutations).
-   * Returns public fields only (no keys). Uses POST so admin headers are reliable.
+   * Elevated directory: device-key unlock plus the allowlisted fingerprint.
+   * Returns public fields only (no keys). Uses POST so the elevation header is sent.
    */
   const loadAdminUsers = async (opts?: {
     append?: boolean;
@@ -415,10 +398,7 @@ const isTradePulsePreview = getIsTradePulsePreview();
     setAdminError("");
     try {
       if (!adminElevationValid()) {
-        throw new Error("Unlock privileges first (PGP step-up).");
-      }
-      if (!adminActionSecret.trim()) {
-        throw new Error("Enter ADMIN_ACTION_SECRET to list all users.");
+        throw new Error("Unlock privileges first (device-key signature).");
       }
       const res = await authFetch("/api/admin/users", {
         method: "POST",
@@ -447,12 +427,12 @@ const isTradePulsePreview = getIsTradePulsePreview();
         }
         if (code === "elevation_expired" || code === "elevation_required") {
           throw new Error(
-            "Admin elevation expired. Unlock privileges (PGP step-up) again, then Load users.",
+            "Admin elevation expired. Unlock privileges again, then Load users.",
           );
         }
-        if (code === "admin_secret_required") {
+        if (code === "admin_fingerprint_required") {
           throw new Error(
-            "Action secret rejected. Paste the current ADMIN_ACTION_SECRET Worker secret, then retry.",
+            "This signed-in key is not on ADMIN_FINGERPRINTS. Privileged actions need that key's signature.",
           );
         }
         throw new Error(data.message || data.error || "Could not list users");
@@ -508,10 +488,7 @@ const isTradePulsePreview = getIsTradePulsePreview();
     setAdminMessage("");
     try {
       if (!adminElevationValid()) {
-        throw new Error("Unlock privileges first (PGP step-up).");
-      }
-      if (!adminActionSecret.trim()) {
-        throw new Error("Enter ADMIN_ACTION_SECRET before deleting users.");
+        throw new Error("Unlock privileges first (device-key signature).");
       }
       const res = await authFetch("/api/admin/delete-user", {
         method: "POST",
@@ -552,9 +529,9 @@ const isTradePulsePreview = getIsTradePulsePreview();
   };
 
   /**
-   * PGP step-up: sign a server challenge with the device private key.
-   * Does NOT need the action secret — that is only checked on grant/revoke/claim
-   * and on rotate when a secret already exists. Private key never leaves the browser.
+   * Sign a server challenge with the device private key.
+   * The server accepts the window only when that key is on ADMIN_FINGERPRINTS.
+   * The private key never leaves the browser.
    */
   const unlockAdminPrivileges = async () => {
     setAdminBusy(true);
@@ -653,42 +630,10 @@ const isTradePulsePreview = getIsTradePulsePreview();
     }
   };
 
-  /**
-   * Generate a strong action-secret candidate in the browser only.
-   * Never sent to the server for storage. Operator must set it as a Cloudflare
-   * Worker secret (wrangler secret put ADMIN_ACTION_SECRET) for the server to accept it.
-   * Memory-only reveal for this panel — no localStorage / IndexedDB.
-   */
-  const generateAdminActionSecret = () => {
-    setAdminError("");
-    setAdminSecretRevealOnce(null);
-    try {
-      if (!isAdmin) {
-        throw new Error("Admin only.");
-      }
-      const bytes = new Uint8Array(32);
-      crypto.getRandomValues(bytes);
-      const secret = [...bytes]
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-      // Memory only — never persisted client-side or uploaded for storage.
-      setAdminActionSecret(secret);
-      setAdminSecretRevealOnce(secret);
-      setAdminMessage(
-        "Generated in this browser only. Copy it, then set as a Worker secret: npx wrangler secret put ADMIN_ACTION_SECRET --name globe  (and the same for local .dev.vars). Server never stores this from the UI.",
-      );
-    } catch (error) {
-      setAdminError(
-        error instanceof Error ? error.message : "Generate secret failed",
-      );
-    }
-  };
-
   const openAdminPanel = async () => {
     setShowMenu(false);
     setAdminError("");
     setAdminMessage("");
-    setAdminSecretRevealOnce(null);
     clearAdminElevation();
     const user = await refreshAuth();
     if (!user) {
@@ -702,11 +647,9 @@ const isTradePulsePreview = getIsTradePulsePreview();
       const data = (await res.json()) as {
         isAdmin?: boolean;
         adminAllowlistConfigured?: boolean;
-        adminActionSecretRequired?: boolean;
       };
       setIsAdmin(Boolean(data.isAdmin));
       setAdminAllowlistConfigured(Boolean(data.adminAllowlistConfigured));
-      setAdminSecretRequired(Boolean(data.adminActionSecretRequired));
       if (!data.isAdmin) {
         const fp = formatFingerprint(user.fingerprint);
         const hex = user.fingerprint.replace(/[\s:]/g, "").toLowerCase();
@@ -727,15 +670,10 @@ const isTradePulsePreview = getIsTradePulsePreview();
     try {
       const st = await authFetch("/api/admin/status");
       const stData = (await st.json()) as {
-        actionSecretConfigured?: boolean;
-        actionSecretRequired?: boolean;
         error?: string;
         message?: string;
       };
-      if (st.ok) {
-        setAdminSecretConfigured(Boolean(stData.actionSecretConfigured));
-        setAdminSecretRequired(Boolean(stData.actionSecretRequired ?? true));
-      } else {
+      if (!st.ok) {
         setAdminError(
           stData.message ||
             stData.error ||
@@ -791,11 +729,8 @@ const isTradePulsePreview = getIsTradePulsePreview();
       if (!target) throw new Error("Lookup a user first.");
       if (!adminElevationValid()) {
         throw new Error(
-          "Unlock privileges first (device-key step-up). Grant/revoke need a fresh elevation.",
+          "Unlock privileges first. Grant and revoke need a fresh signature from the allowlisted key.",
         );
-      }
-      if (!adminActionSecret.trim()) {
-        throw new Error("Enter ADMIN_ACTION_SECRET before mutating.");
       }
       const path =
         kind === "transit"
@@ -847,11 +782,8 @@ const isTradePulsePreview = getIsTradePulsePreview();
     try {
       if (!adminElevationValid()) {
         throw new Error(
-          "Unlock privileges first (PGP step-up). Claim needs a fresh elevation.",
+          "Unlock privileges first. Claim needs a fresh signature from the allowlisted key.",
         );
-      }
-      if (!adminActionSecret.trim()) {
-        throw new Error("Enter ADMIN_ACTION_SECRET before claiming.");
       }
       const res = await authFetch("/api/admin/claim-session", {
         method: "POST",
@@ -1038,7 +970,6 @@ const isTradePulsePreview = getIsTradePulsePreview();
         user?: AuthUser;
         sessionToken?: string;
         isAdmin?: boolean;
-        adminActionSecretRequired?: boolean;
         message?: string;
         error?: string;
       };
@@ -1065,7 +996,6 @@ const isTradePulsePreview = getIsTradePulsePreview();
       }
       setAuthUser(me);
       setIsAdmin(Boolean(data.isAdmin));
-      setAdminSecretRequired(Boolean(data.adminActionSecretRequired));
       setShowAuthPanel(false);
       setAuthMessage(
         "Registered. You are signed in. Next visits: open Sign in → Continue with device key (no private key upload).",
@@ -1100,7 +1030,6 @@ const isTradePulsePreview = getIsTradePulsePreview();
       });
       setAuthUser(result.user);
       setIsAdmin(result.isAdmin);
-      setAdminSecretRequired(result.adminActionSecretRequired);
       if (typeof result.paymentRequired === "boolean") {
         setPaymentRequired(result.paymentRequired);
       }
@@ -1186,8 +1115,6 @@ const isTradePulsePreview = getIsTradePulsePreview();
       setIsAdmin(false);
       setShowAdminPanel(false);
       clearAdminElevation();
-      setAdminActionSecret("");
-      setAdminSecretRevealOnce(null);
       clearSessionToken();
       clearLastFingerprint(); // localStorage remember — not browser “cache”
       clearSensitiveAuthState();
@@ -3336,7 +3263,7 @@ const isTradePulsePreview = getIsTradePulsePreview();
     ...pkiGlobeArcs,
     ...contractsGlobeArcs,
   ];
-  return { activityFeed, activityFilter, adminActionSecret, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSecretConfigured, adminSecretRevealOnce, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, applyLocationPreference, applyManualLocation, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, closeContractsHub, closePkiHub, closeUnHub, comtradeError, comtradePreview, comtradeSections, comtradeStatus, comtradeValueMode, contractsError, contractsLayerOn, contractsPreview, contractsStatus, counter, deviceKeys, disableUnGlobalLayer, dismissSiteTour, enabledComtradeSectionCount, enabledTradePulseLayerCount, enabledUnGlobalSectionCount, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generateAdminActionSecret, generatedPublic, globeChoroplethRegions, globeHeatZones, globeMarkerColor, globeOverlayMarkers, globeOverlayRoutes, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, isPkiPanelMinimized, isTradePulsePanelMinimized, isUnGlobalPanelMinimized, isUnodcPanelMinimized, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadComtradePreview, loadLocalTransit, loadNearbyPaths, loadPkiVulns, loadSamContracts, loadTradePulsePreview, loadUnGlobalPreview, loadUnodcHotspots, loadWeatherFeed, locationBusy, locationDraftAddress, locationDraftLabel, locationDraftLat, locationDraftLng, locationMessage, locationPref, logout, lookupAddressLocation, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, openAdminPanel, openContractsHub, openPkiHub, openUnHub, paymentRequired, pkiArcSelection, pkiCatalog, pkiCategory, pkiDensity, pkiError, pkiFocusCve, pkiGlobeArcs, pkiPreview, pkiSeverities, pkiShowMap, pkiSort, pkiStatus, pkiVisibleCves, positions, refreshDeviceKeys, regPublicKey, registerWithPublicKey, requestBrowserLocation, runRateLimitedButtonAction, selectTradePulsePeriod, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminActionSecret, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSecretRevealOnce, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setContractsLayerOn, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setIsPkiPanelMinimized, setIsTradePulsePanelMinimized, setIsUnGlobalPanelMinimized, setIsUnodcPanelMinimized, setKeyGenProfile, setKeyPassphrase, setLocationDraftAddress, setLocationDraftLabel, setLocationDraftLat, setLocationDraftLng, setLocationMessage, setPkiArcPage, setPkiCatalog, setPkiCategory, setPkiDensity, setPkiFocusCve, setPkiSeverities, setPkiShowMap, setPkiSort, setRegPublicKey, setSelectedDeviceFp, setShowAbout, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowComtradePanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowPkiPanel, setShowTradePulsePanel, setShowTransitPanel, setShowUnGlobalPanel, setShowUnodcPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, setUnodcFocusMode, showAbout, showActivityMenu, showAdminPanel, showAuthPanel, showComtradePanel, showContractsHub, showImportDevice, showMenu, showNearbyPanel, showPkiHub, showPkiPanel, showSiteTour, showTradePulsePanel, showTransitPanel, showUnGlobalPanel, showUnHub, showUnodcPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, toggleAllTradePulseLayers, toggleAllUnGlobalSections, toggleTradePulseLayer, toggleUnGlobalSection, toggleUnodcTheme, tradePulseError, tradePulseLayers, tradePulsePeriod, tradePulsePreview, tradePulseStatus, tradePulseYearOptions, transitDistanceM, transitError, transitPreview, transitStatus, unGlobalError, unGlobalPreview, unGlobalSections, unGlobalStatus, unlockAdminPrivileges, unodcCountryPolygons, unodcError, unodcPreview, unodcStatus, unodcThemes, visibleTradePulseRoutes, visibleUnMissionLocations, weatherError, weatherFeed, weatherGlow, weatherStatus };
+  return { activityFeed, activityFilter, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, applyLocationPreference, applyManualLocation, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, closeContractsHub, closePkiHub, closeUnHub, comtradeError, comtradePreview, comtradeSections, comtradeStatus, comtradeValueMode, contractsError, contractsLayerOn, contractsPreview, contractsStatus, counter, deviceKeys, disableUnGlobalLayer, dismissSiteTour, enabledComtradeSectionCount, enabledTradePulseLayerCount, enabledUnGlobalSectionCount, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generatedPublic, globeChoroplethRegions, globeHeatZones, globeMarkerColor, globeOverlayMarkers, globeOverlayRoutes, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, isPkiPanelMinimized, isTradePulsePanelMinimized, isUnGlobalPanelMinimized, isUnodcPanelMinimized, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadComtradePreview, loadLocalTransit, loadNearbyPaths, loadPkiVulns, loadSamContracts, loadTradePulsePreview, loadUnGlobalPreview, loadUnodcHotspots, loadWeatherFeed, locationBusy, locationDraftAddress, locationDraftLabel, locationDraftLat, locationDraftLng, locationMessage, locationPref, logout, lookupAddressLocation, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, openAdminPanel, openContractsHub, openPkiHub, openUnHub, paymentRequired, pkiArcSelection, pkiCatalog, pkiCategory, pkiDensity, pkiError, pkiFocusCve, pkiGlobeArcs, pkiPreview, pkiSeverities, pkiShowMap, pkiSort, pkiStatus, pkiVisibleCves, positions, refreshDeviceKeys, regPublicKey, registerWithPublicKey, requestBrowserLocation, runRateLimitedButtonAction, selectTradePulsePeriod, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setContractsLayerOn, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setIsPkiPanelMinimized, setIsTradePulsePanelMinimized, setIsUnGlobalPanelMinimized, setIsUnodcPanelMinimized, setKeyGenProfile, setKeyPassphrase, setLocationDraftAddress, setLocationDraftLabel, setLocationDraftLat, setLocationDraftLng, setLocationMessage, setPkiArcPage, setPkiCatalog, setPkiCategory, setPkiDensity, setPkiFocusCve, setPkiSeverities, setPkiShowMap, setPkiSort, setRegPublicKey, setSelectedDeviceFp, setShowAbout, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowComtradePanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowPkiPanel, setShowTradePulsePanel, setShowTransitPanel, setShowUnGlobalPanel, setShowUnodcPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, setUnodcFocusMode, showAbout, showActivityMenu, showAdminPanel, showAuthPanel, showComtradePanel, showContractsHub, showImportDevice, showMenu, showNearbyPanel, showPkiHub, showPkiPanel, showSiteTour, showTradePulsePanel, showTransitPanel, showUnGlobalPanel, showUnHub, showUnodcPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, toggleAllTradePulseLayers, toggleAllUnGlobalSections, toggleTradePulseLayer, toggleUnGlobalSection, toggleUnodcTheme, tradePulseError, tradePulseLayers, tradePulsePeriod, tradePulsePreview, tradePulseStatus, tradePulseYearOptions, transitDistanceM, transitError, transitPreview, transitStatus, unGlobalError, unGlobalPreview, unGlobalSections, unGlobalStatus, unlockAdminPrivileges, unodcCountryPolygons, unodcError, unodcPreview, unodcStatus, unodcThemes, visibleTradePulseRoutes, visibleUnMissionLocations, weatherError, weatherFeed, weatherGlow, weatherStatus };
 }
 
 export type GlobeApi = ReturnType<typeof useGlobeApp>;
