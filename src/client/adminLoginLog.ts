@@ -1,18 +1,21 @@
 /**
- * Admin-only view of stored sign-in attempts.
+ * Admin-only view of hashed sign-in attempts, plus a local export of the security log.
  * Renders text only. It does not show private keys, signatures, or session cookies.
  */
 
 type Attempt = {
   at?: string;
-  ip?: string;
   family?: string;
   phase?: string;
   suite?: string;
   result?: string;
   code?: string;
-  accountPrefix?: string;
   detail?: string;
+  networkHash?: string;
+  accountHash?: string;
+  recordHash?: string;
+  prevHash?: string;
+  chain?: string;
 };
 
 function text(value: unknown, max = 180): string {
@@ -25,9 +28,15 @@ function line(label: string, value: string): HTMLElement {
   const name = document.createElement("strong");
   name.textContent = `${label}: `;
   const body = document.createElement("span");
+  body.style.cssText = "word-break:break-all";
   body.textContent = value || "—";
   row.append(name, body);
   return row;
+}
+
+function hashLine(label: string, value: unknown): HTMLElement {
+  const hash = text(value, 64);
+  return line(label, /^[a-f0-9]{64}$/.test(hash) ? hash : "");
 }
 
 export function mountAdminLoginLog(): void {
@@ -49,17 +58,15 @@ export function mountAdminLoginLog(): void {
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const note = document.createElement("p");
   note.style.cssText = "margin:0 0 8px;font-size:13px;line-height:1.4;color:#d5ffe9";
-  note.textContent = "Visible to an admin session only. Attempts are kept for 30 days. The log stores the result, method, suite, network, and an 8-character account prefix. It does not store private keys, signatures, MACs, challenges, or session cookies.";
+  note.textContent =
+    "Visible to an admin session only. Attempts are kept for 30 days and audits for 180 days. Each new row stores a SHAKE256 digest of the network and the account, plus a record hash and a hash chain. SHAKE256 is the hash inside ML-DSA and SLH-DSA. The raw network and account are not stored. An unsalted digest of an IPv4 can still be guessed if this export leaks. fail2ban needs a host firewall, which this Worker does not have. After 8 rejected sign-ins in 10 minutes, that network is paused for 15 minutes. Private keys, signatures, MACs, challenges, and session cookies are not stored.";
   const status = document.createElement("p");
   status.id = "globe-admin-login-log-status";
   status.setAttribute("role", "status");
   status.style.cssText = "min-height:1.2em;margin:8px 0;font-size:13px";
   const list = document.createElement("div");
   list.id = "globe-admin-login-log-list";
-  const refresh = document.createElement("button");
-  refresh.type = "button";
-  refresh.textContent = "Reload sign-in attempts";
-  refresh.style.cssText = [
+  const buttonStyle = [
     "min-height:44px",
     "width:100%",
     "margin-top:8px",
@@ -69,7 +76,16 @@ export function mountAdminLoginLog(): void {
     "background:#16382c",
     "color:#e7fff3",
   ].join(";");
-  root.append(title, note, status, list, refresh);
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.textContent = "Reload sign-in attempts";
+  refresh.style.cssText = buttonStyle;
+  const exportLog = document.createElement("button");
+  exportLog.type = "button";
+  exportLog.id = "globe-admin-security-export";
+  exportLog.textContent = "Export security log";
+  exportLog.style.cssText = buttonStyle;
+  root.append(title, note, status, list, refresh, exportLog);
   modal.append(root);
 
   const showAttempts = (attempts: Attempt[]) => {
@@ -92,8 +108,10 @@ export function mountAdminLoginLog(): void {
         line("Step", text(attempt.phase, 20)),
         line("Suite", text(attempt.suite, 40)),
         line("Code", text(attempt.code, 40)),
-        line("Network", text(attempt.ip, 64)),
-        line("Account prefix", text(attempt.accountPrefix, 8)),
+        hashLine("Network hash", attempt.networkHash),
+        hashLine("Account hash", attempt.accountHash),
+        hashLine("Record hash", attempt.recordHash),
+        line("Chain", /^[a-f0-9]{64}$/.test(text(attempt.chain, 64)) ? text(attempt.chain, 64) : "predates the hash chain"),
         line("What happened", text(attempt.detail, 240)),
       );
       list.append(card);
@@ -132,6 +150,43 @@ export function mountAdminLoginLog(): void {
       });
   };
 
+  const download = () => {
+    exportLog.disabled = true;
+    status.textContent = "Preparing the security log…";
+    void fetch("/api/admin/security-export", {
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    })
+      .then(async (response) => {
+        if (response.status === 401 || response.status === 403) {
+          status.textContent = "An admin session is required to export the security log.";
+          return;
+        }
+        if (!response.ok) {
+          status.textContent = "The security log could not be exported.";
+          return;
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "globe-security-log.json";
+        anchor.rel = "noopener";
+        document.body.append(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+        status.textContent = "Security log downloaded to this device.";
+      })
+      .catch(() => {
+        status.textContent = "The security log could not be exported.";
+      })
+      .finally(() => {
+        exportLog.disabled = false;
+      });
+  };
+
   refresh.addEventListener("click", load);
+  exportLog.addEventListener("click", download);
   load();
 }

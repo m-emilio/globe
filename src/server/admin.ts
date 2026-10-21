@@ -37,6 +37,19 @@ import {
   PQC_SIG_SUITES,
   verifyPqcSignature,
 } from "./pqcVerify";
+import { AUTH_BAN_SECONDS, AUTH_FAIL_LIMIT, AUTH_FAIL_WINDOW_SECONDS } from "./authBan";
+import { listLoginAttempts, readLoginChainTip } from "./loginLog";
+import {
+  PQC_LOG_ALG,
+  PQC_LOG_BYTES,
+  PQC_LOG_DOMAIN,
+  accountHash,
+  auditRecordHash,
+  chainHash,
+  isPqcLogHash,
+  networkHash,
+  type AuditSealFields,
+} from "./pqcLogHash";
 
 export type AdminEnv = AuthEnv &
   BillingEnv & {
@@ -217,12 +230,142 @@ async function requireElevation(
   return { ok: true };
 }
 
+const AUDIT_CHAIN_KEY = "auth:log-chain:audit";
+const AUDIT_TTL_SECONDS = 60 * 60 * 24 * 180;
+
+function cleanAction(value: string): string {
+  return /^[a-z0-9_]{1,64}$/.test(value) ? value : "other";
+}
+
+function cleanDetail(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 200);
+}
+
+function hashOrEmpty(value: unknown): string {
+  return typeof value === "string" && isPqcLogHash(value) ? value : "";
+}
+
+function usableIp(value: string): string {
+  const ip = value.trim().slice(0, 64);
+  if (ip === "unknown") return ip;
+  return /^[0-9a-fA-F:.]+$/.test(ip) ? ip : "";
+}
+
+export type PublicAudit = {
+  at: string;
+  action: string;
+  ok: boolean;
+  detail: string;
+  adminHash: string;
+  targetHash: string;
+  networkHash: string;
+  recordHash: string;
+  prevHash: string;
+  chain: string;
+};
+
+function asPublicAudit(value: unknown): PublicAudit | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  const at = typeof row.at === "string" && /^\d{4}-\d{2}-\d{2}T/.test(row.at) ? row.at.slice(0, 40) : "";
+  const action = typeof row.action === "string" ? cleanAction(row.action) : "";
+  if (!at || !action) return null;
+  let admin = hashOrEmpty(row.adminHash);
+  let target = hashOrEmpty(row.targetHash);
+  let network = hashOrEmpty(row.networkHash);
+  if (!admin && typeof row.adminFingerprint === "string") admin = accountHash(row.adminFingerprint);
+  if (!target && typeof row.targetFingerprint === "string") target = accountHash(row.targetFingerprint);
+  if (!network && typeof row.ip === "string") {
+    const ip = usableIp(row.ip);
+    if (ip) network = networkHash(ip);
+  }
+  return {
+    at,
+    action,
+    ok: row.ok !== false,
+    detail: typeof row.detail === "string" ? cleanDetail(row.detail) : "",
+    adminHash: admin,
+    targetHash: target,
+    networkHash: network,
+    recordHash: hashOrEmpty(row.recordHash),
+    prevHash: hashOrEmpty(row.prevHash),
+    chain: hashOrEmpty(row.chain),
+  };
+}
+
+async function readAuditChainTip(env: AdminEnv): Promise<string> {
+  if (!env.BILLING_KV) return "";
+  const raw = await env.BILLING_KV.get(AUDIT_CHAIN_KEY);
+  return raw && isPqcLogHash(raw) ? raw : "";
+}
+
+async function listPrefixedKeys(env: AdminEnv, prefix: string): Promise<string[]> {
+  if (!env.BILLING_KV) return [];
+  const names: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 4; page++) {
+    const listed = await env.BILLING_KV.list({ prefix, limit: 1000, cursor });
+    for (const key of listed.keys) names.push(key.name);
+    if (listed.list_complete || !listed.cursor) break;
+    cursor = listed.cursor;
+  }
+  return names;
+}
+
+async function listPublicAudits(env: AdminEnv, take = 40): Promise<PublicAudit[]> {
+  if (!env.BILLING_KV) return [];
+  const scan = Math.min(Math.max(take, 1), 100);
+  const sealed = (await listPrefixedKeys(env, "admin:seal:")).slice(0, scan);
+  const legacy = await listPrefixedKeys(env, "admin:audit:");
+  const names = [...sealed, ...legacy.slice(-scan)];
+  const entries: PublicAudit[] = [];
+  for (const name of names) {
+    const raw = await env.BILLING_KV.get(name);
+    if (!raw) continue;
+    try {
+      const parsed = asPublicAudit(JSON.parse(raw));
+      if (parsed) entries.push(parsed);
+    } catch {
+      // skip a damaged row
+    }
+  }
+  entries.sort((a, b) => b.at.localeCompare(a.at));
+  return entries.slice(0, scan);
+}
+
 async function writeAudit(env: AdminEnv, entry: AuditEntry) {
   if (!env.BILLING_KV) return;
-  const id = `${Date.now()}_${randomHex(4)}`;
-  await env.BILLING_KV.put(`admin:audit:${id}`, JSON.stringify(entry), {
-    expirationTtl: 60 * 60 * 24 * 180,
-  });
+  try {
+    const at = /^\d{4}-\d{2}-\d{2}T/.test(entry.at) ? entry.at.slice(0, 40) : new Date().toISOString();
+    const fields: AuditSealFields = {
+      at,
+      action: cleanAction(entry.action),
+      ok: entry.ok !== false,
+      detail: cleanDetail(entry.detail || ""),
+      adminHash: accountHash(entry.adminFingerprint),
+      targetHash: entry.targetFingerprint ? accountHash(entry.targetFingerprint) : "",
+      networkHash: networkHash(entry.ip),
+    };
+    const recordHash = auditRecordHash(fields);
+    const prevHash = await readAuditChainTip(env);
+    const chain = chainHash(prevHash, recordHash);
+    const stamp = String(9_999_999_999_999 - Date.now()).padStart(13, "0");
+    await env.BILLING_KV.put(
+      `admin:seal:${stamp}_${randomHex(4)}`,
+      JSON.stringify({
+        v: 1,
+        alg: PQC_LOG_ALG,
+        ...fields,
+        recordHash,
+        prevHash,
+        chain,
+      }),
+      { expirationTtl: AUDIT_TTL_SECONDS },
+    );
+    await env.BILLING_KV.put(AUDIT_CHAIN_KEY, chain);
+  } catch {
+    // Skip the write rather than store a raw network or account.
+  }
 }
 
 /**
@@ -1178,32 +1321,8 @@ export async function adminListAudit(
 ): Promise<Response> {
   const gate = await requireAdminSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
-
-  if (!env.BILLING_KV) {
-    return json({ entries: [] }, { status: 200 }, applySecurityHeaders);
-  }
-
-  const listed = await env.BILLING_KV.list({
-    prefix: "admin:audit:",
-    limit: 50,
-  });
-  const entries: AuditEntry[] = [];
-  for (const key of listed.keys) {
-    const raw = await env.BILLING_KV.get(key.name);
-    if (!raw) continue;
-    try {
-      entries.push(JSON.parse(raw) as AuditEntry);
-    } catch {
-      // skip
-    }
-  }
-  entries.sort((a, b) => b.at.localeCompare(a.at));
-
-  return json(
-    { entries: entries.slice(0, 40) },
-    { status: 200 },
-    applySecurityHeaders,
-  );
+  const entries = await listPublicAudits(env, 40);
+  return json({ entries }, { status: 200 }, applySecurityHeaders);
 }
 
 /** Recent sign-in attempts. Same admin session gate as the audit list. No key material. */
@@ -1214,16 +1333,61 @@ export async function adminListLoginAttempts(
 ): Promise<Response> {
   const gate = await requireAdminSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
-  const { listLoginAttempts } = await import("./loginLog");
-  const attempts = await listLoginAttempts(env);
+  const attempts = await listLoginAttempts(env, 40);
   return json(
     {
       attempts,
       retentionDays: 30,
       keyLimitPerIp: 3,
-      stored: "Result, method, suite, network, and an 8-character account prefix. Private keys, signatures, MACs, challenges, and session cookies are not stored.",
+      alg: PQC_LOG_ALG,
+      stored:
+        "SHAKE256 digests of the network and account, plus a record hash and hash chain. Raw network addresses and account ids are not returned. Private keys, signatures, MACs, challenges, and session cookies are not stored.",
     },
     { status: 200 },
+    applySecurityHeaders,
+  );
+}
+
+/** Downloadable copy of the hashed sign-in attempts and admin audits. Admin session only. */
+export async function adminExportSecurityLog(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  const [attempts, audits, attemptTip, auditTip] = await Promise.all([
+    listLoginAttempts(env, 100),
+    listPublicAudits(env, 100),
+    readLoginChainTip(env),
+    readAuditChainTip(env),
+  ]);
+  return json(
+    {
+      alg: PQC_LOG_ALG,
+      dkLen: PQC_LOG_BYTES,
+      domain: PQC_LOG_DOMAIN,
+      generatedAt: new Date().toISOString(),
+      loginRecordFields: ["at", "family", "phase", "suite", "result", "code", "networkHash", "accountHash"],
+      auditRecordFields: ["at", "action", "ok", "detail", "adminHash", "targetHash", "networkHash"],
+      okEncoding: "1 when the action succeeded, 0 otherwise",
+      digestInput: `${PQC_LOG_DOMAIN}:label:value`,
+      chainInput: "prevHash|recordHash under the chain label. An empty prevHash is the first link.",
+      unsalted:
+        "SHAKE256 has no pepper. A leaked export can be matched against a guessed IPv4. IPv6 is not practical to guess.",
+      pause: {
+        countedFailures: AUTH_FAIL_LIMIT,
+        windowSeconds: AUTH_FAIL_WINDOW_SECONDS,
+        pauseSeconds: AUTH_BAN_SECONDS,
+      },
+      chainTips: { attempt: attemptTip, audit: auditTip },
+      attempts,
+      audits,
+    },
+    {
+      status: 200,
+      headers: { "content-disposition": 'attachment; filename="globe-security-log.json"' },
+    },
     applySecurityHeaders,
   );
 }
