@@ -17,12 +17,14 @@ import {
 } from "./auth";
 import { createPqcChallenge, loginPqcUser, registerPqcUser } from "./pqcAuth";
 import { createLabChallenge, loginLabUser, registerLabUser } from "./labAuth";
-import { logAuthResponse } from "./loginLog";
+import { logAuthResponse, type LoginFamily, type LoginPhase } from "./loginLog";
+import { rejectIfAuthBanned } from "./authBan";
 import {
   adminClaimSession,
   adminDeleteUser,
   adminElevate,
   adminElevateChallenge,
+  adminExportSecurityLog,
   adminGrantTransit,
   adminGrantUnlimitedKeys,
   adminListAudit,
@@ -4604,25 +4606,35 @@ export default {
     }
 
     // --- Auth (OpenPGP challenge–response + HttpOnly session cookie) ---
+    const loggedAuth = async (
+      family: LoginFamily,
+      phase: LoginPhase,
+      run: () => Promise<Response>,
+    ): Promise<Response> => {
+      const banned = await rejectIfAuthBanned(request, env, applySecurityHeaders);
+      if (banned) return logAuthResponse(request, env, family, phase, banned);
+      return logAuthResponse(request, env, family, phase, await run());
+    };
+
     if (url.pathname === "/api/auth/register") {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return logAuthResponse(request, env, "device", "register", await registerUser(request, env, applySecurityHeaders));
+      return loggedAuth("device", "register", () => registerUser(request, env, applySecurityHeaders));
     }
 
     if (url.pathname === "/api/auth/challenge") {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return logAuthResponse(request, env, "device", "challenge", await createAuthChallenge(request, env, applySecurityHeaders));
+      return loggedAuth("device", "challenge", () => createAuthChallenge(request, env, applySecurityHeaders));
     }
 
     if (url.pathname === "/api/auth/login") {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return logAuthResponse(request, env, "device", "login", await loginUser(request, env, applySecurityHeaders));
+      return loggedAuth("device", "login", () => loginUser(request, env, applySecurityHeaders));
     }
 
     if (url.pathname === "/api/auth/adopt-token") {
@@ -4653,42 +4665,42 @@ export default {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return logAuthResponse(request, env, "pqc", "register", await registerPqcUser(request, env, applySecurityHeaders));
+      return loggedAuth("pqc", "register", () => registerPqcUser(request, env, applySecurityHeaders));
     }
 
     if (url.pathname === "/api/auth/pqc/challenge") {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return logAuthResponse(request, env, "pqc", "challenge", await createPqcChallenge(request, env, applySecurityHeaders));
+      return loggedAuth("pqc", "challenge", () => createPqcChallenge(request, env, applySecurityHeaders));
     }
 
     if (url.pathname === "/api/auth/pqc/login") {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return logAuthResponse(request, env, "pqc", "login", await loginPqcUser(request, env, applySecurityHeaders));
+      return loggedAuth("pqc", "login", () => loginPqcUser(request, env, applySecurityHeaders));
     }
 
     if (url.pathname === "/api/auth/lab/register") {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return logAuthResponse(request, env, "lab", "register", await registerLabUser(request, env, applySecurityHeaders));
+      return loggedAuth("lab", "register", () => registerLabUser(request, env, applySecurityHeaders));
     }
 
     if (url.pathname === "/api/auth/lab/challenge") {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return logAuthResponse(request, env, "lab", "challenge", await createLabChallenge(request, env, applySecurityHeaders));
+      return loggedAuth("lab", "challenge", () => createLabChallenge(request, env, applySecurityHeaders));
     }
 
     if (url.pathname === "/api/auth/lab/login") {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return logAuthResponse(request, env, "lab", "login", await loginLabUser(request, env, applySecurityHeaders));
+      return loggedAuth("lab", "login", () => loginLabUser(request, env, applySecurityHeaders));
     }
 
     // --- Admin portal (allowlist + secret + PGP elevation for mutations) ---
@@ -4759,6 +4771,15 @@ export default {
       return withoutResponseBodyForHead(
         request,
         await adminListLoginAttempts(request, env, applySecurityHeaders),
+      );
+    }
+    if (url.pathname === "/api/admin/security-export") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminExportSecurityLog(request, env, applySecurityHeaders),
       );
     }
     if (url.pathname === "/api/admin/audit") {
