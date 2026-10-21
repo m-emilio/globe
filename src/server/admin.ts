@@ -1682,8 +1682,10 @@ export async function adminDeleteUser(
     body = {};
   }
 
-  // Require explicit confirm token to avoid mis-clicks
-  if ((body.confirm || "").trim().toUpperCase() !== "DELETE") {
+  // Require explicit confirm token to avoid mis-clicks.
+  // Allowlisted admin accounts need a second confirm so one click cannot wipe them.
+  const confirm = (body.confirm || "").trim().toUpperCase();
+  if (confirm !== "DELETE" && confirm !== "DELETE ADMIN") {
     return json(
       {
         error: "confirm_required",
@@ -1712,38 +1714,19 @@ export async function adminDeleteUser(
     );
   }
 
-  if (user.id === gate.user.id) {
+  // Allowlisted accounts stay protected from a single click, including the
+  // signed-in admin. A second confirm deletes the database record only.
+  // ADMIN_FINGERPRINTS is not changed, so that key can register again as admin.
+  if (isAdminUser(user, env) && confirm !== "DELETE ADMIN") {
+    const self = user.id === gate.user.id;
     return json(
       {
-        error: "cannot_delete_self",
-        message: "You cannot delete the account for your own admin session.",
+        error: "admin_delete_confirm",
+        message: self
+          ? "This is the admin account you are signed in as. Confirm again to delete it from the database. This ends your session. The allowlist is unchanged, so this key can register again and will still be an admin."
+          : "This account is on the admin allowlist. Confirm again to delete it from the database. The allowlist is unchanged, so this key can register again and will still be an admin.",
       },
-      { status: 400 },
-      applySecurityHeaders,
-    );
-  }
-
-  // Do not allow elevated admins to wipe other allowlisted admin identities
-  // (compromised support key should not delete co-admins).
-  if (isAdminUser(user, env)) {
-    await writeAudit(env, {
-      at: new Date().toISOString(),
-      adminUserId: gate.user.id,
-      adminFingerprint: gate.user.fingerprint,
-      action: "delete_user_denied",
-      targetUserId: user.id,
-      targetFingerprint: user.fingerprint,
-      detail: "target_is_allowlisted_admin",
-      ip: clientIp(request),
-      ok: false,
-    });
-    return json(
-      {
-        error: "cannot_delete_admin",
-        message:
-          "Refusing to delete an allowlisted admin account. Remove them from ADMIN_FINGERPRINTS / ADMIN_USER_IDS first if intentional.",
-      },
-      { status: 403 },
+      { status: 409 },
       applySecurityHeaders,
     );
   }
@@ -1764,7 +1747,7 @@ export async function adminDeleteUser(
     action: "delete_user",
     targetUserId: removed.id,
     targetFingerprint: removed.fingerprint,
-    detail: `sessions_revoked=${removed.sessionsRevoked}`,
+    detail: `sessions_revoked=${removed.sessionsRevoked}${isAdminUser(user, env) ? " allowlisted_admin" : ""}`,
     ip: clientIp(request),
     ok: true,
   });
