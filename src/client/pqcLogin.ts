@@ -128,12 +128,9 @@ export function mountPqcLogin(): void {
     "color:#e7fff3",
   ].join(";");
 
-  const title = el("h3", "Post-quantum signature");
-  title.style.cssText = "margin:0 0 6px;font-size:16px";
-  const hint = el(
-    "p",
-    "ML-DSA-65 is the usual choice. The private key stays in this browser and is not uploaded.",
-  );
+  const title = el("h3", "Post-quantum");
+  title.style.cssText = "margin:0 0 6px;font-size:15px";
+  const hint = el("p", "ML-DSA-65 is the usual choice.");
   hint.style.cssText = "margin:0 0 10px;font-size:13px;line-height:1.4;color:#d5ffe9";
 
   const suiteLabel = el("label");
@@ -174,15 +171,15 @@ export function mountPqcLogin(): void {
     "background:#16382c",
     "color:#e7fff3",
   ].join(";");
-  const create = el("button", "Create this signature key on this device");
+  const create = el("button", "Create key");
   create.type = "button";
   create.id = "globe-pqc-login-create";
   create.style.cssText = buttonStyle;
-  const signIn = el("button", "Sign in with this signature");
+  const signIn = el("button", "Sign in");
   signIn.type = "button";
   signIn.id = "globe-pqc-login-signin";
   signIn.style.cssText = buttonStyle;
-  const remove = el("button", "Remove this signature key from this device");
+  const remove = el("button", "Remove key");
   remove.type = "button";
   remove.id = "globe-pqc-login-remove";
   remove.style.cssText = buttonStyle;
@@ -209,14 +206,14 @@ export function mountPqcLogin(): void {
       .then((rows) => {
         const suite = selected();
         const label = suiteLabelFor(suite);
-        create.textContent = `Create ${label} key on this device`;
-        signIn.textContent = `Sign in with ${label}`;
-        remove.textContent = `Remove ${label} key from this device`;
+        create.textContent = `Create ${label}`;
+        signIn.textContent = `Sign in`;
+        remove.textContent = `Remove ${label}`;
         const here = rows.some((row) => row.suite === suite);
         setStatus(
           here
-            ? `${label} key is on this device. Sign in uses the same session as a device key.`
-            : `No ${label} key on this device yet. Create one here, then sign in.`,
+            ? `${label} is on this device.`
+            : `No ${label} key yet. Create it, then sign in.`,
         );
       })
       .catch((error: unknown) => {

@@ -178,7 +178,7 @@ export function mountPqcLab(): void {
   };
   const refreshHint = () => {
     const suite = pqcKemSuite(selectedSuite());
-    hint.textContent = `${suite.label} in pure JavaScript (@noble/post-quantum). Public key ${suite.publicKey} bytes, ciphertext ${suite.cipherText} bytes. The secret stays on this device. Sign in from this lab sends a proof, not the secret. The shared secret is shown only as a SHA-256 fingerprint.`;
+    hint.textContent = `${suite.label}. The secret stays on this device. Sign-in sends a proof.`;
   };
   const setStatus = (message: string, isError = false) => {
     status.textContent = message;
