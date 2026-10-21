@@ -21,6 +21,7 @@ import { logAuthResponse, type LoginFamily, type LoginPhase } from "./loginLog";
 import { rejectIfAuthBanned } from "./authBan";
 import {
   adminClaimSession,
+  adminClaimStripeUsers,
   adminDeleteUser,
   adminElevate,
   adminElevateChallenge,
@@ -1583,11 +1584,18 @@ function resolveComtradeSubscriptionKey(env: Env): string | null {
 
 /** Collect all Worker secrets that must never appear in logs or client JSON. */
 function collectWorkerSecrets(env: Env): string[] {
+  const extra = env as Env & {
+    LOG_HASH_PEPPER?: string;
+    ADMIN_FINGERPRINT_SECRET?: string;
+  };
   const candidates = [
     env.COMTRADE_SUBSCRIPTION_KEY,
     env.STRIPE_SECRET_KEY,
     env.STRIPE_WEBHOOK_SECRET,
     env.ADMIN_ACTION_SECRET,
+    env.ADMIN_FINGERPRINTS,
+    extra.ADMIN_FINGERPRINT_SECRET,
+    extra.LOG_HASH_PEPPER,
     env.TRANSIT_PUBLICAPI_V4,
   ];
   const out: string[] = [];
@@ -4759,6 +4767,12 @@ export default {
         return methodNotAllowedResponse();
       }
       return adminClaimSession(request, env, applySecurityHeaders);
+    }
+    if (url.pathname === "/api/admin/claim-stripe-all") {
+      if (request.method !== "POST") {
+        return methodNotAllowedResponse();
+      }
+      return adminClaimStripeUsers(request, env, applySecurityHeaders);
     }
     if (url.pathname === "/api/admin/login-attempts") {
       if (!isReadApiMethod(request)) {
