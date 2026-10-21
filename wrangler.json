@@ -37,8 +37,5 @@
   "observability": {
     "enabled": true
   },
-  "upload_source_maps": false,
-  "vars": {
-    "ADMIN_FINGERPRINTS": "79053d032ed891ee0a98a03576e5c46810ed8c1dfb0e14eff69bac4a0f63c639"
-  }
+  "upload_source_maps": false
 }
