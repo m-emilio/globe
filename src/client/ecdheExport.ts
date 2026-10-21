@@ -56,33 +56,13 @@ const OLD_HINT =
 const NEW_HINT =
   "the key lab holds the ECDHE private key on this device. It is not uploaded";
 
-function hideInlineLab(): void {
-  const title = document.querySelector(".auth-ecdhe-title");
-  if (!(title instanceof HTMLElement)) return;
-  title.style.display = "none";
-  let sibling = title.nextElementSibling;
-  if (sibling instanceof HTMLElement && sibling.classList.contains("auth-field-hint")) {
-    sibling.style.display = "none";
-    sibling = sibling.nextElementSibling;
-  }
-  if (sibling instanceof HTMLElement && sibling.classList.contains("auth-modal-actions")) {
-    sibling.style.display = "none";
-  }
-  const labs = document.querySelectorAll(".auth-ecdhe-lab");
-  for (let i = 0; i < labs.length; i++) {
-    const lab = labs[i];
-    if (lab instanceof HTMLElement) lab.style.display = "none";
-  }
-}
-
 let applyingCopy = false;
 
 function applyCopy(): void {
   if (applyingCopy) return;
-  if (!document.querySelector(".auth-modal, .auth-ecdhe-title")) return;
+  if (!document.querySelector(".auth-modal")) return;
   applyingCopy = true;
   try {
-    hideInlineLab();
     const nodes = document.querySelectorAll(".auth-inline-ok, .auth-field-hint");
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i]!;
