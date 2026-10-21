@@ -36,8 +36,8 @@ export type AuthEnv = {
   /** Comma-separated user ids allowed as admins (server-side only). */
   ADMIN_USER_IDS?: string;
   /**
-   * Optional second factor for destructive admin actions (grant/revoke).
-   * Send as header x-admin-action-secret when set.
+   * Legacy Worker secret. Privileged admin routes do not read it.
+   * Approval is an allowlisted fingerprint proven by a device-key signature.
    */
   ADMIN_ACTION_SECRET?: string;
 };
@@ -108,10 +108,10 @@ function parseFingerprintAllowlist(raw?: string): string[] {
 }
 
 /**
- * Admin = allowlisted fingerprint and/or user id from env (not client-asserted).
+ * Admin session = allowlisted fingerprint and/or user id from env (not client-asserted).
  * Empty allowlists ⇒ nobody is admin (fail closed).
- * Note: this only answers "is this identity allowlisted?" — mutative admin
- * APIs also require action secret + PGP step-up elevation (see admin.ts).
+ * Mutating admin APIs also require a device-key signature and an exact
+ * ADMIN_FINGERPRINTS match (see admin.ts). A user id alone cannot approve those.
  */
 export function isAdminUser(user: UserRecord, env: AuthEnv): boolean {
   const fps = parseFingerprintAllowlist(env.ADMIN_FINGERPRINTS);
@@ -126,12 +126,28 @@ export function isAdminUser(user: UserRecord, env: AuthEnv): boolean {
   return Boolean(uid && ids.includes(uid));
 }
 
+/**
+ * Exact ADMIN_FINGERPRINTS membership. ADMIN_USER_IDS does not pass.
+ * Empty allowlist fails closed. Callers still require a signature from this key.
+ */
+export function isAllowlistedAdminFingerprint(
+  fingerprint: string,
+  env: AuthEnv,
+): boolean {
+  const fps = parseFingerprintAllowlist(env.ADMIN_FINGERPRINTS);
+  if (fps.length === 0) return false;
+  const fp = normalizeFingerprint(fingerprint || "");
+  if (!fp) return false;
+  return fps.includes(fp);
+}
+
 function adminFlags(user: UserRecord, env: AuthEnv) {
   const fps = parseFingerprintAllowlist(env.ADMIN_FINGERPRINTS);
   const ids = parseCsvList(env.ADMIN_USER_IDS);
   return {
     isAdmin: isAdminUser(user, env),
-    adminActionSecretRequired: Boolean(env.ADMIN_ACTION_SECRET?.trim()),
+    /** Retired. Clients must not send a shared admin action secret. */
+    adminActionSecretRequired: false,
     /** True if server has any admin allowlist configured (does not leak entries). */
     adminAllowlistConfigured: fps.length > 0 || ids.length > 0,
   };

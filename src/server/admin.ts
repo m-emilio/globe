@@ -5,11 +5,11 @@
  * - Client-reported isAdmin is UI only; every /api/admin/* call re-checks server env.
  * - Session alone is NOT enough for grant/revoke/claim (stolen token risk).
  * - Mutating actions require ALL of:
- *     1) Logged-in session whose fingerprint is in ADMIN_FINGERPRINTS (or id in ADMIN_USER_IDS)
- *     2) ADMIN_ACTION_SECRET Worker secret (mandatory — fail closed if unset; never store in KV)
- *     3) Short-lived elevation token from a fresh device-key signature (proves key still held)
- * - Admin UI may generate a candidate secret in browser memory only; operator must set it
- *   as a Cloudflare Worker secret (wrangler secret put / dashboard). Never KV, git, or logs.
+ *     1) Logged-in session (ADMIN_FINGERPRINTS or ADMIN_USER_IDS)
+ *     2) Short-lived elevation token from a fresh device-key signature (proves key still held)
+ *     3) Last check: that key's fingerprint is an exact ADMIN_FINGERPRINTS member
+ * - A shared action secret is not accepted. The public fingerprint is not a bearer token.
+ * - A user-id allowlist entry can open the admin session and cannot approve mutations.
  * - Read-only lookup/audit need (1) only.
  * - Empty ADMIN_FINGERPRINTS + ADMIN_USER_IDS ⇒ no admins (fail closed).
  */
@@ -23,6 +23,7 @@ import {
   getUserById,
   deleteUserAccount,
   isAdminUser,
+  isAllowlistedAdminFingerprint,
   normalizeFingerprint,
   rateLimitDurable,
   setUserTransitPaid,
@@ -58,6 +59,7 @@ export type AdminEnv = AuthEnv &
   BillingEnv & {
     ADMIN_FINGERPRINTS?: string;
     ADMIN_USER_IDS?: string;
+    /** Legacy binding. This module does not compare it. */
     ADMIN_ACTION_SECRET?: string;
   };
 
@@ -123,16 +125,6 @@ function randomHex(bytes = 32): string {
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Constant-time string compare (equal length only). */
-function timingSafeEqualString(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let out = 0;
-  for (let i = 0; i < a.length; i++) {
-    out |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return out === 0;
-}
-
 function publicUser(u: UserRecord) {
   return {
     id: u.id,
@@ -150,17 +142,6 @@ function elevChallengeKey(id: string) {
 
 function elevTokenKey(token: string) {
   return `admin:elev:${token}`;
-}
-
-/**
- * Action secret from Worker secret / .dev.vars only — never KV or client storage.
- * Rejects empty / placeholder values. Never log the value.
- */
-function actionSecretConfigured(env: AdminEnv): string | null {
-  const s = env.ADMIN_ACTION_SECRET?.trim() || "";
-  if (!s || s.length < 16) return null;
-  if (/^(change-me|secret|password|todo|placeholder)/i.test(s)) return null;
-  return s;
 }
 
 /**
@@ -445,8 +426,39 @@ async function requireAdminSession(
 }
 
 /**
- * Mutating admin actions: session allowlist + action secret + elevation token.
- * Fail closed if ADMIN_ACTION_SECRET Worker secret is missing/weak.
+ * Last check for privileged actions: the signed session key is an exact
+ * ADMIN_FINGERPRINTS member. The header value is never treated as proof.
+ */
+async function rejectUnlessAllowlistedFingerprint(
+  request: Request,
+  env: AdminEnv,
+  user: UserRecord,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response | null> {
+  if (isAllowlistedAdminFingerprint(user.fingerprint, env)) return null;
+  await writeAudit(env, {
+    at: new Date().toISOString(),
+    adminUserId: user.id,
+    adminFingerprint: user.fingerprint,
+    action: "admin_fingerprint_denied",
+    detail: "not_on_fingerprint_allowlist",
+    ip: clientIp(request),
+    ok: false,
+  });
+  return json(
+    {
+      error: "admin_fingerprint_required",
+      message:
+        "Privileged actions need a signature from a key on ADMIN_FINGERPRINTS. A user-id entry is not enough, and no shared action secret is accepted.",
+    },
+    { status: 403 },
+    applySecurityHeaders,
+  );
+}
+
+/**
+ * Mutating admin actions: session, device-key elevation, then fingerprint allowlist.
+ * Fail closed when ADMIN_FINGERPRINTS is empty or the signed key is absent.
  */
 async function requireAdminMutation(
   request: Request,
@@ -459,46 +471,6 @@ async function requireAdminMutation(
   const gate = await requireAdminSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate;
 
-  const expectedSecret = actionSecretConfigured(env);
-  if (!expectedSecret) {
-    return {
-      ok: false,
-      response: json(
-        {
-          error: "admin_misconfigured",
-          message:
-            "ADMIN_ACTION_SECRET must be set as a Worker secret (≥16 chars) for grant/revoke/claim. Fail-closed. Never store in KV.",
-        },
-        { status: 503 },
-        applySecurityHeaders,
-      ),
-    };
-  }
-
-  const provided = request.headers.get("x-admin-action-secret")?.trim() || "";
-  if (!provided || !timingSafeEqualString(provided, expectedSecret)) {
-    await writeAudit(env, {
-      at: new Date().toISOString(),
-      adminUserId: gate.user.id,
-      adminFingerprint: gate.user.fingerprint,
-      action: "admin_secret_failed",
-      ip: clientIp(request),
-      ok: false,
-    });
-    return {
-      ok: false,
-      response: json(
-        {
-          error: "admin_secret_required",
-          message:
-            "Valid x-admin-action-secret header required for privileged admin actions.",
-        },
-        { status: 403 },
-        applySecurityHeaders,
-      ),
-    };
-  }
-
   const elevGate = await requireElevation(
     request,
     env,
@@ -506,6 +478,14 @@ async function requireAdminMutation(
     applySecurityHeaders,
   );
   if (!elevGate.ok) return elevGate;
+
+  const fingerprintDenied = await rejectUnlessAllowlistedFingerprint(
+    request,
+    env,
+    gate.user,
+    applySecurityHeaders,
+  );
+  if (fingerprintDenied) return { ok: false, response: fingerprintDenied };
 
   return gate;
 }
@@ -522,22 +502,20 @@ export async function adminStatus(
     {
       ok: true,
       admin: publicUser(gate.user),
-      actionSecretRequired: true,
-      actionSecretConfigured: Boolean(actionSecretConfigured(env)),
+      actionSecretRequired: false,
+      actionSecretConfigured: false,
       elevationTtlSeconds: ELEV_TOKEN_TTL_SEC,
       security: {
         mutationsRequire: [
           "allowlisted_session",
-          "admin_action_secret",
-          "pgp_step_up_elevation",
+          "device_key_elevation",
+          "admin_fingerprint_allowlist",
         ],
-        actionSecretStorage:
-          "Cloudflare Worker secret ADMIN_ACTION_SECRET only. Never KV, git, or browser storage.",
-        note: "Client isAdmin is UI only; mutations re-verify on the server.",
+        note: "Client isAdmin is UI only. The last check is the signed key's exact ADMIN_FINGERPRINTS match. A shared action secret is not accepted.",
       },
       capabilities: {
         read: ["lookup_user", "list_recent_audit", "elevate"],
-        /** list_users is elevated (PGP + action secret) — bulk directory, not open to session-only admin. */
+        /** list_users is elevated — device-key signature plus fingerprint allowlist. */
         elevatedRead: ["list_users"],
         mutate: [
           "grant_transit",
@@ -644,17 +622,13 @@ export async function adminElevateChallenge(
     );
   }
 
-  if (!actionSecretConfigured(env)) {
-    return json(
-      {
-        error: "admin_misconfigured",
-        message:
-          "Set ADMIN_ACTION_SECRET (≥16 random chars) as a Cloudflare Worker secret before elevation. Never store it in KV.",
-      },
-      { status: 503 },
-      applySecurityHeaders,
-    );
-  }
+  const fingerprintDenied = await rejectUnlessAllowlistedFingerprint(
+    request,
+    env,
+    gate.user,
+    applySecurityHeaders,
+  );
+  if (fingerprintDenied) return fingerprintDenied;
 
   const challengeId = randomHex(16);
   const nonce = randomHex(16);
@@ -841,6 +815,14 @@ export async function adminElevate(
     );
   }
 
+  const fingerprintDenied = await rejectUnlessAllowlistedFingerprint(
+    request,
+    env,
+    gate.user,
+    applySecurityHeaders,
+  );
+  if (fingerprintDenied) return fingerprintDenied;
+
   const elevationToken = randomHex(32);
   const expiresAt = new Date(
     Date.now() + ELEV_TOKEN_TTL_SEC * 1000,
@@ -872,7 +854,7 @@ export async function adminElevate(
       expiresAt,
       ttlSeconds: ELEV_TOKEN_TTL_SEC,
       message:
-        "Privileged admin window open. Send x-admin-elevation + x-admin-action-secret on grant/revoke/claim.",
+        "Privileged admin window open. Send x-admin-elevation on grant, revoke, and claim. The signed key must stay on ADMIN_FINGERPRINTS.",
     },
     { status: 200 },
     applySecurityHeaders,
@@ -1465,7 +1447,7 @@ export async function adminExportSecurityLog(
 
 /**
  * List all registered users (public fields only — never public keys).
- * Requires full elevation: allowlisted session + action secret + PGP step-up.
+ * Requires full elevation: session, device-key step-up, then fingerprint allowlist.
  * Accepts GET or POST (POST preferred — avoids intermediary GET quirks with admin headers).
  * Paginated via KV cursor; filters scan additional pages when needed.
  */
