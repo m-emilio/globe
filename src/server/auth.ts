@@ -40,6 +40,13 @@ export type AuthEnv = {
    * Approval is an allowlisted fingerprint proven by a device-key signature.
    */
   ADMIN_ACTION_SECRET?: string;
+  /**
+   * Allowlist kept as a Worker secret so the fingerprint is not in git.
+   * When set, this wins over the plain ADMIN_FINGERPRINTS var.
+   */
+  ADMIN_FINGERPRINT_SECRET?: string;
+  /** Pepper for sign-in and audit digests. Not a privilege seal. */
+  LOG_HASH_PEPPER?: string;
 };
 
 export type UserRecord = {
@@ -99,6 +106,13 @@ function parseCsvList(raw?: string): string[] {
     .filter(Boolean);
 }
 
+/** Secret binding wins. The plain var remains only until a deploy drops it. */
+export function adminFingerprintAllowlist(env: AuthEnv): string {
+  const secret = env.ADMIN_FINGERPRINT_SECRET?.trim();
+  if (secret) return secret;
+  return env.ADMIN_FINGERPRINTS?.trim() || "";
+}
+
 /**
  * Fingerprint allowlists may use spaces/colons (gpg-style) or commas between
  * multiple entries. Do not split a single fingerprint on internal spaces.
@@ -118,7 +132,7 @@ function parseFingerprintAllowlist(raw?: string): string[] {
  * ADMIN_FINGERPRINTS match (see admin.ts). A user id alone cannot approve those.
  */
 export function isAdminUser(user: UserRecord, env: AuthEnv): boolean {
-  const fps = parseFingerprintAllowlist(env.ADMIN_FINGERPRINTS);
+  const fps = parseFingerprintAllowlist(adminFingerprintAllowlist(env));
   const ids = parseCsvList(env.ADMIN_USER_IDS);
   if (fps.length === 0 && ids.length === 0) return false;
   const fp = (user.fingerprint || "").replace(/[\s:]/g, "").toLowerCase();
@@ -138,7 +152,7 @@ export function isAllowlistedAdminFingerprint(
   fingerprint: string,
   env: AuthEnv,
 ): boolean {
-  const fps = parseFingerprintAllowlist(env.ADMIN_FINGERPRINTS);
+  const fps = parseFingerprintAllowlist(adminFingerprintAllowlist(env));
   if (fps.length === 0) return false;
   const fp = normalizeFingerprint(fingerprint || "");
   if (!fp) return false;
@@ -146,7 +160,7 @@ export function isAllowlistedAdminFingerprint(
 }
 
 function adminFlags(user: UserRecord, env: AuthEnv) {
-  const fps = parseFingerprintAllowlist(env.ADMIN_FINGERPRINTS);
+  const fps = parseFingerprintAllowlist(adminFingerprintAllowlist(env));
   const ids = parseCsvList(env.ADMIN_USER_IDS);
   return {
     isAdmin: isAdminUser(user, env),
@@ -434,6 +448,31 @@ function sessionCookie(
   // HttpOnly + SameSite=Lax: blocks JS theft and most CSRF; Secure on HTTPS.
   // Path=/ only — never Domain= (limits host-only scope).
   return `${SESSION_COOKIE}=${encodeURIComponent(sessionId)}; Path=/; Max-Age=${maxAge}; SameSite=Lax; HttpOnly${secure}`;
+}
+
+/**
+ * Adopt must come from this host. A cross-site form would send another Origin
+ * and could plant a session the caller already holds.
+ */
+function adoptOriginAllowed(request: Request): boolean {
+  let expected: URL;
+  try {
+    expected = new URL(request.url);
+  } catch {
+    return false;
+  }
+  const origin = request.headers.get("origin");
+  if (!origin || origin === "null") return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (parsed.origin !== expected.origin) return false;
+  const site = request.headers.get("sec-fetch-site");
+  if (site && site !== "same-origin") return false;
+  return true;
 }
 
 function clearSessionCookie(request: Request) {
@@ -1453,6 +1492,16 @@ export async function adoptSessionToken(
     applySecurityHeaders,
   );
   if (limited) return limited;
+  if (!adoptOriginAllowed(request)) {
+    return json(
+      {
+        error: "origin_rejected",
+        message: "Session adopt is only accepted from this site.",
+      },
+      { status: 403 },
+      applySecurityHeaders,
+    );
+  }
 
   let bodyToken: string | null = null;
   try {
