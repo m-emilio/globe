@@ -34,7 +34,6 @@ function ensureIdentityLayer(): void {
   style.id = "globe-identity-layer";
   style.textContent = [
     ".auth-modal-backdrop{z-index:14000!important}",
-    ".pki-hub-header-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}",
     ".menu-dropdown .menu-section-location .menu-section-title{padding-right:46px}",
     ".pki-hub .pki-hub-cve-list,.pki-panel .pki-cve-list{max-height:none!important;overflow:visible!important}",
     "#globe-menu-close{width:36px;height:36px;border:1px solid rgba(0,217,255,.65);border-radius:4px;background:rgba(0,0,0,.92);color:#00d9ff;font:22px/1 inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}",
@@ -404,24 +403,12 @@ function noteAuthModal(): void {
   authModalWasOpen = open;
 }
 
-function mountIdentityMenu(): void {
-  const section = document.querySelector(".menu-section-links");
-  const signedIn = Boolean(document.querySelector(".auth-user-meta"));
-  const existing = document.getElementById("globe-menu-identity");
-  if (!signedIn || !(section instanceof HTMLElement)) {
-    existing?.remove();
-    return;
-  }
-  if (existing && existing.parentElement === section) return;
-  existing?.remove();
-  const button = document.createElement("button");
-  button.type = "button";
-  button.id = "globe-menu-identity";
-  button.className = "menu-item menu-item-button";
-  button.textContent = "Identity";
-  button.title = "Open Identity to create or sign in another key";
-  button.addEventListener("click", openIdentity);
-  section.insertBefore(button, section.firstChild);
+function consolidateMenuSignIn(): void {
+  document.getElementById("globe-menu-identity")?.remove();
+  const billing = document.querySelector(".billing-menu-item");
+  if (!(billing instanceof HTMLButtonElement)) return;
+  const guestSignIn = /Sign in to buy access/.test(billing.textContent || "");
+  if (billing.hidden !== guestSignIn) billing.hidden = guestSignIn;
 }
 
 function watch(): void {
@@ -430,7 +417,7 @@ function watch(): void {
   mountHeaderIdentity();
   noteAuthModal();
   void refreshIdentityLevel();
-  mountIdentityMenu();
+  consolidateMenuSignIn();
   patchSessionLabel();
   const admin = document.querySelector(".admin-modal");
   if (admin instanceof HTMLElement && admin.dataset.globeLoginLog !== "1") {

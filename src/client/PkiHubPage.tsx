@@ -72,10 +72,6 @@ function statusLabel(status: PkiHubStatus, error: string) {
 
 const CVE_PAGE_SIZE = 8;
 
-function openIdentity(): void {
-  window.dispatchEvent(new Event("globe-open-identity"));
-}
-
 function CvePager(props: {
   page: number;
   pageCount: number;
@@ -198,14 +194,9 @@ export function PkiHubPage(props: PkiHubProps) {
             </p>
           </div>
         </div>
-        <div className="pki-hub-header-actions">
-          <button type="button" className="un-hub-globe-btn" onClick={openIdentity}>
-            Identity
-          </button>
-          <button type="button" className="un-hub-globe-btn" onClick={onViewGlobe}>
-            View globe
-          </button>
-        </div>
+        <button type="button" className="un-hub-globe-btn" onClick={onViewGlobe}>
+          View globe
+        </button>
       </header>
 
       <div className="un-hub-scroll">
