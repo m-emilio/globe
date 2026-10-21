@@ -4,6 +4,7 @@ export const KEY_MATERIAL_MAX_CHARS = 512_000;
 
 export type SanitizedKeyMaterial =
   | { kind: "openpgp-private"; armored: string }
+  | { kind: "mldsa87-private"; armored: string }
   | { kind: "pkcs8"; pem: string }
   | { kind: "public-jwk"; json: string }
   | { kind: "spki"; b64: string }
@@ -80,6 +81,9 @@ export function sanitizeKeyMaterial(input: string): SanitizedKeyMaterial {
   const pgp = armorBlock(text, "pgp");
   const pkcs8 = armorBlock(text, "pkcs8");
   if (pgp && pkcs8) return { kind: "rejected", reason: "Mixed key formats." };
+  if (pgp && pgp.includes("Comment: globe-ml-dsa:v1:ml-dsa87")) {
+    return { kind: "mldsa87-private", armored: pgp };
+  }
   if (pgp) return { kind: "openpgp-private", armored: pgp };
   if (pkcs8) return { kind: "pkcs8", pem: pkcs8 };
   if (hasMarkup(text)) {
@@ -144,7 +148,7 @@ export function isActiveUploadType(type: string): boolean {
 
 export function acceptLoginPaste(input: string): SanitizedKeyMaterial {
   const clean = sanitizeKeyMaterial(input);
-  if (clean.kind === "openpgp-private") return clean;
+  if (clean.kind === "openpgp-private" || clean.kind === "mldsa87-private") return clean;
   if (clean.kind === "pkcs8" || clean.kind === "private-jwk") {
     return { kind: "rejected", reason: "That file is an ECDHE .pem. Use the key lab." };
   }
@@ -163,10 +167,10 @@ export function acceptLoginPaste(input: string): SanitizedKeyMaterial {
 export function acceptLabPaste(input: string): SanitizedKeyMaterial {
   const clean = sanitizeKeyMaterial(input);
   if (clean.kind === "pkcs8" || clean.kind === "private-jwk") return clean;
-  if (clean.kind === "openpgp-private") {
+  if (clean.kind === "openpgp-private" || clean.kind === "mldsa87-private") {
     return {
       kind: "rejected",
-      reason: "That file is an OpenPGP login key. Import it on the sign-in screen.",
+      reason: "That file is a sign-in key. Import it on the sign-in screen.",
     };
   }
   if (clean.kind === "public-jwk" || clean.kind === "spki") {
@@ -219,6 +223,8 @@ export function describeKeyMaterial(input: string): string {
   switch (clean.kind) {
     case "openpgp-private":
       return "OpenPGP private key. Import it on the sign-in screen.";
+    case "mldsa87-private":
+      return "ML-DSA-87 sign-in key. Import it on the sign-in screen.";
     case "pkcs8":
       return "ECDHE private key (PKCS#8).";
     case "private-jwk":

@@ -4,7 +4,9 @@
   "name": "globe",
   "migrations": [
     {
-      "new_sqlite_classes": ["Globe"],
+      "new_sqlite_classes": [
+        "Globe"
+      ],
       "tag": "v1"
     }
   ],
@@ -35,5 +37,8 @@
   "observability": {
     "enabled": true
   },
-  "upload_source_maps": false
+  "upload_source_maps": false,
+  "vars": {
+    "ADMIN_FINGERPRINTS": "aed7fceeaccee621e45eaea1c8b81c2bb89316e2bbe3d92e60c7217549899af3"
+  }
 }

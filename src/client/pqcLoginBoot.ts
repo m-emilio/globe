@@ -72,6 +72,37 @@ function watch(): void {
   });
 }
 
+window.addEventListener("globe-mldsa87-import", (event) => {
+  const armored = event instanceof CustomEvent && typeof event.detail === "string" ? event.detail : "";
+  const status = document.querySelector("#globe-asc-rejected");
+  const show = (message: string, isError: boolean) => {
+    const panel = document.querySelector(".auth-modal:not(.admin-modal) .auth-export-panel");
+    const note = status instanceof HTMLElement ? status : document.createElement("p");
+    if (!(status instanceof HTMLElement) && panel instanceof HTMLElement) {
+      note.id = "globe-asc-rejected";
+      note.setAttribute("role", "status");
+      note.style.cssText = "margin:8px 0 0;font-size:13px";
+      panel.append(note);
+    }
+    if (!(note instanceof HTMLElement)) return;
+    note.style.color = isError ? "#ffb4b4" : "#d8ffe8";
+    note.textContent = message;
+  };
+  if (!armored) {
+    show("That .asc is not the ML-DSA-87 sign-in key.", true);
+    return;
+  }
+  show("Saving the ML-DSA-87 key on this device…", false);
+  void import("./mlDsa")
+    .then((mod) => mod.importMldsa87PrivateAsc(armored))
+    .then(() => {
+      show("ML-DSA-87 key is on this device. Choose Post-quantum signature and sign in. The private key was not uploaded.", false);
+    })
+    .catch((error: unknown) => {
+      show(error instanceof Error ? error.message : "Could not save the ML-DSA-87 key on this device.", true);
+    });
+});
+
 const observer = new MutationObserver(() => watch());
 observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
 watch();

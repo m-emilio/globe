@@ -20,6 +20,7 @@ import {
   type PqcSigSuiteId,
   type SlhDsaSuiteId,
 } from "../server/pqcVerify";
+import { decodeMldsa87PrivateAsc } from "../server/mldsaAsc";
 import { ml_dsa44, ml_dsa65, ml_dsa87 } from "@noble/post-quantum/ml-dsa.js";
 import {
   slh_dsa_sha2_128f,
@@ -260,6 +261,42 @@ export async function createMlDsaDeviceKey(suite: PqcSigSuiteId): Promise<{
   } finally {
     wipe(pair.secretKey);
     wipe(pair.publicKey);
+  }
+}
+
+/** Store an ML-DSA-87 .asc on this device. The private key is not uploaded. */
+export async function importMldsa87PrivateAsc(armored: string): Promise<{ fingerprint: string }> {
+  const decoded = decodeMldsa87PrivateAsc(armored);
+  if (!decoded) throw new Error("That .asc is not the ML-DSA-87 sign-in key.");
+  const message = "globe-ml-dsa87-armor:v1";
+  const signature = SIGNERS["ml-dsa87"].sign(new TextEncoder().encode(message), decoded.secretKey, {
+    context: pqcLoginContext(),
+  });
+  try {
+    if (!verifyPqcSignature("ml-dsa87", signature, message, decoded.publicKey)) {
+      throw new Error("That .asc does not match this ML-DSA-87 account.");
+    }
+  } finally {
+    wipe(signature);
+  }
+  try {
+    const fingerprint = await sha256Hex(decoded.publicKey);
+    const wrapped = await wrapSecret(decoded.secretKey);
+    const row: StoredKey = {
+      fingerprint,
+      suite: "ml-dsa87",
+      publicKeyB64: bytesToB64(decoded.publicKey),
+      wrappedSecretB64: wrapped.wrappedSecretB64,
+      wrapIvB64: wrapped.wrapIvB64,
+      createdAt: new Date().toISOString(),
+    };
+    await withDb("readwrite", KEY_STORE, async (store) => {
+      await idbReq(store.put(row));
+    });
+    return { fingerprint };
+  } finally {
+    wipe(decoded.secretKey);
+    wipe(decoded.publicKey);
   }
 }
 

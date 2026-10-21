@@ -58,6 +58,10 @@ function passToLogin(input: HTMLInputElement, armored: string): void {
 async function acceptPaste(panel: HTMLElement, input: HTMLInputElement, raw: string): Promise<void> {
   clearReject(panel);
   const clean = acceptLoginPaste(raw);
+  if (clean.kind === "mldsa87-private") {
+    window.dispatchEvent(new CustomEvent("globe-mldsa87-import", { detail: clean.armored }));
+    return;
+  }
   if (clean.kind === "openpgp-private") {
     try {
       passToLogin(input, clean.armored);
@@ -90,6 +94,11 @@ function bindInput(panel: HTMLElement, input: HTMLInputElement): void {
         .then((text) => {
           clearReject(panel);
           const clean = readLoginKeyFile({ name: file.name, type: file.type, text });
+          if (clean.kind === "mldsa87-private") {
+            window.dispatchEvent(new CustomEvent("globe-mldsa87-import", { detail: clean.armored }));
+            input.value = "";
+            return;
+          }
           if (clean.kind === "openpgp-private") {
             passToLogin(input, clean.armored);
             return;
@@ -161,7 +170,7 @@ function ensurePaste(panel: HTMLElement, input: HTMLInputElement): void {
   const hint = document.createElement("p");
   hint.style.cssText = "margin:8px 0 0;font-size:13px;line-height:1.4";
   hint.textContent =
-    "OpenPGP private keys stay on this device. This field accepts .asc, .pgp, or .gpg only. An ECDHE .pem belongs in the key lab. Nothing here is uploaded.";
+    "OpenPGP and ML-DSA-87 private keys stay on this device. This field accepts .asc, .pgp, or .gpg only. An ML-DSA-87 .asc keeps the same sign-in account. An ECDHE .pem belongs in the key lab. Nothing here is uploaded.";
   wrap.append(span, area, button, hint);
   panel.append(wrap);
 }
