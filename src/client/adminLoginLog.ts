@@ -3,6 +3,8 @@
  * Renders text only. It does not show private keys, signatures, or session cookies.
  */
 
+import { adminElevationHeader } from "./adminElevation";
+
 type Attempt = {
   at?: string;
   family?: string;
@@ -59,7 +61,7 @@ export function mountAdminLoginLog(): void {
   const note = document.createElement("p");
   note.style.cssText = "margin:0 0 8px;font-size:13px;line-height:1.4;color:#d5ffe9";
   note.textContent =
-    "Visible to an admin session only. Attempts are kept for 30 days and audits for 180 days. Each new row stores a SHAKE256 digest of the network and the account, plus a record hash and a hash chain. SHAKE256 is the hash inside ML-DSA and SLH-DSA. The raw network and account are not stored. An unsalted digest of an IPv4 can still be guessed if this export leaks. After 8 rejected sign-ins in 10 minutes, that network is paused for 15 minutes. Private keys, signatures, MACs, challenges, and session cookies are not stored.";
+    "Visible to an admin session. Attempts are kept for 30 days and audits for 180 days. New rows mix the network and account into SHAKE256 with a server pepper. The export needs the unlocked privileged window. Raw network addresses, account ids, and the pepper are not stored. After 8 rejected sign-ins in 10 minutes, that network is paused for 15 minutes. Private keys, signatures, MACs, challenges, and session cookies are not stored.";
   const status = document.createElement("p");
   status.id = "globe-admin-login-log-status";
   status.setAttribute("role", "status");
@@ -155,11 +157,11 @@ export function mountAdminLoginLog(): void {
     status.textContent = "Preparing the security log…";
     void fetch("/api/admin/security-export", {
       credentials: "same-origin",
-      headers: { accept: "application/json" },
+      headers: { accept: "application/json", ...adminElevationHeader() },
     })
       .then(async (response) => {
         if (response.status === 401 || response.status === 403) {
-          status.textContent = "An admin session is required to export the security log.";
+          status.textContent = "Unlock privileges, then export the security log.";
           return;
         }
         if (!response.ok) {

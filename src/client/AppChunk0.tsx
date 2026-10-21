@@ -90,7 +90,7 @@ function AccessBadge({
 }
 
 export function AppChunk0({ b }: { b: GlobeApi }) {
-  const { activityFeed, activityFilter, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, counter, deviceKeys, dismissSiteTour, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generatedPublic, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadLocalTransit, loadNearbyPaths, loadWeatherFeed, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, paymentRequired, refreshDeviceKeys, regPublicKey, registerWithPublicKey, runRateLimitedButtonAction, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setKeyGenProfile, setKeyPassphrase, setRegPublicKey, setSelectedDeviceFp, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowTransitPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, showActivityMenu, showAdminPanel, showAuthPanel, showImportDevice, showNearbyPanel, showSiteTour, showTransitPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, transitDistanceM, transitError, transitPreview, transitStatus, unlockAdminPrivileges, weatherError, weatherFeed, weatherGlow, weatherStatus } = b;
+  const { activityFeed, activityFilter, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminClaimAll, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, counter, deviceKeys, dismissSiteTour, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generatedPublic, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadLocalTransit, loadNearbyPaths, loadWeatherFeed, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, paymentRequired, refreshDeviceKeys, regPublicKey, registerWithPublicKey, runRateLimitedButtonAction, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setKeyGenProfile, setKeyPassphrase, setRegPublicKey, setSelectedDeviceFp, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowTransitPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, showActivityMenu, showAdminPanel, showAuthPanel, showImportDevice, showNearbyPanel, showSiteTour, showTransitPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, transitDistanceM, transitError, transitPreview, transitStatus, unlockAdminPrivileges, weatherError, weatherFeed, weatherGlow, weatherStatus } = b;
   return (
     <>
 {(authMessage || authError) && (
@@ -721,10 +721,10 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
               <p className="auth-modal-copy">
                 To fix: Cloudflare Dashboard → Workers → <strong>globe</strong>{" "}
                 → Settings → Variables and Secrets → set{" "}
-                <code>ADMIN_FINGERPRINTS</code> to the hex fingerprint above
+                <code>ADMIN_FINGERPRINT_SECRET</code> to the hex fingerprint above
                 (no spaces), then sign out and sign in again. Or run:{" "}
                 <code>
-                  npx wrangler secret put ADMIN_FINGERPRINTS --name globe
+                  npx wrangler secret put ADMIN_FINGERPRINT_SECRET --name globe
                 </code>
               </p>
             )}
@@ -1086,6 +1086,18 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                     onClick={() => void adminClaim()}
                   >
                     Claim session → unlock user
+                  </button>
+                  <button
+                    type="button"
+                    disabled={adminBusy || !adminElevationValid()}
+                    title={
+                      adminElevationValid()
+                        ? "Retrieve completed Stripe checkouts and unlock every named account"
+                        : "Unlock privileges first"
+                    }
+                    onClick={() => void adminClaimAll()}
+                  >
+                    Claim paid Stripe sessions for every account
                   </button>
                 </div>
 
