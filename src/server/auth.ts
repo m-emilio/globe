@@ -348,8 +348,10 @@ export function rateLimitOrNull(
   if (!bucket || now - bucket.windowStart >= windowMs) {
     rateBuckets.set(key, { windowStart: now, count: 1 });
     if (rateBuckets.size > 5_000) {
+      let seen = 0;
       for (const [k, v] of rateBuckets) {
         if (now - v.windowStart >= windowMs) rateBuckets.delete(k);
+        if (++seen === 64) break;
       }
     }
     return null;
