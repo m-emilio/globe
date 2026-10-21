@@ -86,7 +86,7 @@ export function mountAdminKeyGrant(): void {
   title.style.cssText = "margin:0 0 6px;font-size:16px";
   const note = document.createElement("p");
   note.style.cssText = "margin:0 0 8px;font-size:13px;line-height:1.45;color:#d5ffe9";
-  note.textContent = "Same rule as transit: an allowlisted admin session, the action secret, and a fresh device-key step-up. A paid Stripe checkout under $20 grants this on its own. Grant lets every network that already holds the account register more keys. Revoke puts those networks back to 3 keys. The private key is not uploaded.";
+  note.textContent = "Same rule as transit: an allowlisted admin session, the action secret, and a fresh signature from the key on this device. No key passphrase. A paid Stripe checkout under $20 grants this on its own. Grant lets every network that already holds the account register more keys. Revoke puts those networks back to 3 keys. The private key is not uploaded.";
   const status = document.createElement("p");
   status.id = "globe-admin-key-grant-status";
   status.setAttribute("role", "status");
@@ -99,7 +99,10 @@ export function mountAdminKeyGrant(): void {
   const secret = inputBox("password");
   secret.placeholder = "ADMIN_ACTION_SECRET";
   const passphrase = inputBox("password");
-  passphrase.placeholder = "only if the device key is encrypted";
+  passphrase.id = "globe-admin-key-grant-passphrase";
+  passphrase.placeholder = "only if this OpenPGP key is encrypted";
+  const passphraseField = field("Key passphrase", passphrase);
+  passphraseField.hidden = true;
   const unlock = button("Unlock privileges");
   const grant = button("Grant unlimited keys");
   const revoke = button("Revoke unlimited keys");
@@ -112,7 +115,7 @@ export function mountAdminKeyGrant(): void {
     field("Account", account),
     field("Note", auditNote),
     field("Action secret", secret),
-    field("Device key passphrase", passphrase),
+    passphraseField,
     status,
     row,
   );
@@ -152,12 +155,17 @@ export function mountAdminKeyGrant(): void {
           setStatus("No device private key on this browser matches the admin account.", true);
           return;
         }
+        if (device.encrypted && !passphrase.value) {
+          passphraseField.hidden = false;
+          setStatus("This OpenPGP key is encrypted. Enter its passphrase, then unlock again.", true);
+          return;
+        }
         body = {
           challengeId,
           signatureArmored: await pgp.signChallenge(
             challengeMessage,
             device.privateKeyArmored,
-            device.encrypted ? passphrase.value || undefined : undefined,
+            device.encrypted ? passphrase.value : undefined,
           ),
         };
       }
