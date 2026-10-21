@@ -3,11 +3,23 @@ import type { GlobeApi } from "./useGlobeApp";
 import { type GlobeArc } from "./CobeGlobe";
 import { FloatingChrome } from "./FloatingChrome";
 import { UnHubPage } from "./UnHubPage";
-import { PkiHubPage } from "./PkiHubPage";
+import { PkiHubPage, PkiShownArcList, type PkiShownArc } from "./PkiHubPage";
 import { ContractsHubPage } from "./ContractsHubPage";
 import { safeGlobeHref } from "./safeUrl";
 import type { ComtradePreview, PkiVulnSeverity, TradePulseLayer, TradePulsePreview, UnGlobalPreview } from "../shared";
 import { PKI_CATEGORY_LABELS, PKI_SEVERITY_COLORS, PKI_SORT_LABELS, PkiSortMode, TRADE_PULSE_LAYERS, TRADE_PULSE_LAYER_COLORS, TRADE_PULSE_LAYER_LABELS, TRADE_PULSE_LAYER_SHORT_LABELS, UNODC_THEME_CSS, UNODC_THEME_IDS, UN_GLOBAL_SECTION_LABELS, countLiveUnodcThemes, formatNullableUsd, formatPercent, formatPreviewDate, formatPreviewNumber, formatSignedUsd, formatUsd, getRoutePulseLayer, previewHotspotLinks } from "./globeModel";
+
+function shownPkiArcs(arcs: GlobeArc[]): PkiShownArc[] {
+  return arcs.map((arc) => ({
+    id: arc.id,
+    cveId: arc.comtrade?.routeId || arc.comtrade?.commodityCode || arc.id,
+    kind: arc.comtrade?.quantity === "CISA KEV" ? "KEV" : "NVD",
+    from: arc.comtrade?.originName || arc.fromLabel || "Origin",
+    to: arc.comtrade?.destName || arc.toLabel || "Exposure",
+    title: arc.comtrade?.commodity || "",
+  }));
+}
+
 export function AppChunk1({ b }: { b: GlobeApi }) {
   const { checkoutBusy, closeContractsHub, closePkiHub, closeUnHub, comtradeError, comtradePreview, comtradeSections, comtradeStatus, comtradeValueMode, contractsError, contractsLayerOn, contractsPreview, contractsStatus, enabledComtradeSectionCount, enabledTradePulseLayerCount, isPkiPanelMinimized, isTradePulsePanelMinimized, isUnodcPanelMinimized, liveFeedAccess, loadComtradePreview, loadPkiVulns, loadSamContracts, loadTradePulsePreview, loadUnGlobalPreview, loadUnodcHotspots, paymentRequired, pkiArcSelection, pkiCatalog, pkiCategory, pkiDensity, pkiError, pkiFocusCve, pkiGlobeArcs, pkiPreview, pkiSeverities, pkiShowMap, pkiSort, pkiStatus, pkiVisibleCves, runRateLimitedButtonAction, selectTradePulsePeriod, setAuthMessage, setAuthMode, setContractsLayerOn, setIsPkiPanelMinimized, setIsTradePulsePanelMinimized, setIsUnodcPanelMinimized, setPkiArcPage, setPkiCatalog, setPkiCategory, setPkiDensity, setPkiFocusCve, setPkiSeverities, setPkiShowMap, setPkiSort, setShowAuthPanel, setShowComtradePanel, setShowMenu, setShowPkiPanel, setShowTradePulsePanel, setShowUnGlobalPanel, setShowUnodcPanel, setUnodcFocusMode, showComtradePanel, showContractsHub, showPkiHub, showPkiPanel, showTradePulsePanel, showUnGlobalPanel, showUnHub, showUnodcPanel, startTransitCheckout, toggleAllTradePulseLayers, toggleAllUnGlobalSections, toggleTradePulseLayer, toggleUnGlobalSection, toggleUnodcTheme, tradePulseError, tradePulseLayers, tradePulsePeriod, tradePulsePreview, tradePulseStatus, tradePulseYearOptions, unGlobalError, unGlobalPreview, unGlobalSections, unGlobalStatus, unodcCountryPolygons, unodcError, unodcPreview, unodcStatus, unodcThemes, visibleTradePulseRoutes } = b;
   return (
@@ -659,6 +671,7 @@ export function AppChunk1({ b }: { b: GlobeApi }) {
           error={pkiError}
           preview={pkiPreview}
           visibleCves={pkiVisibleCves}
+          shownArcs={shownPkiArcs(pkiGlobeArcs)}
           arcStats={{
             visible: pkiGlobeArcs.length,
             total: pkiArcSelection.total,
@@ -782,6 +795,28 @@ export function AppChunk1({ b }: { b: GlobeApi }) {
               </button>
             </div>
           </div>
+
+          {isPkiPanelMinimized && (
+            <div style={{ padding: "0 12px 10px" }}>
+              <PkiShownArcList
+                arcs={shownPkiArcs(pkiGlobeArcs)}
+                total={pkiArcSelection.total}
+                page={pkiArcSelection.page}
+                pageCount={pkiArcSelection.pageCount}
+                mapOn={pkiShowMap}
+                onPrev={() =>
+                  runRateLimitedButtonAction("pki-page-prev", () =>
+                    setPkiArcPage((p) => Math.max(0, p - 1)),
+                  )
+                }
+                onNext={() =>
+                  runRateLimitedButtonAction("pki-page-next", () =>
+                    setPkiArcPage((p) => p + 1),
+                  )
+                }
+              />
+            </div>
+          )}
 
           {!isPkiPanelMinimized && (
             <div className="trade-pulse-panel-scroll">
@@ -1088,6 +1123,15 @@ export function AppChunk1({ b }: { b: GlobeApi }) {
                         </span>
                       </div>
                     </div>
+
+                    <div className="pki-control-label">Arcs on the globe</div>
+                    <PkiShownArcList
+                      arcs={shownPkiArcs(pkiGlobeArcs)}
+                      total={pkiArcSelection.total}
+                      page={pkiArcSelection.page}
+                      pageCount={pkiArcSelection.pageCount}
+                      mapOn={pkiShowMap}
+                    />
 
                     <div className="pki-cve-list" aria-label="PKI-related CVEs">
                       {pkiVisibleCves.slice(0, 60).map((cve) => {

@@ -26,6 +26,16 @@ export type PkiHubArcStats = {
   nvdCount: number;
 };
 
+/** One arc currently drawn on the globe. */
+export type PkiShownArc = {
+  id: string;
+  cveId: string;
+  kind: "KEV" | "NVD";
+  from: string;
+  to: string;
+  title: string;
+};
+
 export type PkiHubProps = {
   onClose: () => void;
   onViewGlobe: () => void;
@@ -36,6 +46,7 @@ export type PkiHubProps = {
   preview: PkiVulnsPreview | null;
   visibleCves: PkiVulnCve[];
   arcStats: PkiHubArcStats;
+  shownArcs: PkiShownArc[];
 
   showMap: boolean;
   catalog: PkiHubCatalog;
@@ -71,6 +82,98 @@ function statusLabel(status: PkiHubStatus, error: string) {
 }
 
 const CVE_PAGE_SIZE = 8;
+
+export function PkiShownArcList(props: {
+  arcs: PkiShownArc[];
+  total: number;
+  page: number;
+  pageCount: number;
+  mapOn: boolean;
+  onPrev?: () => void;
+  onNext?: () => void;
+}) {
+  const { arcs, total, page, pageCount, mapOn, onPrev, onNext } = props;
+  return (
+    <div aria-label="Arcs on the globe">
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          margin: "6px 0",
+        }}
+      >
+        {onPrev && onNext && pageCount > 1 && (
+          <button
+            type="button"
+            className="trade-pulse-year-btn"
+            disabled={page <= 0}
+            onClick={onPrev}
+          >
+            ←
+          </button>
+        )}
+        <span className="pki-pager-status" style={{ flex: 1 }}>
+          {mapOn
+            ? `${arcs.length} on the globe${total > 0 ? ` of ${total}` : ""}${
+                pageCount > 1 ? ` · page ${page + 1}/${pageCount}` : ""
+              }`
+            : "Arcs are off"}
+        </span>
+        {onPrev && onNext && pageCount > 1 && (
+          <button
+            type="button"
+            className="trade-pulse-year-btn"
+            disabled={page >= pageCount - 1}
+            onClick={onNext}
+          >
+            →
+          </button>
+        )}
+      </div>
+      {mapOn && arcs.length === 0 && (
+        <p className="un-hub-status" style={{ margin: "0 0 8px" }}>
+          No arcs match these filters.
+        </p>
+      )}
+      {arcs.length > 0 && (
+        <ul
+          style={{
+            listStyle: "none",
+            margin: "0 0 8px",
+            padding: 0,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+            maxHeight: "min(42vh, 280px)",
+            overflow: "auto",
+          }}
+        >
+          {arcs.map((arc) => (
+            <li
+              key={arc.id}
+              title={arc.title || undefined}
+              style={{
+                fontSize: 11,
+                lineHeight: 1.35,
+                color: "#e8eef6",
+                padding: "4px 0",
+                borderTop: "1px solid rgba(255,255,255,0.06)",
+              }}
+            >
+              <strong>{arc.cveId}</strong>
+              {" · "}
+              {arc.kind}
+              <div style={{ color: "#c5ced9" }}>
+                {arc.from} → {arc.to}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function CvePager(props: {
   page: number;
@@ -117,6 +220,7 @@ export function PkiHubPage(props: PkiHubProps) {
     preview,
     visibleCves,
     arcStats,
+    shownArcs,
     showMap,
     catalog,
     density,
@@ -514,6 +618,15 @@ export function PkiHubPage(props: PkiHubProps) {
                       </div>
                     </>
                   )}
+
+                  <div className="un-hub-row-label">Arcs on the globe</div>
+                  <PkiShownArcList
+                    arcs={shownArcs}
+                    total={arcStats.total}
+                    page={arcStats.page}
+                    pageCount={arcStats.pageCount}
+                    mapOn={layerOn && showMap}
+                  />
 
                   <div className="pki-hub-legend" aria-label="Severity legend">
                     <span>
