@@ -70,6 +70,12 @@ function statusLabel(status: PkiHubStatus, error: string) {
   return "Off";
 }
 
+const CVE_PAGE_SIZE = 8;
+
+function openIdentity(): void {
+  window.dispatchEvent(new Event("globe-open-identity"));
+}
+
 export function PkiHubPage(props: PkiHubProps) {
   const {
     onClose,
@@ -105,6 +111,28 @@ export function PkiHubPage(props: PkiHubProps) {
     exposureCount,
   } = props;
 
+  const listSignature = `${catalog}|${sort}|${category}|${Array.from(severities).sort().join(",")}|${visibleCves.map((cve) => cve.id).join(",")}`;
+  const [cvePage, setCvePage] = React.useState(0);
+  const [seenList, setSeenList] = React.useState(listSignature);
+  if (seenList !== listSignature) {
+    setSeenList(listSignature);
+    setCvePage(0);
+  }
+  const cvePageCount = Math.max(1, Math.ceil(visibleCves.length / CVE_PAGE_SIZE));
+  const safeCvePage = Math.min(cvePage, cvePageCount - 1);
+  const pageCves = visibleCves.slice(
+    safeCvePage * CVE_PAGE_SIZE,
+    safeCvePage * CVE_PAGE_SIZE + CVE_PAGE_SIZE,
+  );
+  const listRef = React.useRef<HTMLDivElement>(null);
+  const showCvePage = (next: number) => {
+    const page = Math.max(0, Math.min(cvePageCount - 1, next));
+    setCvePage(page);
+    window.setTimeout(() => {
+      listRef.current?.scrollIntoView({ block: "start" });
+    }, 0);
+  };
+
   return (
     <div
       className="un-hub pki-hub"
@@ -139,9 +167,14 @@ export function PkiHubPage(props: PkiHubProps) {
             </p>
           </div>
         </div>
-        <button type="button" className="un-hub-globe-btn" onClick={onViewGlobe}>
-          View globe
-        </button>
+        <div className="pki-hub-header-actions">
+          <button type="button" className="un-hub-globe-btn" onClick={openIdentity}>
+            Identity
+          </button>
+          <button type="button" className="un-hub-globe-btn" onClick={onViewGlobe}>
+            View globe
+          </button>
+        </div>
       </header>
 
       <div className="un-hub-scroll">
@@ -175,7 +208,7 @@ export function PkiHubPage(props: PkiHubProps) {
             (known exploited). Dotted = NVD catalog.
           </p>
 
-          {layerOn && (
+          {(layerOn || preview) && (
             <div className="un-hub-card-body">
               {status === "loading" && (
                 <p className="un-hub-status">Loading CISA KEV + NVD feed…</p>
@@ -317,31 +350,71 @@ export function PkiHubPage(props: PkiHubProps) {
                     ))}
                   </div>
 
-                  <div className="un-hub-row-label">Arc pages</div>
-                  <div className="pki-hub-pager" role="group" aria-label="Arc pages">
+                  <div className="un-hub-row-label">CVE pages</div>
+                  <div
+                    className="pki-hub-pager"
+                    role="group"
+                    aria-label="CVE pages"
+                    style={{
+                      position: "sticky",
+                      top: 0,
+                      zIndex: 2,
+                      background: "#0a0d14",
+                      padding: "6px 0",
+                    }}
+                  >
                     <button
                       type="button"
                       className="un-hub-chip"
-                      disabled={arcStats.page <= 0}
-                      onClick={onPagePrev}
+                      disabled={safeCvePage <= 0}
+                      onClick={() => showCvePage(safeCvePage - 1)}
                     >
                       ← Prev
                     </button>
                     <span className="pki-hub-pager-status">
-                      Page {arcStats.page + 1}/{arcStats.pageCount}
-                      {arcStats.total > 0
-                        ? ` · ${arcStats.visible} of ${arcStats.total}`
+                      Page {safeCvePage + 1}/{cvePageCount}
+                      {visibleCves.length > 0
+                        ? ` · ${pageCves.length} of ${visibleCves.length}`
                         : ""}
                     </span>
                     <button
                       type="button"
                       className="un-hub-chip"
-                      disabled={arcStats.page >= arcStats.pageCount - 1}
-                      onClick={onPageNext}
+                      disabled={safeCvePage >= cvePageCount - 1}
+                      onClick={() => showCvePage(safeCvePage + 1)}
                     >
                       Next →
                     </button>
                   </div>
+                  {arcStats.pageCount > 1 && (
+                    <>
+                      <div className="un-hub-row-label">Map arcs</div>
+                      <div className="pki-hub-pager" role="group" aria-label="Map arc pages">
+                        <button
+                          type="button"
+                          className="un-hub-chip"
+                          disabled={arcStats.page <= 0}
+                          onClick={onPagePrev}
+                        >
+                          ← Prev arcs
+                        </button>
+                        <span className="pki-hub-pager-status">
+                          Map {arcStats.page + 1}/{arcStats.pageCount}
+                          {arcStats.total > 0
+                            ? ` · ${arcStats.visible} of ${arcStats.total}`
+                            : ""}
+                        </span>
+                        <button
+                          type="button"
+                          className="un-hub-chip"
+                          disabled={arcStats.page >= arcStats.pageCount - 1}
+                          onClick={onPageNext}
+                        >
+                          Next arcs →
+                        </button>
+                      </div>
+                    </>
+                  )}
 
                   <div className="pki-hub-legend" aria-label="Severity legend">
                     <span>
@@ -364,8 +437,16 @@ export function PkiHubPage(props: PkiHubProps) {
                     CVEs ({visibleCves.length}
                     {preview ? ` / ${preview.cveCount}` : ""})
                   </div>
-                  <div className="pki-hub-cve-list" aria-label="PKI-related CVEs">
-                    {visibleCves.slice(0, 60).map((cve) => {
+                  <div
+                    className="pki-hub-cve-list"
+                    aria-label="PKI-related CVEs"
+                    ref={listRef}
+                    style={{ maxHeight: "none", overflow: "visible" }}
+                  >
+                    {pageCves.length === 0 && (
+                      <p className="un-hub-status">No CVEs match these filters.</p>
+                    )}
+                    {pageCves.map((cve) => {
                       const destCount = exposureCount(cve);
                       const focused = focusCve === cve.id;
                       return (
@@ -441,6 +522,29 @@ export function PkiHubPage(props: PkiHubProps) {
                       );
                     })}
                   </div>
+                  {cvePageCount > 1 && (
+                    <div className="pki-hub-pager" role="group" aria-label="CVE pages continued">
+                      <button
+                        type="button"
+                        className="un-hub-chip"
+                        disabled={safeCvePage <= 0}
+                        onClick={() => showCvePage(safeCvePage - 1)}
+                      >
+                        ← Prev
+                      </button>
+                      <span className="pki-hub-pager-status">
+                        Page {safeCvePage + 1}/{cvePageCount}
+                      </span>
+                      <button
+                        type="button"
+                        className="un-hub-chip"
+                        disabled={safeCvePage >= cvePageCount - 1}
+                        onClick={() => showCvePage(safeCvePage + 1)}
+                      >
+                        Next →
+                      </button>
+                    </div>
+                  )}
 
                   <button
                     type="button"

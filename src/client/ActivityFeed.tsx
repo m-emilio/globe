@@ -437,6 +437,14 @@ export function ActivityFeed({
   }, [open, onClose]);
 
   useEffect(() => {
+    const openIdentity = () => {
+      onSignIn?.();
+    };
+    window.addEventListener("globe-open-identity", openIdentity);
+    return () => window.removeEventListener("globe-open-identity", openIdentity);
+  }, [onSignIn]);
+
+  useEffect(() => {
     // Keep newest chat visible (list is newest-first)
     const el = chatListRef.current;
     if (el) el.scrollTop = 0;

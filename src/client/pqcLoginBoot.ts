@@ -28,7 +28,60 @@ function patchSessionLabel(): void {
 
 let arrangeSignIn: (() => void) | null = null;
 
+function ensureIdentityLayer(): void {
+  if (document.getElementById("globe-identity-layer")) return;
+  const style = document.createElement("style");
+  style.id = "globe-identity-layer";
+  style.textContent =
+    ".auth-modal-backdrop{z-index:14000!important}.pki-hub-header-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}";
+  document.head.append(style);
+}
+
+function dismissSignedInBanner(): void {
+  if (!document.querySelector(".auth-user-meta")) return;
+  const banner = document.querySelector(".billing-banner");
+  if (!(banner instanceof HTMLElement)) return;
+  const text = banner.textContent || "";
+  if (!/Stripe|Live Feed|support chat/.test(text)) return;
+  const dismiss = banner.querySelector("button");
+  if (dismiss instanceof HTMLButtonElement) dismiss.click();
+}
+
+function openIdentity(): void {
+  if (document.querySelector(".menu-dropdown")) {
+    const toggle = document.querySelector(".nav-menu-btn");
+    if (toggle instanceof HTMLElement) toggle.click();
+  }
+  window.dispatchEvent(new Event("globe-open-identity"));
+}
+
+window.addEventListener("globe-open-identity", () => {
+  window.setTimeout(dismissSignedInBanner, 60);
+});
+
+function mountIdentityMenu(): void {
+  const section = document.querySelector(".menu-section-links");
+  const signedIn = Boolean(document.querySelector(".auth-user-meta"));
+  const existing = document.getElementById("globe-menu-identity");
+  if (!signedIn || !(section instanceof HTMLElement)) {
+    existing?.remove();
+    return;
+  }
+  if (existing && existing.parentElement === section) return;
+  existing?.remove();
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "globe-menu-identity";
+  button.className = "menu-item menu-item-button";
+  button.textContent = "Identity";
+  button.title = "Open Identity to create or sign in another key";
+  button.addEventListener("click", openIdentity);
+  section.insertBefore(button, section.firstChild);
+}
+
 function watch(): void {
+  ensureIdentityLayer();
+  mountIdentityMenu();
   patchSessionLabel();
   const admin = document.querySelector(".admin-modal");
   if (admin instanceof HTMLElement && admin.dataset.globeLoginLog !== "1") {
