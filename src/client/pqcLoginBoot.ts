@@ -35,13 +35,9 @@ function ensureIdentityLayer(): void {
   style.textContent = [
     ".auth-modal-backdrop{z-index:14000!important}",
     ".menu-dropdown .menu-section-location .menu-section-title{padding-right:46px}",
-    ".pki-hub .pki-hub-cve-list,.pki-panel .pki-cve-list{max-height:none!important;overflow:visible!important}",
+    ".pki-hub .pki-hub-cve-list{max-height:none!important;overflow:visible!important}",
     "#globe-menu-close{width:36px;height:36px;border:1px solid rgba(0,217,255,.65);border-radius:4px;background:rgba(0,0,0,.92);color:#00d9ff;font:22px/1 inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}",
     "#globe-feed-resize{z-index:1160;width:36px;height:36px}",
-    "#globe-pki-cve-pager{display:flex;align-items:center;gap:8px;box-sizing:border-box;padding:6px 8px;background:rgba(8,10,16,.96);border:1px solid rgba(255,125,160,.55);border-radius:10px}",
-    "#globe-pki-cve-pager button{min-height:36px;min-width:64px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:rgba(255,255,255,.06);color:#f2f4f7;font:600 12px inherit;cursor:pointer}",
-    "#globe-pki-cve-pager button:disabled{opacity:.35;cursor:not-allowed}",
-    "#globe-pki-cve-pager span{flex:1;min-width:0;font-size:12px;color:#e8edf4}",
     ".nav-center:not(:empty){display:flex!important;flex:1 1 auto!important;width:auto!important;order:0!important;justify-content:center!important;align-items:center!important;min-width:0!important;grid-template-columns:none!important}",
     "#globe-header-identity{height:32px;min-height:32px;max-width:100%;padding:0 12px;border:1.5px solid #6e7681;border-radius:3px;background:rgba(0,0,0,.82);color:#9aa4b2;font:700 11px/1 var(--font-ui,inherit);letter-spacing:.08em;text-transform:uppercase;cursor:pointer;white-space:nowrap;box-sizing:border-box}",
     "#globe-header-identity[data-level=guest]{border-color:#6e7681;color:#9aa4b2;background:rgba(0,0,0,.72);box-shadow:none}",
@@ -208,88 +204,10 @@ function placeFeedResize(): void {
   grip.style.bottom = "auto";
 }
 
-const PANEL_CVE_PAGE_SIZE = 8;
-let panelCvePage = 0;
-let panelCveKey = "";
-
-function placePanelCvePager(): void {
-  const panel = document.querySelector(".pki-panel:not(.un-panel-minimized)");
-  const list = panel?.querySelector(".pki-cve-list");
-  let bar = document.getElementById("globe-pki-cve-pager");
-  if (!(panel instanceof HTMLElement) || !(list instanceof HTMLElement)) {
-    bar?.remove();
-    panelCvePage = 0;
-    panelCveKey = "";
-    return;
-  }
-  const cards = Array.from(list.querySelectorAll(":scope > .pki-cve-card"));
-  const key = cards
-    .map((card) => card.querySelector("strong")?.textContent || "")
-    .join("|");
-  if (key !== panelCveKey) {
-    panelCveKey = key;
-    panelCvePage = 0;
-  }
-  const pageCount = Math.max(1, Math.ceil(cards.length / PANEL_CVE_PAGE_SIZE));
-  if (panelCvePage > pageCount - 1) panelCvePage = pageCount - 1;
-  for (let i = 0; i < cards.length; i++) {
-    const card = cards[i];
-    if (!(card instanceof HTMLElement)) continue;
-    const visible = Math.floor(i / PANEL_CVE_PAGE_SIZE) === panelCvePage;
-    card.style.display = visible ? "" : "none";
-  }
-  list.style.maxHeight = "none";
-  list.style.overflow = "visible";
-  const scroll = panel.querySelector(".trade-pulse-panel-scroll");
-  if (scroll instanceof HTMLElement) scroll.style.paddingBottom = "52px";
-  if (!(bar instanceof HTMLElement)) {
-    bar = document.createElement("div");
-    bar.id = "globe-pki-cve-pager";
-    bar.setAttribute("role", "group");
-    bar.setAttribute("aria-label", "CVE pages");
-    const prev = document.createElement("button");
-    prev.type = "button";
-    prev.id = "globe-pki-cve-prev";
-    prev.textContent = "← Prev";
-    prev.addEventListener("click", () => {
-      panelCvePage = Math.max(0, panelCvePage - 1);
-      placePanelCvePager();
-    });
-    const status = document.createElement("span");
-    status.id = "globe-pki-cve-status";
-    const next = document.createElement("button");
-    next.type = "button";
-    next.id = "globe-pki-cve-next";
-    next.textContent = "Next →";
-    next.addEventListener("click", () => {
-      panelCvePage += 1;
-      placePanelCvePager();
-    });
-    bar.append(prev, status, next);
-    document.body.append(bar);
-  }
-  const status = bar.querySelector("#globe-pki-cve-status");
-  const prev = bar.querySelector("#globe-pki-cve-prev");
-  const next = bar.querySelector("#globe-pki-cve-next");
-  const shown = cards.filter((card) => card instanceof HTMLElement && card.style.display !== "none").length;
-  const label = cards.length
-    ? `Page ${panelCvePage + 1}/${pageCount} · ${shown} of ${cards.length}`
-    : "Page 1/1";
-  if (status && status.textContent !== label) status.textContent = label;
-  if (prev instanceof HTMLButtonElement) prev.disabled = panelCvePage <= 0;
-  if (next instanceof HTMLButtonElement) next.disabled = panelCvePage >= pageCount - 1;
-  const rect = panel.getBoundingClientRect();
-  bar.style.position = "fixed";
-  bar.style.left = `${rect.left + 8}px`;
-  bar.style.top = `${Math.max(8, rect.bottom - 48)}px`;
-  bar.style.width = `${Math.max(160, rect.width - 44)}px`;
-  bar.style.zIndex = "1300";
-}
-
 function placeFloatingControls(): void {
   placeMenuClose();
   placeFeedResize();
-  placePanelCvePager();
+  document.getElementById("globe-pki-cve-pager")?.remove();
 }
 
 function dismissSignedInBanner(): void {
