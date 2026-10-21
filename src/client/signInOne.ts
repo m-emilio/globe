@@ -138,6 +138,7 @@ export function mountUnifiedSignIn(): void {
     }
     shell = next;
   }
-  const method = shell.dataset.method;
-  applyMethod(modal, isMethod(method || "") ? (method as Method) : "device");
+  if (!(shell instanceof HTMLElement)) return;
+  const method = shell.dataset.method ?? "";
+  applyMethod(modal, isMethod(method) ? method : "device");
 }
