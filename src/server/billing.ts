@@ -11,6 +11,7 @@
 import Stripe from "stripe";
 import {
   getSessionUser,
+  getUserById,
   rateLimitOrNull,
   rateLimitDurable,
   setUserTransitPaid,
@@ -402,6 +403,84 @@ export async function grantPaidToUser(
   }
 
   return record;
+}
+
+export type StripeClaimScan = {
+  scanned: number;
+  claimed: number;
+  already: number;
+  skipped: number;
+  unmatched: number;
+};
+
+/**
+ * Claim completed Checkout sessions whose client_reference_id is a Globe account.
+ * Does not attach a session to a different account. Caps the scan at 3 pages.
+ */
+export async function claimPaidCheckoutSessions(env: BillingEnv): Promise<StripeClaimScan> {
+  const secret = env.STRIPE_SECRET_KEY?.trim();
+  if (!secret || !env.BILLING_KV) throw new Error("stripe_not_configured");
+  const stripe = createStripeClient(secret);
+  const summary: StripeClaimScan = {
+    scanned: 0,
+    claimed: 0,
+    already: 0,
+    skipped: 0,
+    unmatched: 0,
+  };
+  let startingAfter: string | undefined;
+  for (let page = 0; page < 3; page += 1) {
+    const listed = await stripe.checkout.sessions.list({
+      limit: 100,
+      status: "complete",
+      starting_after: startingAfter,
+    });
+    if (listed.data.length === 0) break;
+    for (const checkout of listed.data) {
+      summary.scanned += 1;
+      const ref =
+        typeof checkout.client_reference_id === "string"
+          ? checkout.client_reference_id.trim()
+          : "";
+      if (!/^[a-f0-9]{16,64}$/i.test(ref)) {
+        summary.unmatched += 1;
+        continue;
+      }
+      const user = await getUserById(env, ref);
+      if (!user) {
+        summary.unmatched += 1;
+        continue;
+      }
+      const existing = await env.BILLING_KV.get(claimedSessionKey(checkout.id));
+      if (
+        existing === user.id &&
+        (user.transitSource === "stripe" || user.unlimitedKeySource === "stripe")
+      ) {
+        summary.already += 1;
+        continue;
+      }
+      const record = await grantPaidToUser(env, {
+        userId: user.id,
+        sessionId: checkout.id,
+        customerId:
+          typeof checkout.customer === "string"
+            ? checkout.customer
+            : checkout.customer?.id ?? null,
+        customerEmail:
+          checkout.customer_details?.email ?? checkout.customer_email ?? null,
+        paymentStatus: checkout.payment_status,
+        amountTotal: checkout.amount_total,
+        currency: checkout.currency,
+        source: "claim",
+      });
+      if (record) summary.claimed += 1;
+      else summary.skipped += 1;
+    }
+    if (!listed.has_more) break;
+    startingAfter = listed.data[listed.data.length - 1]?.id;
+    if (!startingAfter) break;
+  }
+  return summary;
 }
 
 /**

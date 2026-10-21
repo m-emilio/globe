@@ -41,14 +41,22 @@ export function pqcLogDigest(label: string, value: string): string {
   return hex(shake256(new TextEncoder().encode(text), { dkLen: PQC_LOG_BYTES }));
 }
 
-export function networkHash(ip: string): string {
-  return pqcLogDigest("network", ip);
+/** 32-byte hex pepper from the LOG_HASH_PEPPER Worker secret. Empty when unset. */
+export function readLogPepper(env: { LOG_HASH_PEPPER?: string } | null | undefined): string {
+  const pepper = env?.LOG_HASH_PEPPER?.trim() || "";
+  return /^[a-f0-9]{64}$/.test(pepper) ? pepper : "";
 }
 
-export function accountHash(fingerprint: string): string {
+export function networkHash(ip: string, pepper: string): string {
+  if (!/^[a-f0-9]{64}$/.test(pepper)) return "";
+  return pqcLogDigest("network", `${pepper}:${ip}`);
+}
+
+export function accountHash(fingerprint: string, pepper: string): string {
   const hexId = fingerprint.replace(/[\s:]/g, "").toLowerCase();
   if (!/^[a-f0-9]{8,128}$/.test(hexId)) return "";
-  return pqcLogDigest("account", hexId);
+  if (!/^[a-f0-9]{64}$/.test(pepper)) return "";
+  return pqcLogDigest("account", `${pepper}:${hexId}`);
 }
 
 export function loginRecordHash(fields: LoginSealFields): string {

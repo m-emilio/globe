@@ -4,7 +4,7 @@
  * An unknown address is never paused, because every such request would share one bucket.
  */
 import { clientIp, type AuthEnv } from "./auth";
-import { networkHash } from "./pqcLogHash";
+import { networkHash, readLogPepper } from "./pqcLogHash";
 
 export const AUTH_FAIL_LIMIT = 8;
 export const AUTH_FAIL_WINDOW_SECONDS = 10 * 60;
@@ -73,7 +73,9 @@ export async function rejectIfAuthBanned(
     if (!env.BILLING_KV) return null;
     const ip = clientIp(request);
     if (ip === "unknown") return null;
-    const banned = await env.BILLING_KV.get(`auth:ban:${networkHash(ip)}`);
+    const hash = networkHash(ip, readLogPepper(env));
+    if (!hash) return null;
+    const banned = await env.BILLING_KV.get(`auth:ban:${hash}`);
     if (!banned) return null;
     return bannedResponse(applySecurityHeaders);
   } catch {
@@ -84,7 +86,8 @@ export async function rejectIfAuthBanned(
 export async function noteAuthFailure(env: AuthEnv, ip: string, code: string): Promise<void> {
   if (!env.BILLING_KV || ip === "unknown" || !countsAsAuthFailure(code)) return;
   const now = Date.now();
-  const hash = networkHash(ip);
+  const hash = networkHash(ip, readLogPepper(env));
+  if (!hash) return;
   const failKey = `auth:fail:${hash}`;
   const raw = await env.BILLING_KV.get(failKey);
   const count = countedFailures(raw, now);

@@ -3,7 +3,8 @@
  * Stores SHAKE256 digests of the network and account, a record hash, and a
  * hash chain. Does not store the raw network, account, private keys,
  * signatures, MACs, challenges, session cookies, or public key bytes.
- * The digest is unsalted. A leaked log can still be matched against a guessed IPv4.
+ * Network and account digests include the LOG_HASH_PEPPER Worker secret.
+ * Privilege seals stay unpeppered so existing unlock records keep matching.
  */
 import { clientIp, type AuthEnv } from "./auth";
 import { noteAuthFailure } from "./authBan";
@@ -14,6 +15,7 @@ import {
   isPqcLogHash,
   loginRecordHash,
   networkHash,
+  readLogPepper,
   type LoginSealFields,
 } from "./pqcLogHash";
 
@@ -75,7 +77,7 @@ function usableIp(value: string): string {
   return /^[0-9a-fA-F:.]+$/.test(ip) ? ip : "";
 }
 
-function asAttempt(value: unknown): PublicLoginAttempt | null {
+function asAttempt(value: unknown, pepper: string): PublicLoginAttempt | null {
   if (!value || typeof value !== "object") return null;
   const row = value as Record<string, unknown>;
   const family = row.family;
@@ -91,11 +93,11 @@ function asAttempt(value: unknown): PublicLoginAttempt | null {
   let network = hashOrEmpty(row.networkHash);
   if (!network && typeof row.ip === "string") {
     const ip = usableIp(row.ip);
-    if (ip) network = networkHash(ip);
+    if (ip) network = networkHash(ip, pepper);
   }
   if (!network) return null;
   let account = hashOrEmpty(row.accountHash);
-  if (!account && typeof row.accountPrefix === "string") account = accountHash(row.accountPrefix);
+  if (!account && typeof row.accountPrefix === "string") account = accountHash(row.accountPrefix, pepper);
   const knownFamily = family as LoginFamily;
   const knownPhase = phase as LoginPhase;
   return {
@@ -142,10 +144,11 @@ export async function logAuthResponse(
     else if (response.ok) code = "ok";
     if (typeof data.suite === "string") suite = cleanSuite(data.suite);
     if (data.family === "ecdhe" || data.family === "kem") storedFamily = data.family;
-    if (typeof data.fingerprint === "string") account = accountHash(data.fingerprint);
+    const pepper = readLogPepper(env);
+    if (typeof data.fingerprint === "string") account = accountHash(data.fingerprint, pepper);
     const user = data.user;
     if (!account && user && typeof user === "object" && typeof (user as { fingerprint?: unknown }).fingerprint === "string") {
-      account = accountHash((user as { fingerprint: string }).fingerprint);
+      account = accountHash((user as { fingerprint: string }).fingerprint, pepper);
     }
   } catch {
     // A body that is not JSON still counts as a rejection when the status is not OK.
@@ -161,7 +164,7 @@ export async function logAuthResponse(
         suite,
         result,
         code,
-        networkHash: networkHash(ip),
+        networkHash: networkHash(ip, readLogPepper(env)),
         accountHash: account,
       };
       const recordHash = loginRecordHash(fields);
@@ -207,7 +210,7 @@ export async function listLoginAttempts(env: AuthEnv, take = 40): Promise<Public
     const raw = await env.BILLING_KV.get(key.name);
     if (!raw) continue;
     try {
-      const parsed = asAttempt(JSON.parse(raw));
+      const parsed = asAttempt(JSON.parse(raw), readLogPepper(env));
       if (parsed) entries.push(parsed);
     } catch {
       // Skip a damaged row.

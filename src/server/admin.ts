@@ -10,7 +10,8 @@
  *     3) Last check: that key's fingerprint is an exact ADMIN_FINGERPRINTS member
  * - A shared action secret is not accepted. The public fingerprint is not a bearer token.
  * - A user-id allowlist entry can open the admin session and cannot approve mutations.
- * - Read-only lookup/audit need (1) only.
+ * - Read-only lookup, audit, and the sign-in list need (1) only.
+ * - The security-log export needs the full mutation gate.
  * - Empty ADMIN_FINGERPRINTS + ADMIN_USER_IDS ⇒ no admins (fail closed).
  */
 
@@ -32,7 +33,7 @@ import {
   type AuthEnv,
   type UserRecord,
 } from "./auth";
-import { grantPaidToUser, readUserEntitlement, type BillingEnv } from "./billing";
+import { claimPaidCheckoutSessions, grantPaidToUser, readUserEntitlement, type BillingEnv } from "./billing";
 import {
   b64ToFixedBytes,
   decodeStoredPublicKey,
@@ -51,6 +52,7 @@ import {
   isPqcLogHash,
   networkHash,
   privilegeSeal,
+  readLogPepper,
   userSeal,
   type AuditSealFields,
 } from "./pqcLogHash";
@@ -296,7 +298,7 @@ export type PublicAudit = {
   chain: string;
 };
 
-function asPublicAudit(value: unknown): PublicAudit | null {
+function asPublicAudit(value: unknown, pepper: string): PublicAudit | null {
   if (!value || typeof value !== "object") return null;
   const row = value as Record<string, unknown>;
   const at = typeof row.at === "string" && /^\d{4}-\d{2}-\d{2}T/.test(row.at) ? row.at.slice(0, 40) : "";
@@ -305,11 +307,11 @@ function asPublicAudit(value: unknown): PublicAudit | null {
   let admin = hashOrEmpty(row.adminHash);
   let target = hashOrEmpty(row.targetHash);
   let network = hashOrEmpty(row.networkHash);
-  if (!admin && typeof row.adminFingerprint === "string") admin = accountHash(row.adminFingerprint);
-  if (!target && typeof row.targetFingerprint === "string") target = accountHash(row.targetFingerprint);
+  if (!admin && typeof row.adminFingerprint === "string") admin = accountHash(row.adminFingerprint, pepper);
+  if (!target && typeof row.targetFingerprint === "string") target = accountHash(row.targetFingerprint, pepper);
   if (!network && typeof row.ip === "string") {
     const ip = usableIp(row.ip);
-    if (ip) network = networkHash(ip);
+    if (ip) network = networkHash(ip, pepper);
   }
   return {
     at,
@@ -347,6 +349,7 @@ async function listPrefixedKeys(env: AdminEnv, prefix: string): Promise<string[]
 async function listPublicAudits(env: AdminEnv, take = 40): Promise<PublicAudit[]> {
   if (!env.BILLING_KV) return [];
   const scan = Math.min(Math.max(take, 1), 100);
+  const pepper = readLogPepper(env);
   const sealed = (await listPrefixedKeys(env, "admin:seal:")).slice(0, scan);
   const legacy = await listPrefixedKeys(env, "admin:audit:");
   const names = [...sealed, ...legacy.slice(-scan)];
@@ -355,7 +358,7 @@ async function listPublicAudits(env: AdminEnv, take = 40): Promise<PublicAudit[]
     const raw = await env.BILLING_KV.get(name);
     if (!raw) continue;
     try {
-      const parsed = asPublicAudit(JSON.parse(raw));
+      const parsed = asPublicAudit(JSON.parse(raw), pepper);
       if (parsed) entries.push(parsed);
     } catch {
       // skip a damaged row
@@ -369,14 +372,15 @@ async function writeAudit(env: AdminEnv, entry: AuditEntry) {
   if (!env.BILLING_KV) return;
   try {
     const at = /^\d{4}-\d{2}-\d{2}T/.test(entry.at) ? entry.at.slice(0, 40) : new Date().toISOString();
+    const pepper = readLogPepper(env);
     const fields: AuditSealFields = {
       at,
       action: cleanAction(entry.action),
       ok: entry.ok !== false,
       detail: cleanDetail(entry.detail || ""),
-      adminHash: accountHash(entry.adminFingerprint),
-      targetHash: entry.targetFingerprint ? accountHash(entry.targetFingerprint) : "",
-      networkHash: networkHash(entry.ip),
+      adminHash: accountHash(entry.adminFingerprint, pepper),
+      targetHash: entry.targetFingerprint ? accountHash(entry.targetFingerprint, pepper) : "",
+      networkHash: networkHash(entry.ip, pepper),
     };
     const recordHash = auditRecordHash(fields);
     const prevHash = await readAuditChainTip(env);
@@ -1217,9 +1221,9 @@ export async function adminRevokeUnlimitedKeys(
 }
 
 /**
- * Admin claims a paid Stripe Checkout session for a user.
- * Requires full mutation gate (secret + PGP elevation).
- * If client_reference_id is set, target must match it.
+ * Admin claims one real Stripe Checkout session.
+ * The session's client_reference_id must be that Globe account.
+ * Requires the full mutation gate. Orphan sessions are not attached.
  */
 export async function adminClaimSession(
   request: Request,
@@ -1239,7 +1243,7 @@ export async function adminClaimSession(
   }
 
   const sessionId = body.session_id?.trim();
-  if (!sessionId || !/^cs_[a-zA-Z0-9_]+$/.test(sessionId)) {
+  if (!sessionId || !/^cs_(test_|live_)?[a-zA-Z0-9]{8,200}$/.test(sessionId)) {
     return json(
       { error: "session_id_required" },
       { status: 400 },
@@ -1262,65 +1266,60 @@ export async function adminClaimSession(
       httpClient: Stripe.createFetchHttpClient(),
     } as ConstructorParameters<typeof Stripe>[1]);
     const checkout = await stripe.checkout.sessions.retrieve(sessionId);
-    if (
-      checkout.payment_status !== "paid" &&
-      checkout.payment_status !== "no_payment_required"
-    ) {
-      return json(
-        {
-          error: "payment_not_complete",
-          paymentStatus: checkout.payment_status,
-        },
-        { status: 402 },
-        applySecurityHeaders,
-      );
-    }
-
     const ref =
       typeof checkout.client_reference_id === "string"
         ? checkout.client_reference_id.trim()
         : "";
-
-    let target: UserRecord | null = null;
-    if (body.userId?.trim()) {
-      target = await getUserById(env, body.userId.trim());
-    }
-    if (!target && body.fingerprint?.trim()) {
-      target = await getUserByFingerprint(env, body.fingerprint.trim());
-    }
-    if (!target && ref) {
-      target = await getUserById(env, ref);
-    }
-
-    if (!target) {
-      return json(
-        {
-          error: "user_not_found",
-          message:
-            "Could not resolve user. Pass userId/fingerprint, or ensure client_reference_id is a known user id.",
-          client_reference_id: ref || null,
-        },
-        { status: 404 },
-        applySecurityHeaders,
-      );
-    }
-
-    if (ref && ref !== target.id) {
+    if (!/^[a-f0-9]{16,64}$/i.test(ref)) {
       return json(
         {
           error: "session_user_mismatch",
           message:
-            "Checkout client_reference_id does not match the target user.",
-          client_reference_id: ref,
-          targetUserId: target.id,
+            "This checkout has no Globe account id. A real claim only unlocks the account named on the Stripe session.",
         },
         { status: 403 },
         applySecurityHeaders,
       );
     }
 
-    // Route through grantPaidToUser so claim ledger + amount checks apply.
-    // forceRebind allows admin recovery of orphan sessions.
+    const named = await getUserById(env, ref);
+    if (!named) {
+      return json(
+        {
+          error: "user_not_found",
+          message: "The account named on this Stripe session is not registered.",
+        },
+        { status: 404 },
+        applySecurityHeaders,
+      );
+    }
+
+    const requestedId = body.userId?.trim() || "";
+    if (requestedId && requestedId !== named.id) {
+      return json(
+        {
+          error: "session_user_mismatch",
+          message: "That account is not the one named on this Stripe session.",
+        },
+        { status: 403 },
+        applySecurityHeaders,
+      );
+    }
+    if (body.fingerprint?.trim()) {
+      const byFingerprint = await getUserByFingerprint(env, body.fingerprint.trim());
+      if (!byFingerprint || byFingerprint.id !== named.id) {
+        return json(
+          {
+            error: "session_user_mismatch",
+            message: "That key is not the account named on this Stripe session.",
+          },
+          { status: 403 },
+          applySecurityHeaders,
+        );
+      }
+    }
+
+    const target = named;
     const record = await grantPaidToUser(env, {
       userId: target.id,
       sessionId: checkout.id,
@@ -1334,7 +1333,6 @@ export async function adminClaimSession(
       amountTotal: checkout.amount_total,
       currency: checkout.currency,
       source: "claim",
-      forceRebind: true,
     });
 
     if (!record) {
@@ -1368,9 +1366,7 @@ export async function adminClaimSession(
       action: "admin_claim_session",
       targetUserId: target.id,
       targetFingerprint: target.fingerprint,
-      detail: ref
-        ? `session ${sessionId}`
-        : `session ${sessionId} (no client_reference_id; admin-attached)`,
+      detail: `stripe session ${sessionId}`,
       ip: clientIp(request),
       ok: true,
     });
@@ -1391,6 +1387,66 @@ export async function adminClaimSession(
       {
         error: "claim_failed",
         message: "Could not claim checkout session.",
+      },
+      { status: 502 },
+      applySecurityHeaders,
+    );
+  }
+}
+
+/**
+ * Scan recent completed Stripe Checkout sessions and claim each one whose
+ * client_reference_id is a registered Globe account. One elevation covers the scan.
+ */
+export async function adminClaimStripeUsers(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminMutation(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  const limited = await rateLimitDurable(
+    env,
+    "admin:claim-stripe-all",
+    3,
+    10 * 60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
+  if (!env.STRIPE_SECRET_KEY?.trim() || !env.BILLING_KV) {
+    return json(
+      { error: "stripe_not_configured", message: "Stripe is not configured on this deployment." },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+  try {
+    const summary = await claimPaidCheckoutSessions(env);
+    await writeAudit(env, {
+      at: new Date().toISOString(),
+      adminUserId: gate.user.id,
+      adminFingerprint: gate.user.fingerprint,
+      action: "admin_claim_stripe_all",
+      targetUserId: "",
+      targetFingerprint: "",
+      detail: `claimed=${summary.claimed} already=${summary.already} skipped=${summary.skipped} unmatched=${summary.unmatched} scanned=${summary.scanned}`,
+      ip: clientIp(request),
+      ok: true,
+    });
+    return json(
+      {
+        ok: true,
+        ...summary,
+        message: `Claimed ${summary.claimed} paid session${summary.claimed === 1 ? "" : "s"}. ${summary.already} already matched. ${summary.skipped} skipped. ${summary.unmatched} had no Globe account.`,
+      },
+      { status: 200 },
+      applySecurityHeaders,
+    );
+  } catch {
+    return json(
+      {
+        error: "claim_failed",
+        message: "Could not scan Stripe sessions.",
       },
       { status: 502 },
       applySecurityHeaders,
@@ -1425,21 +1481,31 @@ export async function adminListLoginAttempts(
       keyLimitPerIp: 3,
       alg: PQC_LOG_ALG,
       stored:
-        "SHAKE256 digests of the network and account, plus a record hash and hash chain. Raw network addresses and account ids are not returned. Private keys, signatures, MACs, challenges, and session cookies are not stored.",
+        "SHAKE256 digests of the network and account, mixed with a Worker secret pepper, plus a record hash and hash chain. Raw network addresses and account ids are not returned. Private keys, signatures, MACs, challenges, and session cookies are not stored.",
     },
     { status: 200 },
     applySecurityHeaders,
   );
 }
 
-/** Downloadable copy of the hashed sign-in attempts and admin audits. Admin session only. */
+/** Downloadable copy of the hashed sign-in attempts and admin audits. Needs elevation. */
 export async function adminExportSecurityLog(
   request: Request,
   env: AdminEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  const gate = await requireAdminMutation(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
+  if (!readLogPepper(env)) {
+    return json(
+      {
+        error: "log_pepper_missing",
+        message: "The log pepper secret is not configured.",
+      },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
   const [attempts, audits, attemptTip, auditTip] = await Promise.all([
     listLoginAttempts(env, 100),
     listPublicAudits(env, 100),
@@ -1455,10 +1521,11 @@ export async function adminExportSecurityLog(
       loginRecordFields: ["at", "family", "phase", "suite", "result", "code", "networkHash", "accountHash"],
       auditRecordFields: ["at", "action", "ok", "detail", "adminHash", "targetHash", "networkHash"],
       okEncoding: "1 when the action succeeded, 0 otherwise",
-      digestInput: `${PQC_LOG_DOMAIN}:label:value`,
+      digestInput: `${PQC_LOG_DOMAIN}:label:<pepper>:<value> for network and account. The pepper is a Worker secret and is not in this file.`,
       chainInput: "prevHash|recordHash under the chain label. An empty prevHash is the first link.",
-      unsalted:
-        "SHAKE256 has no pepper. A leaked export can be matched against a guessed IPv4. IPv6 is not practical to guess.",
+      peppered:
+        "New network and account digests include a secret pepper. Rows written before that pepper stay as stored digests. Privilege seals are separate and are not in this file.",
+      elevation: "This export requires the 10-minute device-key elevation.",
       pause: {
         countedFailures: AUTH_FAIL_LIMIT,
         windowSeconds: AUTH_FAIL_WINDOW_SECONDS,
