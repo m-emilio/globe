@@ -32,6 +32,7 @@ import {
   adminListLoginAttempts,
   adminListUsers,
   adminLookupUser,
+  adminPurpleTeamPage,
   adminRevokeTransit,
   adminRevokeUnlimitedKeys,
   adminStatus,
@@ -1587,6 +1588,7 @@ function collectWorkerSecrets(env: Env): string[] {
   const extra = env as Env & {
     LOG_HASH_PEPPER?: string;
     ADMIN_FINGERPRINT_SECRET?: string;
+    ADMIN_FINGERPRINTS_EXTRA?: string;
   };
   const candidates = [
     env.COMTRADE_SUBSCRIPTION_KEY,
@@ -1595,6 +1597,7 @@ function collectWorkerSecrets(env: Env): string[] {
     env.ADMIN_ACTION_SECRET,
     env.ADMIN_FINGERPRINTS,
     extra.ADMIN_FINGERPRINT_SECRET,
+    extra.ADMIN_FINGERPRINTS_EXTRA,
     extra.LOG_HASH_PEPPER,
     env.TRANSIT_PUBLICAPI_V4,
   ];
@@ -4819,6 +4822,21 @@ export default {
         return methodNotAllowedResponse();
       }
       return adminDeleteUser(request, env, applySecurityHeaders);
+    }
+
+    // Admin-only Purple Team Recon console (HTML page, not JSON).
+    // Same session + fingerprint allowlist gates as the admin API.
+    if (
+      url.pathname === "/admin/purple-team" ||
+      url.pathname === "/admin/purple-team/"
+    ) {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminPurpleTeamPage(request, env, applySecurityHeaders),
+      );
     }
 
     // --- Stripe Payment Link + webhook entitlement ---

@@ -42,6 +42,7 @@ import {
 } from "./pqcVerify";
 import { AUTH_BAN_SECONDS, AUTH_FAIL_LIMIT, AUTH_FAIL_WINDOW_SECONDS } from "./authBan";
 import { listLoginAttempts, readLoginChainTip } from "./loginLog";
+import { PURPLE_TEAM_CSP, PURPLE_TEAM_HTML } from "./purpleTeamHtml";
 import {
   PQC_LOG_ALG,
   PQC_LOG_BYTES,
@@ -489,6 +490,41 @@ async function rejectUnlessAllowlistedFingerprint(
     { status: 403 },
     applySecurityHeaders,
   );
+}
+
+/**
+ * GET /admin/purple-team — admin-only Purple Team Recon console.
+ * Requires an allowlisted admin session AND an exact fingerprint allowlist
+ * match. Non-admins get the same 401/403 JSON as the admin API.
+ * The page sets its own CSP (it calls public recon APIs client-side) and is
+ * never cached or indexed.
+ */
+export async function adminPurpleTeamPage(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  const fpDenied = await rejectUnlessAllowlistedFingerprint(
+    request,
+    env,
+    gate.user,
+    applySecurityHeaders,
+  );
+  if (fpDenied) return fpDenied;
+
+  const headers = new Headers({
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "private, no-store",
+    vary: "Cookie",
+    "x-robots-tag": "noindex, nofollow, noarchive",
+    "content-security-policy": PURPLE_TEAM_CSP,
+    "referrer-policy": "no-referrer",
+  });
+  // Fills the remaining site security headers without overriding the CSP above.
+  applySecurityHeaders?.(headers);
+  return new Response(PURPLE_TEAM_HTML, { status: 200, headers });
 }
 
 /**

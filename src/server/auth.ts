@@ -42,9 +42,14 @@ export type AuthEnv = {
   ADMIN_ACTION_SECRET?: string;
   /**
    * Allowlist kept as a Worker secret so the fingerprint is not in git.
-   * When set, this wins over the plain ADMIN_FINGERPRINTS var.
    */
   ADMIN_FINGERPRINT_SECRET?: string;
+  /**
+   * Additional admin fingerprints (Worker secret, comma-separated). Merged with
+   * ADMIN_FINGERPRINT_SECRET so more admins can be added without rewriting the
+   * original secret. Never commit values.
+   */
+  ADMIN_FINGERPRINTS_EXTRA?: string;
   /** Pepper for sign-in and audit digests. Not a privilege seal. */
   LOG_HASH_PEPPER?: string;
 };
@@ -106,11 +111,20 @@ function parseCsvList(raw?: string): string[] {
     .filter(Boolean);
 }
 
-/** Secret binding wins. The plain var remains only until a deploy drops it. */
+/**
+ * Union of every admin allowlist source: ADMIN_FINGERPRINT_SECRET,
+ * ADMIN_FINGERPRINTS_EXTRA and the legacy ADMIN_FINGERPRINTS var.
+ * parseFingerprintAllowlist splits the joined string on , ; and newlines.
+ */
 export function adminFingerprintAllowlist(env: AuthEnv): string {
-  const secret = env.ADMIN_FINGERPRINT_SECRET?.trim();
-  if (secret) return secret;
-  return env.ADMIN_FINGERPRINTS?.trim() || "";
+  return [
+    env.ADMIN_FINGERPRINT_SECRET,
+    env.ADMIN_FINGERPRINTS_EXTRA,
+    env.ADMIN_FINGERPRINTS,
+  ]
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter(Boolean)
+    .join(",");
 }
 
 /**
