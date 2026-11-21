@@ -32,6 +32,7 @@ import {
   adminListLoginAttempts,
   adminListUsers,
   adminLookupUser,
+  adminPurpleTeamCt,
   adminPurpleTeamPage,
   adminRevokeTransit,
   adminRevokeUnlimitedKeys,
@@ -4822,6 +4823,17 @@ export default {
         return methodNotAllowedResponse();
       }
       return adminDeleteUser(request, env, applySecurityHeaders);
+    }
+
+    // Admin-only CT subdomain lookup used by the recon page (fallback proxy).
+    if (url.pathname === "/admin/purple-team/ct") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminPurpleTeamCt(request, env, applySecurityHeaders),
+      );
     }
 
     // Admin-only Purple Team Recon console (HTML page, not JSON).
