@@ -12,6 +12,10 @@ declare namespace Cloudflare {
 		ADMIN_FINGERPRINTS?: string;
 		/** Comma-separated admin user ids (server allowlist). */
 		ADMIN_USER_IDS?: string;
+		/** Worker secret: primary admin fingerprint allowlist (never commit values). */
+		ADMIN_FINGERPRINT_SECRET?: string;
+		/** Worker secret: extra comma-separated admin fingerprints, merged with ADMIN_FINGERPRINT_SECRET. */
+		ADMIN_FINGERPRINTS_EXTRA?: string;
 		/** Optional secret required for grant/revoke/claim (header x-admin-action-secret). */
 		ADMIN_ACTION_SECRET?: string;
 		/** Stripe secret key (optional until payment enforcement is enabled) */

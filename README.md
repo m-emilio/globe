@@ -92,6 +92,17 @@ Used for users, sessions, challenges, and optional payment records.
 | `POST /api/auth/logout` | Clear session |
 | `GET /api/auth/me` | Current user + `sessionToken` echo |
 
+### Admin allowlist (multiple admins)
+
+Admins are OpenPGP keys whose fingerprint is on the server allowlist. The Worker merges three sources (comma-separated, no spaces): the `ADMIN_FINGERPRINT_SECRET` and `ADMIN_FINGERPRINTS_EXTRA` Worker secrets, plus the legacy `ADMIN_FINGERPRINTS` var. Keep fingerprints in secrets only, never in git.
+
+```bash
+# add more admins without touching the original secret
+npx wrangler secret put ADMIN_FINGERPRINTS_EXTRA --name globe
+```
+
+Each admin must sign in once with their device key (Sign in → Continue with device key) so the site registers that key. Admins also get **Menu → Purple Team Recon** (`/admin/purple-team`), an admin-only recon console gated server-side by the same session + fingerprint checks.
+
 ### Optional Stripe (hardened, not required)
 
 Payment Link `client_reference_id` is forced to the **logged-in user id** (not client-supplied). Claim only unlocks when that id matches. Payment-status is read-only (no rebinding). Webhook still requires signature verification.
