@@ -33,6 +33,9 @@ import {
   adminListUsers,
   adminLookupUser,
   adminPurpleTeamCt,
+  adminListAdmins,
+  adminAddAdmin,
+  adminRemoveAdmin,
   adminPurpleTeamPage,
   adminRevokeTransit,
   adminRevokeUnlimitedKeys,
@@ -4817,6 +4820,26 @@ export default {
         request,
         await adminListUsers(request, env, applySecurityHeaders),
       );
+    }
+    // UI-managed admins (BILLING_KV). Full mutation gate on every method.
+    if (url.pathname === "/api/admin/admins") {
+      if (request.method === "POST") {
+        return adminAddAdmin(request, env, applySecurityHeaders);
+      }
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminListAdmins(request, env, applySecurityHeaders),
+      );
+    }
+    if (url.pathname.startsWith("/api/admin/admins/")) {
+      if (request.method !== "DELETE") {
+        return methodNotAllowedResponse();
+      }
+      const adminEntryId = url.pathname.slice("/api/admin/admins/".length);
+      return adminRemoveAdmin(request, env, adminEntryId, applySecurityHeaders);
     }
     if (url.pathname === "/api/admin/delete-user") {
       if (request.method !== "POST") {
