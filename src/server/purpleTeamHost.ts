@@ -1,6 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
 import { checkDnsProof, scanHostname, type DnsProof } from "./purpleTeamDns";
-import { observeTls, type TlsObserverEnv } from "./purpleTeamTls";
 import { scanVerifiedDomain, type WebFinding } from "./verifiedDomainScan";
 
 export type Schedule = "off" | "daily" | "weekly";
@@ -56,6 +55,11 @@ async function saveState(txn: DurableObjectTransaction, state: HostState) {
   else await txn.setAlarm(state.nextScanAt);
 }
 
+function visibleReport(report: ScanReport): ScanReport {
+  // Older scans can contain the retired observer's result. Keep the stored record.
+  return { ...report, findings: report.findings.filter((finding) => finding.id !== "tls.served-certificate") };
+}
+
 export function compareWithBaseline(report: ScanReport, baseline: ScanReport) {
   const old = new Map(baseline.findings.map((finding) => [finding.id, finding]));
   const current = new Map(report.findings.map((finding) => [finding.id, finding]));
@@ -71,7 +75,7 @@ export function compareWithBaseline(report: ScanReport, baseline: ScanReport) {
   return changes;
 }
 
-export class PurpleTeamHost extends DurableObject<TlsObserverEnv> {
+export class PurpleTeamHost extends DurableObject {
   private scanning = false;
 
   async view(reportId?: string): Promise<HostView> {
@@ -79,11 +83,12 @@ export class PurpleTeamHost extends DurableObject<TlsObserverEnv> {
       const state = await txn.get<HostState>(STATE) ?? null;
       const reports = [...(await txn.list<ScanReport>({ prefix: REPORT_PREFIX, reverse: true, limit: HISTORY_LIMIT })).values()];
       const report = (reportId ? reports.find((entry) => entry.id === reportId) : reports[0]) ?? null;
+      const baseline = await txn.get<Baseline>(BASELINE);
       return {
         state,
-        report,
+        report: report ? visibleReport(report) : null,
         history: reports.map(({ id, at, actor, source }) => ({ id, at, actor, source })),
-        baseline: await txn.get<Baseline>(BASELINE) ?? null,
+        baseline: baseline ? { ...baseline, report: visibleReport(baseline.report) } : null,
       };
     });
   }
@@ -208,14 +213,11 @@ export class PurpleTeamHost extends DurableObject<TlsObserverEnv> {
       if (!authorized || authorized.generation !== state.generation || authorized.status !== "verified") {
         return failure("authorization_changed");
       }
-      const [web, tls] = await Promise.all([
-        scanVerifiedDomain(authorized.hostname),
-        observeTls(authorized.hostname, this.env),
-      ]);
+      const findings = await scanVerifiedDomain(authorized.hostname);
       const now = Date.now();
       const report: ScanReport = {
         id: now + "-" + crypto.randomUUID(), at: new Date(now).toISOString(),
-        actor, source, findings: [...web, tls],
+        actor, source, findings,
       };
       return this.ctx.storage.transaction(async (txn) => {
         const current = await txn.get<HostState>(STATE);

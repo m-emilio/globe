@@ -286,7 +286,7 @@ export function purpleTeamToolsPage(page: ToolsPage, applySecurityHeaders?: Secu
       <div class="grid">
         <section class="panel" id="website-controls" aria-labelledby="website-title">
           <h2 id="website-title">Verified website controls</h2>
-          <p>Verify an exact public hostname with DNS, then check its root response and served certificate.</p>
+          <p>Verify an exact public hostname with DNS, then check its root response and public Certificate Transparency records.</p>
           <form method="post" action="/admin/purple-team">
             <label for="new-host">Public hostname</label>
             <div class="controls"><input id="new-host" name="hostname" required maxlength="253" autocomplete="off" spellcheck="false">
