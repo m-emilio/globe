@@ -15,7 +15,7 @@
  */
 
 import * as openpgp from "openpgp";
-import { privilegeSeal } from "./pqcLogHash";
+import { accountHash, pqcLogDigest, privilegeSeal, readLogPepper } from "./pqcLogHash";
 
 const SESSION_COOKIE = "globe_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
@@ -42,9 +42,14 @@ export type AuthEnv = {
   ADMIN_ACTION_SECRET?: string;
   /**
    * Allowlist kept as a Worker secret so the fingerprint is not in git.
-   * When set, this wins over the plain ADMIN_FINGERPRINTS var.
    */
   ADMIN_FINGERPRINT_SECRET?: string;
+  /**
+   * Additional admin fingerprints (Worker secret, comma-separated). Merged with
+   * ADMIN_FINGERPRINT_SECRET so more admins can be added without rewriting the
+   * original secret. Never commit values.
+   */
+  ADMIN_FINGERPRINTS_EXTRA?: string;
   /** Pepper for sign-in and audit digests. Not a privilege seal. */
   LOG_HASH_PEPPER?: string;
 };
@@ -106,11 +111,20 @@ function parseCsvList(raw?: string): string[] {
     .filter(Boolean);
 }
 
-/** Secret binding wins. The plain var remains only until a deploy drops it. */
+/**
+ * Union of every admin allowlist source: ADMIN_FINGERPRINT_SECRET,
+ * ADMIN_FINGERPRINTS_EXTRA and the legacy ADMIN_FINGERPRINTS var.
+ * parseFingerprintAllowlist splits the joined string on , ; and newlines.
+ */
 export function adminFingerprintAllowlist(env: AuthEnv): string {
-  const secret = env.ADMIN_FINGERPRINT_SECRET?.trim();
-  if (secret) return secret;
-  return env.ADMIN_FINGERPRINTS?.trim() || "";
+  return [
+    env.ADMIN_FINGERPRINT_SECRET,
+    env.ADMIN_FINGERPRINTS_EXTRA,
+    env.ADMIN_FINGERPRINTS,
+  ]
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter(Boolean)
+    .join(",");
 }
 
 /**
@@ -126,27 +140,25 @@ function parseFingerprintAllowlist(raw?: string): string[] {
 }
 
 /**
- * Admin session = allowlisted fingerprint and/or user id from env (not client-asserted).
- * Empty allowlists ⇒ nobody is admin (fail closed).
- * Mutating admin APIs also require a device-key signature and an exact
- * ADMIN_FINGERPRINTS match (see admin.ts). A user id alone cannot approve those.
+ * Bootstrap admins only: allowlisted fingerprint and/or user id from Worker
+ * secrets/vars (not client-asserted). These cannot be removed from the UI.
+ * Empty allowlists ⇒ nobody is a bootstrap admin (fail closed).
+ * Most callers want isAdminUserWithKv, which also counts UI-managed admins.
  */
 export function isAdminUser(user: UserRecord, env: AuthEnv): boolean {
   const fps = parseFingerprintAllowlist(adminFingerprintAllowlist(env));
   const ids = parseCsvList(env.ADMIN_USER_IDS);
   if (fps.length === 0 && ids.length === 0) return false;
   const fp = (user.fingerprint || "").replace(/[\s:]/g, "").toLowerCase();
+  // Exact hex equality only — never partial/prefix guess for security.
   if (fp && fps.includes(fp)) return true;
-  // Also accept allowlist entry that matches ignoring length edge cases
-  // (exact hex equality only — never partial/prefix guess for security).
-  if (fp && fps.some((a) => a === fp)) return true;
   const uid = (user.id || "").toLowerCase();
   return Boolean(uid && ids.includes(uid));
 }
 
 /**
- * Exact ADMIN_FINGERPRINTS membership. ADMIN_USER_IDS does not pass.
- * Empty allowlist fails closed. Callers still require a signature from this key.
+ * Exact bootstrap fingerprint membership (Worker secrets/vars). ADMIN_USER_IDS
+ * does not pass. Empty allowlist fails closed.
  */
 export function isAllowlistedAdminFingerprint(
   fingerprint: string,
@@ -159,15 +171,176 @@ export function isAllowlistedAdminFingerprint(
   return fps.includes(fp);
 }
 
-function adminFlags(user: UserRecord, env: AuthEnv) {
+/** Number of distinct bootstrap fingerprints (never returns the values). */
+export function bootstrapAdminFingerprintCount(env: AuthEnv): number {
+  return new Set(parseFingerprintAllowlist(adminFingerprintAllowlist(env))).size;
+}
+
+/** Number of bootstrap admin user ids. */
+export function bootstrapAdminUserIdCount(env: AuthEnv): number {
+  return new Set(parseCsvList(env.ADMIN_USER_IDS)).size;
+}
+
+/*
+ * UI-managed admins (BILLING_KV). The Worker cannot edit its own secrets, so
+ * admins added from the admin portal live in one KV record. Raw fingerprints
+ * are NOT stored: each entry keeps a SHAKE256 digest of the normalized
+ * fingerprint (peppered with LOG_HASH_PEPPER when set, which makes it equal to
+ * the audit-log account hash) plus a masked display form.
+ */
+export const ADMIN_KV_LIST_KEY = "admin:allowlist:v1";
+export const ADMIN_KV_MAX_ENTRIES = 50;
+
+export type KvAdminEntry = {
+  id: string;
+  /** 64-hex SHAKE256 digest of the normalized fingerprint. */
+  digest: string;
+  /** True when digest = accountHash(fingerprint, LOG_HASH_PEPPER). */
+  peppered: boolean;
+  /** First 4 + last 4 hex only. */
+  masked: string;
+  label: string;
+  addedByMasked: string;
+  addedAt: string;
+};
+
+export type KvAdminList = { v: 1; entries: KvAdminEntry[] };
+
+export function maskFingerprint(fingerprint: string): string {
+  const fp = (fingerprint || "").replace(/[\s:]/g, "").toLowerCase();
+  if (fp.length < 12) return "…";
+  return `${fp.slice(0, 4)}…${fp.slice(-4)}`;
+}
+
+/** Digest used to store/match a UI-managed admin. Null for a malformed fingerprint. */
+export function kvAdminDigest(
+  fingerprint: string,
+  env: AuthEnv,
+  peppered: boolean,
+): string | null {
+  const fp = normalizeFingerprint(fingerprint || "");
+  if (!fp) return null;
+  if (peppered) {
+    const pepper = readLogPepper(env);
+    if (!pepper) return null;
+    const d = accountHash(fp, pepper);
+    return d || null;
+  }
+  return pqcLogDigest("admin-allow", fp);
+}
+
+/** Preferred digest mode for new entries: peppered when LOG_HASH_PEPPER is set. */
+export function kvAdminPepperAvailable(env: AuthEnv): boolean {
+  return Boolean(readLogPepper(env));
+}
+
+function sanitizeKvAdminList(raw: unknown): KvAdminEntry[] {
+  if (!raw || typeof raw !== "object") return [];
+  const entries = (raw as { entries?: unknown }).entries;
+  if (!Array.isArray(entries)) return [];
+  const out: KvAdminEntry[] = [];
+  for (const e of entries.slice(0, ADMIN_KV_MAX_ENTRIES)) {
+    if (!e || typeof e !== "object") continue;
+    const r = e as Record<string, unknown>;
+    if (typeof r.id !== "string" || !/^[a-f0-9]{8,32}$/.test(r.id)) continue;
+    if (typeof r.digest !== "string" || !/^[a-f0-9]{64}$/.test(r.digest)) continue;
+    out.push({
+      id: r.id,
+      digest: r.digest,
+      peppered: r.peppered === true,
+      masked: typeof r.masked === "string" ? r.masked.slice(0, 16) : "…",
+      label: typeof r.label === "string" ? r.label.slice(0, 60) : "",
+      addedByMasked: typeof r.addedByMasked === "string" ? r.addedByMasked.slice(0, 16) : "",
+      addedAt: typeof r.addedAt === "string" ? r.addedAt.slice(0, 40) : "",
+    });
+  }
+  return out;
+}
+
+// Per-request cache of the KV admin list (keyed by the Request object).
+const kvAdminRequestCache = new WeakMap<object, Promise<KvAdminEntry[]>>();
+
+/** Read the UI-managed admin list. Fails closed (empty) on any error. */
+export async function loadKvAdmins(
+  env: AuthEnv,
+  request?: Request,
+): Promise<KvAdminEntry[]> {
+  if (!env.BILLING_KV) return [];
+  if (request) {
+    const hit = kvAdminRequestCache.get(request);
+    if (hit) return hit;
+  }
+  const p = (async () => {
+    try {
+      const raw = await env.BILLING_KV!.get(ADMIN_KV_LIST_KEY);
+      if (!raw) return [];
+      return sanitizeKvAdminList(JSON.parse(raw));
+    } catch {
+      return [];
+    }
+  })();
+  if (request) kvAdminRequestCache.set(request, p);
+  return p;
+}
+
+/** Drop the per-request cache after a write in the same request. */
+export function forgetKvAdminCache(request: Request): void {
+  kvAdminRequestCache.delete(request);
+}
+
+export async function saveKvAdmins(env: AuthEnv, entries: KvAdminEntry[]): Promise<void> {
+  if (!env.BILLING_KV) throw new Error("kv_missing");
+  const list: KvAdminList = { v: 1, entries: entries.slice(0, ADMIN_KV_MAX_ENTRIES) };
+  await env.BILLING_KV.put(ADMIN_KV_LIST_KEY, JSON.stringify(list));
+}
+
+/** The KV entry matching this fingerprint, if any (digest compare). */
+export function findKvAdmin(
+  fingerprint: string,
+  entries: readonly KvAdminEntry[],
+  env: AuthEnv,
+): KvAdminEntry | null {
+  if (!entries.length) return null;
+  const plain = kvAdminDigest(fingerprint, env, false);
+  const peppered = kvAdminPepperAvailable(env) ? kvAdminDigest(fingerprint, env, true) : null;
+  for (const e of entries) {
+    const want = e.peppered ? peppered : plain;
+    if (want && want === e.digest) return e;
+  }
+  return null;
+}
+
+/** Bootstrap fingerprint OR a UI-managed (KV) admin fingerprint. */
+export async function isAllowlistedAdminFingerprintWithKv(
+  fingerprint: string,
+  env: AuthEnv,
+  request?: Request,
+): Promise<boolean> {
+  if (isAllowlistedAdminFingerprint(fingerprint, env)) return true;
+  if (!normalizeFingerprint(fingerprint || "")) return false;
+  return Boolean(findKvAdmin(fingerprint, await loadKvAdmins(env, request), env));
+}
+
+/** Admin session check: bootstrap admins plus UI-managed (KV) admins. */
+export async function isAdminUserWithKv(
+  user: UserRecord,
+  env: AuthEnv,
+  request?: Request,
+): Promise<boolean> {
+  if (isAdminUser(user, env)) return true;
+  return isAllowlistedAdminFingerprintWithKv(user.fingerprint, env, request);
+}
+
+async function adminFlags(user: UserRecord, env: AuthEnv, request?: Request) {
   const fps = parseFingerprintAllowlist(adminFingerprintAllowlist(env));
   const ids = parseCsvList(env.ADMIN_USER_IDS);
+  const kv = await loadKvAdmins(env, request);
   return {
-    isAdmin: isAdminUser(user, env),
+    isAdmin: await isAdminUserWithKv(user, env, request),
     /** Retired. Clients must not send a shared admin action secret. */
     adminActionSecretRequired: false,
     /** True if server has any admin allowlist configured (does not leak entries). */
-    adminAllowlistConfigured: fps.length > 0 || ids.length > 0,
+    adminAllowlistConfigured: fps.length > 0 || ids.length > 0 || kv.length > 0,
   };
 }
 
@@ -573,7 +746,7 @@ function toPublicUser(user: UserRecord): PublicUser {
   };
 }
 
-async function parseAndValidatePublicKey(armored: string): Promise<{
+export async function parseAndValidatePublicKey(armored: string): Promise<{
   fingerprint: string;
   publicKeyArmored: string;
   primaryUserId: string | null;
@@ -777,7 +950,7 @@ export async function issueLoginSession(
     sessionId,
     {
       user: toPublicUser(user),
-      ...adminFlags(user, env),
+      ...(await adminFlags(user, env, request)),
       ...accessFlags(env),
       message,
     },
@@ -1067,7 +1240,7 @@ export async function registerUser(
     sessionId,
     {
       user: toPublicUser(user),
-      ...adminFlags(user, env),
+      ...(await adminFlags(user, env, request)),
       ...accessFlags(env),
       message:
         "Public key registered. Keep the private key on your device for future sign-in (never upload it).",
@@ -1466,7 +1639,7 @@ export async function loginUser(
     sessionId,
     {
       user: toPublicUser(user),
-      ...adminFlags(user, env),
+      ...(await adminFlags(user, env, request)),
       ...accessFlags(env),
       message: "Logged in. Session token issued (not a private key).",
     },
@@ -1569,7 +1742,7 @@ export async function adoptSessionToken(
     session.sessionId,
     {
       user: toPublicUser(session.user),
-      ...adminFlags(session.user, env),
+      ...(await adminFlags(session.user, env, request)),
       ...accessFlags(env),
       message: "Session adopted into cookie.",
     },
@@ -1651,7 +1824,7 @@ export async function getMe(
     {
       authenticated: true,
       user: toPublicUser(session.user),
-      ...adminFlags(session.user, env),
+      ...(await adminFlags(session.user, env, request)),
       ...accessFlags(env),
     },
     { status: 200 },

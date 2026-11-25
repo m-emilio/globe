@@ -89,9 +89,14 @@ await step("me unauth", async () => {
 
 await step("anti-enumeration", async () => {
   const u = await api("/api/auth/challenge", { method: "POST", body: JSON.stringify({ fingerprint: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }) });
-  const k = await api("/api/auth/challenge", { method: "POST", body: JSON.stringify({ fingerprint: "a7a4ff41149c42ca8d3cc6ef5ec82c2ece415f48" }) });
+  // Optional: SMOKE_KNOWN_FINGERPRINT=<registered fingerprint> to compare a known key.
+  // No real fingerprint is kept in the repo; without it this half is skipped.
+  const knownFp = (process.env.SMOKE_KNOWN_FINGERPRINT || "").replace(/[\s:]/g, "").toLowerCase();
+  const k = knownFp
+    ? await api("/api/auth/challenge", { method: "POST", body: JSON.stringify({ fingerprint: knownFp }) })
+    : null;
   ok(u.status === 200 && u.json.challengeId, "unknown → 200 + challenge");
-  ok(k.status === 200 && k.json.challengeId, "known → 200 + challenge");
+  if (k) ok(k.status === 200 && k.json.challengeId, "known → 200 + challenge");
   ok(!String(u.json.error || "").includes("unknown_identity"), "no unknown_identity");
 });
 

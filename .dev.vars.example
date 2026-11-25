@@ -24,6 +24,11 @@ STRIPE_MIN_AMOUNT_CENTS=2000
 # Paste your fingerprint from the signed-in menu (no spaces) after first login.
 ADMIN_FINGERPRINTS=
 # Or: ADMIN_USER_IDS=your_user_id_hex
+# Production: keep fingerprints in Worker secrets, not vars or git.
+# All three lists are merged (comma-separated fingerprints, no spaces):
+#   npx wrangler secret put ADMIN_FINGERPRINT_SECRET --name globe
+#   npx wrangler secret put ADMIN_FINGERPRINTS_EXTRA --name globe   # additional admins
+# ADMIN_FINGERPRINTS_EXTRA=
 # Optional second factor for grant/revoke/claim:
 # ADMIN_ACTION_SECRET=long-random-string
 

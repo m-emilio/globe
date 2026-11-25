@@ -864,6 +864,38 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
                 {isAdmin ? "Admin" : "Admin (locked)"}
               </button>
             ) : null}
+            {authUser && isAdmin ? (
+              // UI hint only: /api/admin/admins is gated server-side
+              // (admin session + device-key elevation + allowlisted key).
+              <button
+                type="button"
+                className="menu-item menu-item-button admin-menu-item manage-admins-menu-item"
+                onClick={() => {
+                  void Promise.resolve(openAdminPanel()).then(() => {
+                    window.setTimeout(() => {
+                      document
+                        .getElementById("admin-manage-admins")
+                        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }, 200);
+                  });
+                }}
+                title="Add or remove admins (admins only)"
+              >
+                Manage admins
+              </button>
+            ) : null}
+            {authUser && isAdmin ? (
+              // UI hint only: /admin/purple-team is gated server-side.
+              <a
+                href="/admin/purple-team"
+                className="menu-item admin-menu-item purple-team-menu-item"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Purple team recon console (admins only)"
+              >
+                Purple Team Recon
+              </a>
+            ) : null}
             <a
               href="https://104041.webmail.dynadot.com/user/signin.html"
               className="menu-item"

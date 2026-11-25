@@ -32,6 +32,12 @@ import {
   adminListLoginAttempts,
   adminListUsers,
   adminLookupUser,
+  adminPurpleTeamAdvisories,
+  adminPurpleTeamCt,
+  adminListAdmins,
+  adminAddAdmin,
+  adminRemoveAdmin,
+  adminPurpleTeamPage,
   adminRevokeTransit,
   adminRevokeUnlimitedKeys,
   adminStatus,
@@ -1587,6 +1593,7 @@ function collectWorkerSecrets(env: Env): string[] {
   const extra = env as Env & {
     LOG_HASH_PEPPER?: string;
     ADMIN_FINGERPRINT_SECRET?: string;
+    ADMIN_FINGERPRINTS_EXTRA?: string;
   };
   const candidates = [
     env.COMTRADE_SUBSCRIPTION_KEY,
@@ -1595,6 +1602,7 @@ function collectWorkerSecrets(env: Env): string[] {
     env.ADMIN_ACTION_SECRET,
     env.ADMIN_FINGERPRINTS,
     extra.ADMIN_FINGERPRINT_SECRET,
+    extra.ADMIN_FINGERPRINTS_EXTRA,
     extra.LOG_HASH_PEPPER,
     env.TRANSIT_PUBLICAPI_V4,
   ];
@@ -4814,11 +4822,74 @@ export default {
         await adminListUsers(request, env, applySecurityHeaders),
       );
     }
+    // UI-managed admins (BILLING_KV). Full mutation gate on every method.
+    if (url.pathname === "/api/admin/admins") {
+      if (request.method === "POST") {
+        return adminAddAdmin(request, env, applySecurityHeaders);
+      }
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminListAdmins(request, env, applySecurityHeaders),
+      );
+    }
+    if (url.pathname.startsWith("/api/admin/admins/")) {
+      if (request.method !== "DELETE") {
+        return methodNotAllowedResponse();
+      }
+      const adminEntryId = url.pathname.slice("/api/admin/admins/".length);
+      return adminRemoveAdmin(request, env, adminEntryId, applySecurityHeaders);
+    }
     if (url.pathname === "/api/admin/delete-user") {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
       return adminDeleteUser(request, env, applySecurityHeaders);
+    }
+
+    if (
+      url.pathname === "/admin/purple-team/osv" ||
+      url.pathname === "/admin/purple-team/vulnerabilities" ||
+      url.pathname === "/admin/purple-team/assessment" ||
+      url.pathname === "/admin/purple-team/dependency-audit"
+    ) {
+      const acceptsPost = url.pathname === "/admin/purple-team/assessment" ||
+        url.pathname === "/admin/purple-team/dependency-audit";
+      if (!isReadApiMethod(request) && !(acceptsPost && request.method === "POST")) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminPurpleTeamAdvisories(request, env, applySecurityHeaders),
+      );
+    }
+
+    // Admin-only CT subdomain lookup used by the recon page (fallback proxy).
+    if (url.pathname === "/admin/purple-team/ct") {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminPurpleTeamCt(request, env, applySecurityHeaders),
+      );
+    }
+
+    // Admin-only Purple Team Recon console (HTML page, not JSON).
+    // Same session + fingerprint allowlist gates as the admin API.
+    if (
+      url.pathname === "/admin/purple-team" ||
+      url.pathname === "/admin/purple-team/"
+    ) {
+      if (!isReadApiMethod(request)) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminPurpleTeamPage(request, env, applySecurityHeaders),
+      );
     }
 
     // --- Stripe Payment Link + webhook entitlement ---

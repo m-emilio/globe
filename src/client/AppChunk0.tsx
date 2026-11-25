@@ -7,6 +7,7 @@ import { SiteTour } from "./SiteTour";
 import { ActivityFeed, type ActivityFilter } from "./ActivityFeed";
 import { formatFingerprint, getKeyGenProfile, keyGenProfilesBySafety, SAFETY_LEVEL_META, shortFingerprint, S2K_PROTOCOLS, SYMMETRIC_CIPHERS, type AeadModeId, type KeyGenProfileId, type S2kProtocolId, type SymmetricCipherId } from "./pgpAuth";
 import { NearbyMap, TransitPanelContent } from "./lazyPanels";
+import { AdminManageAdmins } from "./AdminManageAdmins";
 import { DEFAULT_WEATHER_LOCATION, formatForecastDay, formatForecastHour } from "./globeModel";
 
 type AccessMark = "stripe" | "admin" | "unrecorded" | null;
@@ -790,6 +791,17 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
                     </button>
                   </div>
                 )}
+
+                <AdminManageAdmins
+                  adminElevationValid={adminElevationValid}
+                  adminBusy={adminBusy}
+                  unlockAdminPrivileges={unlockAdminPrivileges}
+                  onSelfRemoved={() => {
+                    clearAdminElevation();
+                    setShowAdminPanel(false);
+                    window.location.reload();
+                  }}
+                />
 
                 <div className="auth-section-title">All users</div>
                 <p className="auth-modal-copy">
