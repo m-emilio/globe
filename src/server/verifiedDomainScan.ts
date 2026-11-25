@@ -47,13 +47,13 @@ async function certificate(domain: string): Promise<WebFinding> {
     const nearExpiry = expiry - Date.now() < 30 * 86_400_000;
     return {
       id, check, status: nearExpiry ? "review" : "unknown",
-      evidence: "Latest expiry among matching records returned by Cert Spotter: " +
-        new Date(expiry).toISOString() + ". The certificate served by the endpoint was not identified.",
-      remediation: "Confirm the served certificate's expiry with your TLS endpoint monitor and renew before expiry.",
+      evidence: "Latest published expiry in matching Certificate Transparency records from Cert Spotter: " +
+        new Date(expiry).toISOString() + ".",
+      remediation: "Verify the active certificate's expiry and renew it as needed.",
     };
   } catch {
     return { id, check, status: "unknown", evidence: "No matching expiry was available from Cert Spotter.",
-      remediation: "Check the certificate served by the endpoint using your TLS endpoint monitor." };
+      remediation: "Check the expiry of the certificate served by the endpoint." };
   }
 }
 
