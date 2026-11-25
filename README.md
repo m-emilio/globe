@@ -101,7 +101,7 @@ Admins are OpenPGP keys whose fingerprint is on the server allowlist. The Worker
 npx wrangler secret put ADMIN_FINGERPRINTS_EXTRA --name globe
 ```
 
-Each admin must sign in once with their device key (Sign in → Continue with device key) so the site registers that key. Admins also get **Menu → Purple Team Recon** (`/admin/purple-team`), an admin-only recon console gated server-side by the same session + fingerprint checks.
+Each admin must sign in once with their device key (Sign in → Continue with device key) so the site registers that key. Admins can open **Menu → Purple Team** to test the Worker’s access controls or inspect a website’s public home page. The console requires an admin session and allowlisted device fingerprint. Set the Worker’s `VERIFIED_SCAN_DOMAINS` variable to comma-separated, exact public hostnames whose control or testing authorization you have verified. The Recon tab opens the domain and certificate lookups.
 
 ### Optional Stripe (hardened, not required)
 

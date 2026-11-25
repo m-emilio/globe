@@ -55,6 +55,7 @@ import {
 } from "./pqcVerify";
 import { AUTH_BAN_SECONDS, AUTH_FAIL_LIMIT, AUTH_FAIL_WINDOW_SECONDS } from "./authBan";
 import { listLoginAttempts, readLoginChainTip } from "./loginLog";
+import { BodyLimitError, readBoundedText } from "./boundedBody";
 import {
   assessmentPage,
   dependencyAuditPage,
@@ -62,6 +63,8 @@ import {
   packageAdvisoriesPage,
 } from "./purpleTeamAdvisories";
 import { PURPLE_TEAM_CSP, PURPLE_TEAM_HTML } from "./purpleTeamHtml";
+import { purpleTeamToolsPage, runAdminControlChecks, type ToolResult } from "./purpleTeamTools";
+import { scannerDomains, scanVerifiedDomain } from "./verifiedDomainScan";
 import {
   PQC_LOG_ALG,
   PQC_LOG_BYTES,
@@ -81,6 +84,7 @@ export type AdminEnv = AuthEnv &
   BillingEnv & {
     ADMIN_FINGERPRINTS?: string;
     ADMIN_USER_IDS?: string;
+    VERIFIED_SCAN_DOMAINS?: string;
     /** Legacy binding. This module does not compare it. */
     ADMIN_ACTION_SECRET?: string;
   };
@@ -517,27 +521,86 @@ async function rejectUnlessAllowlistedFingerprint(
   );
 }
 
+async function requirePurpleTeamSession(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+) {
+  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate;
+  const denied = await rejectUnlessAllowlistedFingerprint(request, env, gate.user, applySecurityHeaders);
+  return denied ? { ok: false as const, response: denied } : gate;
+}
+
+export async function adminPurpleTeamTools(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders: SecurityHeadersFn,
+  dispatch: (request: Request) => Promise<Response>,
+): Promise<Response> {
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+
+  const domains = scannerDomains(env.VERIFIED_SCAN_DOMAINS);
+  if (request.method !== "POST") return purpleTeamToolsPage(domains, undefined, applySecurityHeaders);
+
+  if (request.headers.get("origin") !== new URL(request.url).origin) {
+    return json({ error: "same_origin_required" }, { status: 403 }, applySecurityHeaders);
+  }
+  if (!/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(request.headers.get("content-type") ?? "")) {
+    return json({ error: "form_required" }, { status: 415 }, applySecurityHeaders);
+  }
+
+  let fields: URLSearchParams;
+  try {
+    fields = new URLSearchParams(await readBoundedText(request.body, 2048));
+  } catch (error) {
+    const tooLarge = error instanceof BodyLimitError;
+    return json({ error: tooLarge ? "body_too_large" : "invalid_form" }, { status: tooLarge ? 413 : 400 }, applySecurityHeaders);
+  }
+
+  const tool = fields.get("tool");
+  const hostname = fields.get("hostname") ?? "";
+  if (tool !== "web" && tool !== "access") {
+    return json({ error: "invalid_tool" }, { status: 400 }, applySecurityHeaders);
+  }
+  if (tool === "web" && !domains.includes(hostname)) {
+    return json({ error: "domain_not_verified" }, { status: 403 }, applySecurityHeaders);
+  }
+
+  const limited = await rateLimitDurable(
+    env, "purple:tools:" + tool + ":" + gate.user.id, tool === "web" ? 5 : 2, 60_000, applySecurityHeaders,
+  );
+  if (limited) return limited;
+  const result: ToolResult = tool === "web"
+    ? { tool, hostname, findings: await scanVerifiedDomain(hostname) }
+    : { tool, findings: await runAdminControlChecks(request, dispatch) };
+  await writeAudit(env, {
+    at: new Date().toISOString(),
+    adminUserId: gate.user.id,
+    adminFingerprint: gate.user.fingerprint,
+    action: tool === "web" ? "purple_website_controls" : "purple_admin_controls",
+    detail: tool === "web" ? hostname : "console",
+    ip: clientIp(request),
+    ok: true,
+  });
+  return purpleTeamToolsPage(domains, result, applySecurityHeaders);
+}
+
 /**
- * GET /admin/purple-team — admin-only Purple Team Recon console.
+ * GET /admin/purple-team/recon — admin-only Purple Team Recon console.
  * Requires an allowlisted admin session AND an exact fingerprint allowlist
  * match. Non-admins get the same 401/403 JSON as the admin API.
  * The page sets its own CSP (it calls public recon APIs client-side) and is
  * never cached or indexed.
  */
-export async function adminPurpleTeamPage(
+export async function adminPurpleTeamReconPage(
   request: Request,
   env: AdminEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
-  const fpDenied = await rejectUnlessAllowlistedFingerprint(
-    request,
-    env,
-    gate.user,
-    applySecurityHeaders,
-  );
-  if (fpDenied) return fpDenied;
 
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",
@@ -554,6 +617,7 @@ export async function adminPurpleTeamPage(
 }
 
 const PURPLE_TEAM_ADVISORY_LINKS = `
+<p><a style="color:var(--pur)" href="/admin/purple-team">Back to Purple Team tools</a></p>
 <div class="card">
   <h2>Software vulnerability intelligence <span class="tag blue">OSV</span></h2>
   <p>Check installed software versions against published security advisories.</p>
@@ -567,12 +631,8 @@ export async function adminPurpleTeamAdvisories(
   env: AdminEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
-  const fingerprintDenied = await rejectUnlessAllowlistedFingerprint(
-    request, env, gate.user, applySecurityHeaders,
-  );
-  if (fingerprintDenied) return fingerprintDenied;
 
   const url = new URL(request.url);
   if (request.method === "POST" && request.headers.get("origin") !== url.origin) {
@@ -697,15 +757,8 @@ export async function adminPurpleTeamCt(
   env: AdminEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
-  const fpDenied = await rejectUnlessAllowlistedFingerprint(
-    request,
-    env,
-    gate.user,
-    applySecurityHeaders,
-  );
-  if (fpDenied) return fpDenied;
 
   const domain = (new URL(request.url).searchParams.get("domain") || "")
     .trim()
