@@ -9,6 +9,7 @@
  */
 
 import Stripe from "stripe";
+import { BodyLimitError, readBoundedRequestText } from "./boundedBody";
 import {
   getSessionUser,
   getUserById,
@@ -19,6 +20,7 @@ import {
   stripeAccessKind,
   clientIp,
   readJsonBody,
+  bodyTooLargeResponse,
   type AuthEnv,
 } from "./auth";
 
@@ -537,13 +539,7 @@ export async function claimCheckoutSession(
       body = parsed as typeof body;
     }
   } catch (error) {
-    if (error instanceof Error && error.message === "body_too_large") {
-      return json(
-        { error: "body_too_large", message: "Request body exceeds size limit." },
-        { status: 413 },
-        applySecurityHeaders,
-      );
-    }
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
     body = {};
   }
 
@@ -682,9 +678,15 @@ export async function handleStripeWebhook(
     );
   }
 
-  const stripe = createStripeClient(secretKey);
-  const payload = await request.text();
+  let payload: string;
+  try {
+    payload = await readBoundedRequestText(request, 2 * 1024 * 1024);
+  } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
+    return json({ error: "webhook_body_unavailable" }, { status: 400 }, applySecurityHeaders);
+  }
 
+  const stripe = createStripeClient(secretKey);
   let event: Stripe.Event;
   try {
     event = await stripe.webhooks.constructEventAsync(

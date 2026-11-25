@@ -36,3 +36,30 @@ jobs:
             exit 0
           fi
           npm run deploy -- --keep-vars
+          # Wrangler 4.107 has no config field for query redaction.
+          node --input-type=module <<'JS'
+          const { CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN } = process.env;
+          const endpoint = "https://api.cloudflare.com/client/v4/accounts/" +
+            CLOUDFLARE_ACCOUNT_ID + "/workers/scripts/globe/script-settings";
+          const headers = {
+            authorization: "Bearer " + CLOUDFLARE_API_TOKEN,
+            "content-type": "application/json",
+          };
+          const getSettings = async () => {
+            const response = await fetch(endpoint, { headers, signal: AbortSignal.timeout(10_000) });
+            if (!response.ok) throw new Error("Could not read Worker settings: HTTP " + response.status);
+            const settings = (await response.json()).result?.observability;
+            if (!settings) throw new Error("Worker observability settings were missing.");
+            return settings;
+          };
+          const settings = await getSettings();
+          if (!settings.redact_query_string) {
+            const response = await fetch(endpoint, {
+              method: "PATCH", headers, signal: AbortSignal.timeout(10_000),
+              body: JSON.stringify({ observability: { ...settings, redact_query_string: true } }),
+            });
+            if (!response.ok) throw new Error("Could not redact Worker URLs: HTTP " + response.status);
+            if (!(await getSettings()).redact_query_string) throw new Error("Query redaction is inactive.");
+          }
+          console.log("Worker request log query redaction is enabled.");
+          JS

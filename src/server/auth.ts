@@ -15,6 +15,7 @@
  */
 
 import * as openpgp from "openpgp";
+import { BodyLimitError, readBoundedRequestText } from "./boundedBody";
 import { accountHash, pqcLogDigest, privilegeSeal, readLogPepper } from "./pqcLogHash";
 
 const SESSION_COOKIE = "globe_session";
@@ -490,27 +491,17 @@ export async function readJsonBody(
   request: Request,
   maxBytes = MAX_JSON_BODY_BYTES,
 ): Promise<unknown> {
-  const cl = request.headers.get("content-length");
-  if (cl) {
-    const n = Number(cl);
-    if (Number.isFinite(n) && n > maxBytes) {
-      throw new Error("body_too_large");
-    }
+  try {
+    const text = await readBoundedRequestText(request, maxBytes);
+    return text ? JSON.parse(text) as unknown : {};
+  } catch (error) {
+    // Existing auth consumers use this message when mapping the limit to HTTP 413.
+    if (error instanceof BodyLimitError) throw new BodyLimitError("body_too_large");
+    throw error;
   }
-  const buf = await request.arrayBuffer();
-  if (buf.byteLength > maxBytes) {
-    throw new Error("body_too_large");
-  }
-  if (buf.byteLength === 0) return {};
-  const text = new TextDecoder("utf-8").decode(buf);
-  // Reject obvious non-JSON / binary spam early
-  if (text.length > maxBytes) {
-    throw new Error("body_too_large");
-  }
-  return JSON.parse(text) as unknown;
 }
 
-function bodyTooLargeResponse(
+export function bodyTooLargeResponse(
   applySecurityHeaders?: SecurityHeadersFn,
 ): Response {
   return json(
@@ -959,6 +950,10 @@ export async function issueLoginSession(
   );
 }
 
+export function hasUnexpiredTimestamp(expiresAt: unknown): boolean {
+  return typeof expiresAt === "string" && Date.parse(expiresAt) > Date.now();
+}
+
 export async function getSessionUser(
   request: Request,
   env: { BILLING_KV?: { get(key: string): Promise<string | null>; delete(key: string): Promise<void> } },
@@ -977,7 +972,8 @@ export async function getSessionUser(
     return null;
   }
 
-  if (new Date(session.expiresAt).getTime() <= Date.now()) {
+  if (!session || typeof session.userId !== "string" || !session.userId ||
+      !hasUnexpiredTimestamp(session.expiresAt)) {
     await env.BILLING_KV.delete(authSessionStorageKey(sessionId));
     return null;
   }
@@ -988,7 +984,9 @@ export async function getSessionUser(
   try {
     const user = JSON.parse(userRaw) as UserRecord;
     // Guard against leftover password-era records
-    if (!user.fingerprint || !user.publicKeyArmored) return null;
+    if (!user || user.id !== session.userId ||
+        typeof user.fingerprint !== "string" || !user.fingerprint ||
+        typeof user.publicKeyArmored !== "string" || !user.publicKeyArmored) return null;
     return { user, sessionId };
   } catch {
     return null;
@@ -1525,8 +1523,8 @@ export async function loginUser(
   }
 
   if (
-    challenge.fingerprint !== fingerprint ||
-    new Date(challenge.expiresAt).getTime() <= Date.now()
+    challenge?.fingerprint !== fingerprint ||
+    !hasUnexpiredTimestamp(challenge.expiresAt)
   ) {
     return json(
       {
@@ -1700,31 +1698,14 @@ export async function adoptSessionToken(
     }
   }
 
-  // Prefer explicit body token, else cookie / header / query (adopt handoff)
-  let session: { user: UserRecord; sessionId: string } | null = null;
-  if (bodyToken) {
-    const synthetic = new Request(request.url, {
-      headers: { authorization: `Bearer ${bodyToken}` },
-    });
+  // Preserve the body-first handoff, then try the cookie, headers, or legacy URL.
+  const candidates = [bodyToken, readSessionId(request, { allowQuery: true })];
+  let session: Awaited<ReturnType<typeof getSessionUser>> = null;
+  for (const token of candidates) {
+    if (!token) continue;
+    const synthetic = new Request(request.url, { headers: { authorization: "Bearer " + token } });
     session = await getSessionUser(synthetic, env);
-  }
-  if (!session) {
-    // Query allowed only for adopt-token handoff
-    const sid = readSessionId(request, { allowQuery: true });
-    if (sid && env.BILLING_KV) {
-      const raw = await env.BILLING_KV.get(authSessionStorageKey(sid));
-      if (raw) {
-        try {
-          const rec = JSON.parse(raw) as SessionRecord;
-          if (new Date(rec.expiresAt).getTime() > Date.now()) {
-            const user = await getUserById(env, rec.userId);
-            if (user) session = { user, sessionId: sid };
-          }
-        } catch {
-          // ignore
-        }
-      }
-    }
+    if (session) break;
   }
   if (!session) {
     return json(
@@ -1759,11 +1740,12 @@ export async function logoutUser(
   let all = false;
   try {
     if (request.headers.get("content-type")?.includes("application/json")) {
-      const body = (await request.json()) as { all?: boolean };
+      const body = (await readJsonBody(request, 4_096)) as { all?: boolean };
       all = Boolean(body?.all);
     }
-  } catch {
-    // empty body ok
+  } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
+    // A body is optional for logout.
   }
 
   const current = await getSessionUser(request, env);

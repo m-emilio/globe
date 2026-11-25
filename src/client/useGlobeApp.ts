@@ -1354,6 +1354,10 @@ const isTradePulsePreview = getIsTradePulsePreview();
       // One-shot URL handoff → adopt into HttpOnly cookie, never keep token in JS storage.
       const urlToken = params.get("auth_token") || params.get("session_token");
       if (urlToken && /^[a-f0-9]{32,128}$/i.test(urlToken)) {
+        const next = new URL(window.location.href);
+        next.searchParams.delete("auth_token");
+        next.searchParams.delete("session_token");
+        window.history.replaceState(window.history.state, "", next.href);
         clearSessionToken();
         try {
           await authFetch("/api/auth/adopt-token", {
@@ -1364,10 +1368,6 @@ const isTradePulsePreview = getIsTradePulsePreview();
         } catch {
           // cookie may still work on /me
         }
-        params.delete("auth_token");
-        params.delete("session_token");
-        const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash}`;
-        window.history.replaceState({}, "", next);
         setAuthMessage(
           "Session adopted into HttpOnly cookie (not stored in the page).",
         );

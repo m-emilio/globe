@@ -21,3 +21,9 @@ export async function readBoundedText(body: ReadableStream<Uint8Array> | null, l
     reader.releaseLock();
   }
 }
+
+export async function readBoundedRequestText(request: Request, limit: number): Promise<string> {
+  const declaredBytes = Number(request.headers.get("content-length"));
+  if (declaredBytes > limit) throw new BodyLimitError("Size limit exceeded.");
+  return request.body ? readBoundedText(request.body, limit) : "";
+}
