@@ -50,7 +50,8 @@
     }
   ],
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "redact_query_string": true
   },
   "upload_source_maps": false
 }
