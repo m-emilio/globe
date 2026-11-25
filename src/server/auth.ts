@@ -425,7 +425,7 @@ export function authFingerprintStorageKey(fingerprint: string): string {
   return fingerprintKey(fingerprint);
 }
 
-function sessionKey(sessionId: string) {
+export function authSessionStorageKey(sessionId: string) {
   return `auth:session:${sessionId}`;
 }
 
@@ -853,7 +853,7 @@ async function trackUserSession(
   while (sessions.length > MAX_SESSIONS_PER_USER) {
     const drop = sessions.shift();
     if (drop) {
-      await env.BILLING_KV.delete(sessionKey(drop));
+      await env.BILLING_KV.delete(authSessionStorageKey(drop));
     }
   }
   await env.BILLING_KV.put(
@@ -896,7 +896,7 @@ async function createSession(
     createdAt: now.toISOString(),
     expiresAt: expires.toISOString(),
   };
-  await env.BILLING_KV.put(sessionKey(sessionId), JSON.stringify(record), {
+  await env.BILLING_KV.put(authSessionStorageKey(sessionId), JSON.stringify(record), {
     expirationTtl: SESSION_TTL_SECONDS,
   });
   await trackUserSession(env, userId, sessionId);
@@ -961,13 +961,13 @@ export async function issueLoginSession(
 
 export async function getSessionUser(
   request: Request,
-  env: AuthEnv,
+  env: { BILLING_KV?: { get(key: string): Promise<string | null>; delete(key: string): Promise<void> } },
 ): Promise<{ user: UserRecord; sessionId: string } | null> {
   if (!env.BILLING_KV) return null;
   const sessionId = readSessionId(request);
   if (!sessionId) return null;
 
-  const raw = await env.BILLING_KV.get(sessionKey(sessionId));
+  const raw = await env.BILLING_KV.get(authSessionStorageKey(sessionId));
   if (!raw) return null;
 
   let session: SessionRecord;
@@ -978,7 +978,7 @@ export async function getSessionUser(
   }
 
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
-    await env.BILLING_KV.delete(sessionKey(sessionId));
+    await env.BILLING_KV.delete(authSessionStorageKey(sessionId));
     return null;
   }
 
@@ -1712,7 +1712,7 @@ export async function adoptSessionToken(
     // Query allowed only for adopt-token handoff
     const sid = readSessionId(request, { allowQuery: true });
     if (sid && env.BILLING_KV) {
-      const raw = await env.BILLING_KV.get(sessionKey(sid));
+      const raw = await env.BILLING_KV.get(authSessionStorageKey(sid));
       if (raw) {
         try {
           const rec = JSON.parse(raw) as SessionRecord;
@@ -1771,19 +1771,19 @@ export async function logoutUser(
     if (all) {
       const sessions = await listUserSessions(env, current.user.id);
       for (const sid of sessions) {
-        await env.BILLING_KV.delete(sessionKey(sid));
+        await env.BILLING_KV.delete(authSessionStorageKey(sid));
       }
       await env.BILLING_KV.delete(userSessionsKey(current.user.id));
       // Also drop current if not in list
-      await env.BILLING_KV.delete(sessionKey(current.sessionId));
+      await env.BILLING_KV.delete(authSessionStorageKey(current.sessionId));
     } else {
-      await env.BILLING_KV.delete(sessionKey(current.sessionId));
+      await env.BILLING_KV.delete(authSessionStorageKey(current.sessionId));
       await untrackUserSession(env, current.user.id, current.sessionId);
     }
   } else {
     const sessionId = readSessionId(request);
     if (sessionId && env.BILLING_KV) {
-      await env.BILLING_KV.delete(sessionKey(sessionId));
+      await env.BILLING_KV.delete(authSessionStorageKey(sessionId));
     }
   }
 
@@ -1937,7 +1937,7 @@ export async function deleteUserAccount(
   const allSessions = [...new Set([...sessions, ...sessionsAlt])];
   for (const sid of allSessions) {
     if (/^[a-f0-9]{32,128}$/i.test(sid)) {
-      await env.BILLING_KV.delete(sessionKey(sid));
+      await env.BILLING_KV.delete(authSessionStorageKey(sid));
     }
   }
   await env.BILLING_KV.delete(userSessionsKey(storedId));

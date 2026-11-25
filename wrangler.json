@@ -8,6 +8,13 @@
         "Globe"
       ],
       "tag": "v1"
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "PurpleTeamHost",
+        "PurpleTeamDirectory"
+      ]
     }
   ],
   "assets": {
@@ -24,6 +31,14 @@
       {
         "class_name": "Globe",
         "name": "Globe"
+      },
+      {
+        "name": "PURPLE_TEAM_HOSTS",
+        "class_name": "PurpleTeamHost"
+      },
+      {
+        "name": "PURPLE_TEAM_DIRECTORY",
+        "class_name": "PurpleTeamDirectory"
       }
     ]
   },

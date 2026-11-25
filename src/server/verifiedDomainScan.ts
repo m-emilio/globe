@@ -1,6 +1,5 @@
 import { BodyLimitError, readBoundedText } from "./boundedBody";
 
-const DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 const BODY_LIMIT = 256 * 1024;
 const TIMEOUT = 5000;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
@@ -12,21 +11,20 @@ export type ToolFinding = {
   remediation?: string;
 };
 
-export function scannerDomains(config?: string): string[] {
-  return [...new Set((config ?? "").split(",").map((host) => host.trim().toLowerCase().replace(/\.$/, "")))]
-    .filter((host) => DOMAIN.test(host) && !/\.(?:localhost|local|internal|test|invalid|example|onion|arpa)$/.test(host));
-}
+export type WebFinding = ToolFinding & { id: string };
 
 function request(url: string) {
   return fetch(url, {
     redirect: "manual",
+    cache: "no-store",
     signal: AbortSignal.timeout(TIMEOUT),
     headers: { accept: "text/html, application/json;q=0.9" },
   });
 }
 
-async function certificate(domain: string): Promise<ToolFinding> {
-  const check = "Certificate transparency expiry";
+async function certificate(domain: string): Promise<WebFinding> {
+  const check = "Certificate Transparency expiry";
+  const id = "tls.ct-expiry";
   try {
     const url = new URL("https://api.certspotter.com/v1/issuances");
     url.searchParams.set("domain", domain);
@@ -48,19 +46,20 @@ async function certificate(domain: string): Promise<ToolFinding> {
     const expiry = Math.max(...dates);
     const nearExpiry = expiry - Date.now() < 30 * 86_400_000;
     return {
-      check, status: nearExpiry ? "review" : "unknown",
+      id, check, status: nearExpiry ? "review" : "unknown",
       evidence: "Latest expiry among matching records returned by Cert Spotter: " +
         new Date(expiry).toISOString() + ". The certificate served by the endpoint was not identified.",
       remediation: "Confirm the served certificate's expiry with your TLS endpoint monitor and renew before expiry.",
     };
   } catch {
-    return { check, status: "unknown", evidence: "No matching expiry was available from Cert Spotter.",
+    return { id, check, status: "unknown", evidence: "No matching expiry was available from Cert Spotter.",
       remediation: "Check the certificate served by the endpoint using your TLS endpoint monitor." };
   }
 }
 
-async function redirect(domain: string): Promise<ToolFinding> {
+async function redirect(domain: string): Promise<WebFinding> {
   const check = "HTTP to HTTPS redirect";
+  const id = "http.redirect";
   try {
     const origin = "http://" + domain;
     const response = await request(origin + "/");
@@ -69,30 +68,43 @@ async function redirect(domain: string): Promise<ToolFinding> {
     const target = location && new URL(location, origin);
     const redirects = REDIRECTS.has(response.status);
     const ok = Boolean(redirects && target && target.origin === "https://" + domain && !target.username && !target.password);
-    const destination = redirects && target && target.origin !== "null" ? " redirects to " + target.origin : "";
-    return { check, status: ok ? "pass" : "review",
+    const destination = redirects && target && target.origin !== "null"
+      ? " redirects to " + (target.origin + target.pathname).slice(0, 300) : "";
+    return { id, check, status: ok ? "pass" : "review",
       evidence: "HTTP " + response.status + destination + ".",
       remediation: ok ? undefined : "Redirect HTTP requests to HTTPS on the same verified hostname." };
   } catch {
-    return { check, status: "unknown", evidence: "HTTP request or redirect parsing failed.",
+    return { id, check, status: "unknown", evidence: "HTTP request or redirect parsing failed.",
       remediation: "Confirm that port 80 returns a redirect to the HTTPS site." };
   }
 }
 
-async function httpsChecks(domain: string): Promise<ToolFinding[]> {
+async function httpsChecks(domain: string): Promise<WebFinding[]> {
+  const check = "HTTPS response";
+  const id = "https.response";
+  const origin = "https://" + domain;
   let response: Response;
   try {
-    response = await request("https://" + domain + "/");
+    response = await request(origin + "/");
   } catch {
-    return [{ check: "HTTPS response", status: "unknown", evidence: "HTTPS request failed or timed out.",
+    return [{ id, check, status: "unknown", evidence: "HTTPS request failed or timed out.",
       remediation: "Check public DNS, HTTPS availability, and the endpoint certificate." }];
   }
 
-  const findings: ToolFinding[] = [{
-    check: "HTTPS response", status: response.ok ? "pass" : "review",
-    evidence: "HTTPS returned HTTP " + response.status + ".",
-    remediation: response.ok ? undefined : "Inspect the root response and scan the destination separately if it is verified.",
-  }];
+  let evidence = "HTTPS returned HTTP " + response.status + ".";
+  const location = response.headers.get("location");
+  if (REDIRECTS.has(response.status) && location) {
+    try {
+      const target = new URL(location, origin);
+      if (target.origin !== "null") evidence += " Redirect to " + (target.origin + target.pathname).slice(0, 300) + ".";
+    } catch { /* malformed Location header */ }
+  }
+  if (!response.ok) {
+    await response.body?.cancel();
+    return [{ id, check, status: response.status >= 500 ? "unknown" : "review", evidence,
+      remediation: "Inspect the root response and verify that the destination is reachable." }];
+  }
+  const findings: WebFinding[] = [{ id, check, status: "pass", evidence }];
   const hsts = response.headers.get("strict-transport-security");
   const csp = response.headers.get("content-security-policy");
   const frame = response.headers.get("x-frame-options");
@@ -101,42 +113,45 @@ async function httpsChecks(domain: string): Promise<ToolFinding[]> {
     ? !/\*/.test(ancestors) && !ancestors.split(/\s+/).some((source) => /^[a-z][a-z0-9+.-]*:$/i.test(source))
     : /^(deny|sameorigin)$/i.test(frame?.trim() ?? "");
   const headers = [
-    ["Strict-Transport-Security", hsts, Number(hsts?.match(/(?:^|;)\s*max-age\s*=\s*(\d+)\s*(?:;|$)/i)?.[1]) > 0,
+    ["headers.hsts", "Strict-Transport-Security", hsts, Number(hsts?.match(/(?:^|;)\s*max-age\s*=\s*(\d+)\s*(?:;|$)/i)?.[1]) > 0,
       "Set Strict-Transport-Security with a positive max-age after confirming HTTPS coverage."],
-    ["Content-Security-Policy", csp, Boolean(csp?.trim()),
+    ["headers.csp", "Content-Security-Policy", csp, Boolean(csp?.trim()),
       "Deploy an enforcing Content-Security-Policy appropriate for the application."],
-    ["X-Content-Type-Options", response.headers.get("x-content-type-options"),
+    ["headers.nosniff", "X-Content-Type-Options", response.headers.get("x-content-type-options"),
       response.headers.get("x-content-type-options")?.trim().toLowerCase() === "nosniff", "Set X-Content-Type-Options to nosniff."],
-    ["Framing restrictions", ancestors ? "frame-ancestors " + ancestors : frame, restrictsFraming,
+    ["headers.framing", "Framing restrictions", ancestors ? "frame-ancestors " + ancestors : frame, restrictsFraming,
       "Set CSP frame-ancestors to the required origins, or use 'none' if embedding is unnecessary."],
-    ["Referrer-Policy", response.headers.get("referrer-policy"), Boolean(response.headers.get("referrer-policy")?.trim()),
+    ["headers.referrer", "Referrer-Policy", response.headers.get("referrer-policy"), Boolean(response.headers.get("referrer-policy")?.trim()),
       "Set a suitable Referrer-Policy, such as strict-origin-when-cross-origin."],
   ] as const;
-  for (const [check, value, ok, remediation] of headers) {
-    findings.push({ check, status: ok ? "pass" : "review",
+  for (const [id, check, value, ok, remediation] of headers) {
+    findings.push({ id, check, status: ok ? "pass" : "review",
       evidence: value?.slice(0, 300) || "Header not observed.", remediation: ok ? undefined : remediation });
   }
 
   const cookies = response.headers.getSetCookie();
-  if (!cookies.length) {
-    findings.push({ check: "Cookie flags", status: "unknown", evidence: "Root response set no cookies. Authenticated flows were not inspected." });
+  const cookieIssues: string[] = [];
+  for (const cookie of cookies.slice(0, 30)) {
+    const [assignment, ...flags] = cookie.split(";");
+    const rawName = assignment.slice(0, Math.max(0, assignment.indexOf("="))).trim();
+    const name = /^[a-z0-9_!#$%&'*+.^|-]{1,80}$/i.test(rawName) ? rawName : "A cookie";
+    const attributes = flags.map((flag) => flag.trim().toLowerCase());
+    const missing = ["secure", "httponly"].filter((flag) => !attributes.includes(flag));
+    if (!attributes.some((flag) => /^samesite\s*=\s*(strict|lax|none)$/.test(flag))) missing.push("samesite");
+    if (missing.length) cookieIssues.push(name + " is missing " + missing.join(", "));
   }
-  for (const [index, cookie] of cookies.slice(0, 30).entries()) {
-    const attributes = cookie.split(";").slice(1).map((part) => part.trim().toLowerCase());
-    const missing = [
-      attributes.includes("secure") ? "" : "Secure",
-      attributes.includes("httponly") ? "" : "HttpOnly",
-      attributes.some((part) => /^samesite\s*=\s*(strict|lax|none)$/.test(part)) ? "" : "SameSite",
-    ].filter(Boolean);
-    findings.push({ check: "Cookie " + (index + 1),
-      status: missing.length ? "review" : "pass",
-      evidence: missing.length ? "Missing flags: " + missing.join(", ") : "Secure, HttpOnly, and SameSite observed.",
-      remediation: missing.length ? "Use Secure and HttpOnly for session cookies and choose a SameSite value that fits the workflow." : undefined });
-  }
-  if (cookies.length > 30) findings.push({ check: "Cookie coverage", status: "unknown", evidence: "Only the first 30 cookies were reviewed." });
+  findings.push({
+    id: "cookies.flags", check: "Cookie flags",
+    status: cookieIssues.length ? "review" : cookies.length === 0 || cookies.length > 30 ? "unknown" : "pass",
+    evidence: cookieIssues.length ? cookieIssues.join(". ").slice(0, 2000) + "."
+      : cookies.length === 0 ? "The root response set no cookies."
+      : cookies.length > 30 ? "Only the first 30 cookies were reviewed."
+      : "Secure, HttpOnly, and SameSite observed on " + cookies.length + " cookie(s).",
+    remediation: cookieIssues.length ? "Use Secure and HttpOnly for session cookies and set an appropriate SameSite value." : undefined,
+  });
 
   try {
-    if (!response.ok || !/^text\/html(?:;|$)/i.test(response.headers.get("content-type") ?? "")) {
+    if (!/^text\/html(?:;|$)/i.test(response.headers.get("content-type") ?? "")) {
       await response.body?.cancel();
       throw new Error();
     }
@@ -174,12 +189,12 @@ async function httpsChecks(domain: string): Promise<ToolFinding[]> {
         if (target.protocol === "http:") insecure.add(target.origin);
       } catch { /* malformed resource URL */ }
     }
-    findings.push({ check: "Mixed content", status: insecure.size ? "review" : "pass",
+    findings.push({ id: "html.mixed-content", check: "Mixed content", status: insecure.size ? "review" : "pass",
       evidence: insecure.size ? "HTTP resource origins: " + [...insecure].slice(0, 10).join(", ")
         : "No HTTP resource URLs in the inspected HTML attributes.",
       remediation: insecure.size ? "Serve those resources over HTTPS and replace the HTTP URLs." : undefined });
   } catch (error) {
-    findings.push({ check: "Mixed content", status: "unknown",
+    findings.push({ id: "html.mixed-content", check: "Mixed content", status: "unknown",
       evidence: error instanceof BodyLimitError ? "The root HTML exceeded the 256 KiB inspection limit."
         : "The root response did not provide inspectable HTML." });
   }

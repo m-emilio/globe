@@ -4,6 +4,8 @@
 declare namespace Cloudflare {
 	interface Env {
 		Globe: DurableObjectNamespace<import("./index").Globe>;
+		PURPLE_TEAM_HOSTS: DurableObjectNamespace<import("./index").PurpleTeamHost>;
+		PURPLE_TEAM_DIRECTORY: DurableObjectNamespace<import("./index").PurpleTeamDirectory>;
 		/** Transit App Public API v4 key (GitHub secret: TRANSIT_PUBLICAPI_V4) */
 		TRANSIT_PUBLICAPI_V4?: string;
 		/** When "1"/"true", transit also requires user.transitPaid (Stripe). Default: login only. */

@@ -43,6 +43,7 @@ import {
   adminRevokeUnlimitedKeys,
   adminStatus,
 } from "./admin";
+import { CANARY_PATH, purpleTeamDirectory } from "./purpleTeamDirectory";
 import {
   claimCheckoutSession,
   ensureBillingCatalog,
@@ -4392,6 +4393,10 @@ const UN_WEBTV_PLAYER_CSP = [
   "form-action 'none'",
 ].join("; ");
 
+
+export { PurpleTeamHost } from "./purpleTeamHost";
+export { PurpleTeamDirectory } from "./purpleTeamDirectory";
+
 const worker = {
   async fetch(
     request: Request,
@@ -4399,6 +4404,16 @@ const worker = {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname.startsWith(CANARY_PATH)) {
+      const id = url.pathname.slice(CANARY_PATH.length);
+      if (request.method === "GET" && /^[a-f0-9-]{36}$/.test(id)) {
+        const limited = rateLimitOrNull("purple:canary:" + clientIpFromRequest(request), 10, 60_000, applySecurityHeaders);
+        if (limited) return limited;
+        await purpleTeamDirectory(env).hitCanary(id);
+      }
+      return new Response("Not Found", { status: 404, headers: { "cache-control": "no-store" } });
+    }
 
     // First-party UN Web TV 24h player (free Live Feed embed).
     // Served from Worker so we control CSP/XFO (static /* DENY would block framing).
