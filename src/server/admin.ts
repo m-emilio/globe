@@ -55,6 +55,12 @@ import {
 } from "./pqcVerify";
 import { AUTH_BAN_SECONDS, AUTH_FAIL_LIMIT, AUTH_FAIL_WINDOW_SECONDS } from "./authBan";
 import { listLoginAttempts, readLoginChainTip } from "./loginLog";
+import {
+  assessmentPage,
+  dependencyAuditPage,
+  lookupPackageAdvisories,
+  packageAdvisoriesPage,
+} from "./purpleTeamAdvisories";
 import { PURPLE_TEAM_CSP, PURPLE_TEAM_HTML } from "./purpleTeamHtml";
 import {
   PQC_LOG_ALG,
@@ -543,7 +549,60 @@ export async function adminPurpleTeamPage(
   });
   // Fills the remaining site security headers without overriding the CSP above.
   applySecurityHeaders?.(headers);
-  return new Response(PURPLE_TEAM_HTML, { status: 200, headers });
+  const html = PURPLE_TEAM_HTML.replace('<div class="wrap">', '<div class="wrap">' + PURPLE_TEAM_ADVISORY_LINKS);
+  return new Response(html, { status: 200, headers });
+}
+
+const PURPLE_TEAM_ADVISORY_LINKS = `
+<div class="card">
+  <h2>Software vulnerability intelligence <span class="tag blue">OSV</span></h2>
+  <p>Check installed software versions against published security advisories.</p>
+  <a style="color:var(--pur)" href="/admin/purple-team/vulnerabilities">Open vulnerability checker</a> ·
+  <a style="color:var(--pur)" href="/admin/purple-team/assessment">Assessment &amp; Risk Center</a> ·
+  <a style="color:var(--pur)" href="/admin/purple-team/dependency-audit">Run dependency audit</a>
+</div>`;
+
+export async function adminPurpleTeamAdvisories(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  const fingerprintDenied = await rejectUnlessAllowlistedFingerprint(
+    request, env, gate.user, applySecurityHeaders,
+  );
+  if (fingerprintDenied) return fingerprintDenied;
+
+  const url = new URL(request.url);
+  if (request.method === "POST" && request.headers.get("origin") !== url.origin) {
+    return json({ error: "same_origin_required" }, { status: 403 }, applySecurityHeaders);
+  }
+  const limit = (action: string, requests: number) =>
+    rateLimitDurable(env, "purple:" + action + ":" + gate.user.id, requests, 60_000, applySecurityHeaders);
+
+  switch (url.pathname) {
+    case "/admin/purple-team/assessment": {
+      const limited = await limit("center", 12);
+      return limited ?? assessmentPage(request, url.searchParams, applySecurityHeaders);
+    }
+    case "/admin/purple-team/dependency-audit": {
+      const limited = request.method === "POST" ? await limit("repo-audit", 2) : null;
+      return limited ?? dependencyAuditPage(request, applySecurityHeaders);
+    }
+    case "/admin/purple-team/vulnerabilities": {
+      const limited = url.searchParams.has("package") ? await limit("osv", 10) : null;
+      return limited ?? packageAdvisoriesPage(url.searchParams, applySecurityHeaders);
+    }
+    case "/admin/purple-team/osv": {
+      const limited = await limit("osv", 10);
+      if (limited) return limited;
+      const { data, status } = await lookupPackageAdvisories(url.searchParams);
+      return json(data, { status }, applySecurityHeaders);
+    }
+    default:
+      return json({ error: "not_found" }, { status: 404 }, applySecurityHeaders);
+  }
 }
 
 const PURPLE_CT_DOMAIN_RE =

@@ -32,6 +32,7 @@ import {
   adminListLoginAttempts,
   adminListUsers,
   adminLookupUser,
+  adminPurpleTeamAdvisories,
   adminPurpleTeamCt,
   adminListAdmins,
   adminAddAdmin,
@@ -4846,6 +4847,23 @@ export default {
         return methodNotAllowedResponse();
       }
       return adminDeleteUser(request, env, applySecurityHeaders);
+    }
+
+    if (
+      url.pathname === "/admin/purple-team/osv" ||
+      url.pathname === "/admin/purple-team/vulnerabilities" ||
+      url.pathname === "/admin/purple-team/assessment" ||
+      url.pathname === "/admin/purple-team/dependency-audit"
+    ) {
+      const acceptsPost = url.pathname === "/admin/purple-team/assessment" ||
+        url.pathname === "/admin/purple-team/dependency-audit";
+      if (!isReadApiMethod(request) && !(acceptsPost && request.method === "POST")) {
+        return methodNotAllowedResponse();
+      }
+      return withoutResponseBodyForHead(
+        request,
+        await adminPurpleTeamAdvisories(request, env, applySecurityHeaders),
+      );
     }
 
     // Admin-only CT subdomain lookup used by the recon page (fallback proxy).
