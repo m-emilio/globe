@@ -50,6 +50,9 @@
     "setup:stripe:prod": "node scripts/setup-stripe-billing.mjs --webhook"
   },
   "overrides": {
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.5",
+    "miniflare": {
+      "undici": "^7.30.1"
+    }
   }
 }

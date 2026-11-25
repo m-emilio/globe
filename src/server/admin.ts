@@ -23,6 +23,9 @@ import {
   SESSION_COOKIE,
   clientIp,
   getSessionUser,
+  hasUnexpiredTimestamp,
+  readJsonBody,
+  bodyTooLargeResponse,
   getUserByFingerprint,
   getUserById,
   deleteUserAccount,
@@ -266,16 +269,16 @@ async function requireElevation(
   }
 
   const sealedToSession =
-    Boolean(elevRec.adminHash && elevRec.userHash) &&
+    Boolean(elevRec?.adminHash && elevRec.userHash) &&
     elevRec.adminHash === privilegeSeal("unlock", user.fingerprint) &&
     elevRec.userHash === userSeal(user.id);
   const legacySession =
-    !elevRec.adminHash &&
-    elevRec.userId === user.id &&
+    !elevRec?.adminHash &&
+    elevRec?.userId === user.id &&
     elevRec.fingerprint === user.fingerprint;
   if (
     (!sealedToSession && !legacySession) ||
-    new Date(elevRec.expiresAt).getTime() <= Date.now()
+    !hasUnexpiredTimestamp(elevRec?.expiresAt)
   ) {
     await env.BILLING_KV.delete(elevTokenKey(elev));
     return {
@@ -1096,7 +1099,7 @@ export async function adminStatus(
 const UNLIMITED_KEY_PROTOCOL = "globe-unlimited-keys:v1";
 
 function elevationMessage(request: Request, user: UserRecord, challenge: ElevChallenge): string | null {
-  if (new Date(challenge.expiresAt).getTime() <= Date.now()) return null;
+  if (!hasUnexpiredTimestamp(challenge?.expiresAt)) return null;
   if (challenge.message && challenge.userId && challenge.fingerprint) {
     if (challenge.userId !== user.id || challenge.fingerprint !== user.fingerprint) return null;
     return challenge.message;
@@ -1110,7 +1113,7 @@ function elevationMessage(request: Request, user: UserRecord, challenge: ElevCha
   ) {
     return null;
   }
-  if (challenge.expiresAtMs <= Date.now()) return null;
+  if (!Number.isFinite(challenge.expiresAtMs) || challenge.expiresAtMs <= Date.now()) return null;
   if (challenge.adminHash !== privilegeSeal("unlock", user.fingerprint)) return null;
   if (challenge.userHash !== userSeal(user.id)) return null;
   return [
@@ -1270,9 +1273,10 @@ export async function adminElevate(
 
   let body: { challengeId?: string; signatureArmored?: string; pqcSignature?: string } = {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
     assertNoPrivateKeyMaterial(body);
   } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
     if (error instanceof Error && error.message === "private_key_rejected") {
       return json(
         {
@@ -1488,9 +1492,10 @@ export async function adminGrantTransit(
 
   let body: { userId?: string; fingerprint?: string; note?: string } = {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
     assertNoPrivateKeyMaterial(body);
-  } catch {
+  } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
     body = {};
   }
 
@@ -1554,9 +1559,10 @@ export async function adminRevokeTransit(
 
   let body: { userId?: string; fingerprint?: string; note?: string } = {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
     assertNoPrivateKeyMaterial(body);
-  } catch {
+  } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
     body = {};
   }
 
@@ -1624,9 +1630,10 @@ async function mutateUnlimitedKeys(
     signatureArmored?: string;
   } = {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
     assertNoPrivateKeyMaterial(body);
   } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
     if (error instanceof Error && error.message === "private_key_rejected") {
       return json(
         { error: "private_key_rejected", message: "Send a detached signature only — never a private key." },
@@ -1758,9 +1765,10 @@ export async function adminClaimSession(
   let body: { session_id?: string; userId?: string; fingerprint?: string } =
     {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
     assertNoPrivateKeyMaterial(body);
-  } catch {
+  } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
     body = {};
   }
 
@@ -2105,8 +2113,9 @@ export async function adminListUsers(
   } = {};
   if (request.method === "POST") {
     try {
-      body = (await request.json()) as typeof body;
-    } catch {
+      body = (await readJsonBody(request)) as typeof body;
+    } catch (error) {
+      if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
       body = {};
     }
   }
@@ -2258,9 +2267,10 @@ export async function adminDeleteUser(
 
   let body: { userId?: string; fingerprint?: string; confirm?: string } = {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
     assertNoPrivateKeyMaterial(body);
   } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
     if (error instanceof Error && error.message === "private_key_rejected") {
       return json(
         { error: "private_key_rejected" },
@@ -2490,9 +2500,10 @@ export async function adminAddAdmin(
 
   let body: { fingerprint?: unknown; publicKey?: unknown; label?: unknown } = {};
   try {
-    body = (await request.json()) as typeof body;
+    body = (await readJsonBody(request)) as typeof body;
     assertNoPrivateKeyMaterial(body);
   } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
     if (error instanceof Error && error.message === "private_key_rejected") {
       return json(
         {
@@ -2661,13 +2672,11 @@ export async function adminRemoveAdmin(
 
   let confirmSelf = new URL(request.url).searchParams.get("confirmSelf") === "1";
   try {
-    const text = await request.text();
-    if (text) {
-      const body = JSON.parse(text) as { confirmSelf?: unknown };
-      if (body && body.confirmSelf === true) confirmSelf = true;
-    }
-  } catch {
-    // body is optional
+    const body = (await readJsonBody(request, 4_096)) as { confirmSelf?: unknown };
+    if (body?.confirmSelf === true) confirmSelf = true;
+  } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
+    // The confirmation can also be supplied in the URL.
   }
 
   const kv = await loadKvAdmins(env, request);

@@ -3481,10 +3481,17 @@ function withoutResponseBodyForHead(request: Request, response: Response) {
   });
 }
 
-function applySecurityHeaders(headers: Headers, _request?: Request) {
+function applySecurityHeaders(headers: Headers, request?: Request) {
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
     if (!headers.has(name)) {
       headers.set(name, value);
+    }
+  }
+  if (request) {
+    const { searchParams } = new URL(request.url);
+    if (searchParams.has("auth_token") || searchParams.has("session_token")) {
+      headers.set("referrer-policy", "no-referrer");
+      headers.set("cache-control", "private, no-store");
     }
   }
   // HSTS: browsers ignore over plain HTTP; safe to always emit for HTTPS prod
@@ -4669,7 +4676,7 @@ const worker = {
       if (request.method !== "POST") {
         return methodNotAllowedResponse();
       }
-      return adoptSessionToken(request, env, applySecurityHeaders);
+      return adoptSessionToken(request, env, (headers) => applySecurityHeaders(headers, request));
     }
 
     if (url.pathname === "/api/auth/logout") {
