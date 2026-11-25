@@ -18,6 +18,9 @@
 import * as openpgp from "openpgp";
 import {
   assertNoPrivateKeyMaterial,
+  authSessionStorageKey,
+  authUserStorageKey,
+  SESSION_COOKIE,
   clientIp,
   getSessionUser,
   getUserByFingerprint,
@@ -55,6 +58,7 @@ import {
 } from "./pqcVerify";
 import { AUTH_BAN_SECONDS, AUTH_FAIL_LIMIT, AUTH_FAIL_WINDOW_SECONDS } from "./authBan";
 import { listLoginAttempts, readLoginChainTip } from "./loginLog";
+import { BodyLimitError, readBoundedText } from "./boundedBody";
 import {
   assessmentPage,
   dependencyAuditPage,
@@ -62,6 +66,10 @@ import {
   packageAdvisoriesPage,
 } from "./purpleTeamAdvisories";
 import { PURPLE_TEAM_CSP, PURPLE_TEAM_HTML } from "./purpleTeamHtml";
+import { CANARY_PATH, purpleTeamDirectory, purpleTeamHost, type PurpleTeamBindings } from "./purpleTeamDirectory";
+import { scanHostname } from "./purpleTeamDns";
+import { purpleTeamToolsPage, runAdminControlChecks, runSignedOutView, type ToolResult } from "./purpleTeamTools";
+import type { ToolFinding } from "./verifiedDomainScan";
 import {
   PQC_LOG_ALG,
   PQC_LOG_BYTES,
@@ -412,8 +420,9 @@ async function writeAudit(env: AdminEnv, entry: AuditEntry) {
     const prevHash = await readAuditChainTip(env);
     const chain = chainHash(prevHash, recordHash);
     const stamp = String(9_999_999_999_999 - Date.now()).padStart(13, "0");
+    const key = `admin:seal:${stamp}_${randomHex(4)}`;
     await env.BILLING_KV.put(
-      `admin:seal:${stamp}_${randomHex(4)}`,
+      key,
       JSON.stringify({
         v: 1,
         alg: PQC_LOG_ALG,
@@ -425,33 +434,24 @@ async function writeAudit(env: AdminEnv, entry: AuditEntry) {
       { expirationTtl: AUDIT_TTL_SECONDS },
     );
     await env.BILLING_KV.put(AUDIT_CHAIN_KEY, chain);
+    return key;
   } catch {
     // Skip the write rather than store a raw network or account.
   }
 }
 
-/**
- * Session + allowlist only (read paths).
- * Does NOT authorize grant/revoke/claim.
- */
-async function requireAdminSession(
+type AdminGate =
+  | { ok: true; user: UserRecord; sessionId: string }
+  | { ok: false; response: Response };
+type RecordAudit = (entry: AuditEntry) => Promise<unknown>;
+
+async function authorizeAdminSession(
   request: Request,
   env: AdminEnv,
+  session: Awaited<ReturnType<typeof getSessionUser>>,
   applySecurityHeaders?: SecurityHeadersFn,
-): Promise<
-  | { ok: true; user: UserRecord; sessionId: string }
-  | { ok: false; response: Response }
-> {
-  const limited = await rateLimitDurable(
-    env,
-    `admin:${clientIp(request)}`,
-    30,
-    60_000,
-    applySecurityHeaders,
-  );
-  if (limited) return { ok: false, response: limited };
-
-  const session = await getSessionUser(request, env);
+  audit: RecordAudit = (entry) => writeAudit(env, entry),
+): Promise<AdminGate> {
   if (!session) {
     return {
       ok: false,
@@ -464,7 +464,7 @@ async function requireAdminSession(
   }
 
   if (!(await isAdminUserWithKv(session.user, env, request))) {
-    await writeAudit(env, {
+    await audit({
       at: new Date().toISOString(),
       adminUserId: session.user.id,
       adminFingerprint: session.user.fingerprint,
@@ -486,6 +486,19 @@ async function requireAdminSession(
   return { ok: true, user: session.user, sessionId: session.sessionId };
 }
 
+// The session and request rate limit both come from the normal Worker path.
+async function requireAdminSession(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<AdminGate> {
+  const limited = await rateLimitDurable(
+    env, `admin:${clientIp(request)}`, 30, 60_000, applySecurityHeaders,
+  );
+  if (limited) return { ok: false, response: limited };
+  return authorizeAdminSession(request, env, await getSessionUser(request, env), applySecurityHeaders);
+}
+
 /**
  * Last check for privileged actions: the signed session key is an exact
  * ADMIN_FINGERPRINTS member. The header value is never treated as proof.
@@ -495,9 +508,10 @@ async function rejectUnlessAllowlistedFingerprint(
   env: AdminEnv,
   user: UserRecord,
   applySecurityHeaders?: SecurityHeadersFn,
+  audit: RecordAudit = (entry) => writeAudit(env, entry),
 ): Promise<Response | null> {
   if (await isAllowlistedAdminFingerprintWithKv(user.fingerprint, env, request)) return null;
-  await writeAudit(env, {
+  await audit({
     at: new Date().toISOString(),
     adminUserId: user.id,
     adminFingerprint: user.fingerprint,
@@ -517,27 +531,266 @@ async function rejectUnlessAllowlistedFingerprint(
   );
 }
 
+async function requirePurpleTeamSession(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+) {
+  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate;
+  const denied = await rejectUnlessAllowlistedFingerprint(request, env, gate.user, applySecurityHeaders);
+  return denied ? { ok: false as const, response: denied } : gate;
+}
+
+async function confirmDrillAudit(
+  env: AdminEnv,
+  user: UserRecord,
+  request: Request,
+  detail: string,
+  ok: boolean,
+): Promise<boolean> {
+  const key = await writeAudit(env, {
+    at: new Date().toISOString(), adminUserId: user.id, adminFingerprint: user.fingerprint,
+    action: "purple_team_drill", detail, ip: clientIp(request), ok,
+  });
+  if (!key || !env.BILLING_KV) return false;
+  try {
+    const raw = await env.BILLING_KV.get(key);
+    const record = raw ? asPublicAudit(JSON.parse(raw), readLogPepper(env)) : null;
+    return record?.action === "purple_team_drill" && record.detail === detail;
+  } catch {
+    return false;
+  }
+}
+
+async function runAccessDrill(request: Request, env: AdminEnv, operator: UserRecord): Promise<ToolResult> {
+  const runId = crypto.randomUUID();
+  const at = new Date().toISOString();
+  const testAdmin: UserRecord = {
+    id: "drill-admin", fingerprint: randomHex(20), publicKeyArmored: "drill fixture", primaryUserId: null, createdAt: at,
+  };
+  const regular: UserRecord = { ...testAdmin, id: "drill-user", fingerprint: randomHex(20) };
+  const active: AdminEnv = { ADMIN_FINGERPRINTS: testAdmin.fingerprint };
+  const ordinarySession = randomHex(32);
+  const disposableSession = randomHex(32);
+  const fixtureData = new Map<string, string>();
+  for (const [id, user] of [[ordinarySession, regular], [disposableSession, testAdmin]] as const) {
+    fixtureData.set(authUserStorageKey(user.id), JSON.stringify(user));
+    fixtureData.set(authSessionStorageKey(id), JSON.stringify({
+      userId: user.id, createdAt: at, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }));
+  }
+  const fixtureKv = {
+    async get(key: string) { return fixtureData.get(key) ?? null; },
+    async delete(key: string) { fixtureData.delete(key); },
+  };
+  // The fixtures exercise the same session reader and gates with only local records.
+  // Neither test identities nor session tokens are written to production KV.
+  const findings: ToolFinding[] = [];
+
+  async function execute(
+    check: string, label: string, expected: number, fixtureEnv: AdminEnv, sessionId?: string,
+    started?: number,
+  ) {
+    let signal: string | null = null;
+    const audit: RecordAudit = async (entry) => { signal = entry.action; };
+    const fixtureRequest = new Request(new URL("/admin/purple-team", request.url), {
+      headers: sessionId ? { cookie: SESSION_COOKIE + "=" + sessionId } : undefined,
+    });
+    const session = await getSessionUser(fixtureRequest, { BILLING_KV: fixtureKv });
+    const gate = await authorizeAdminSession(fixtureRequest, fixtureEnv, session, undefined, audit);
+    const denied = gate.ok
+      ? await rejectUnlessAllowlistedFingerprint(fixtureRequest, fixtureEnv, gate.user, undefined, audit)
+      : gate.response;
+    const observed = denied?.status ?? 200;
+    const elapsed = started === undefined ? "" : " · " + (Date.now() - started) + " ms to denial";
+    const expectedSignal = label === "ordinary" ? "admin_denied"
+      : label === "revoked-role" ? "admin_fingerprint_denied" : null;
+    const matches = observed === expected && signal === expectedSignal;
+    const auditVisible = await confirmDrillAudit(
+      env, operator, request, runId + " " + label + " " + observed + " " + (signal ?? "session-gate"), matches,
+    );
+    findings.push({
+      check, status: !matches ? "review" : auditVisible ? "pass" : "unknown",
+      evidence: "Expected HTTP " + expected + " · Observed HTTP " + observed + elapsed +
+        " · " + (auditVisible ? "Globe audit event confirmed." : "Globe audit event was unavailable on readback."),
+      remediation: !matches ? "Review the admin session and fingerprint checks for this scenario." : undefined,
+    });
+  }
+
+  await execute("Signed-out visitor", "signed-out", 401, active);
+  await execute("Regular test account", "ordinary", 403, active, ordinarySession);
+  await execute("Allowlisted test admin", "active-admin", 200, active, disposableSession);
+  await execute("Test admin fingerprint removed", "revoked-role", 403, { ADMIN_USER_IDS: testAdmin.id }, disposableSession);
+  const revokedAt = Date.now();
+  await fixtureKv.delete(authSessionStorageKey(disposableSession));
+  await execute("Disposable session revoked", "revoked-session", 401, active, disposableSession, revokedAt);
+
+  return { title: "Access and containment drill", runId, findings };
+}
+
+async function runCanaryDrill(
+  request: Request,
+  env: AdminEnv & PurpleTeamBindings,
+  operator: UserRecord,
+  dispatch: (request: Request) => Promise<Response>,
+): Promise<ToolResult> {
+  const runId = crypto.randomUUID();
+  const directory = purpleTeamDirectory(env);
+  await directory.armCanary(runId);
+  const response = await dispatch(new Request(new URL(CANARY_PATH + runId, request.url)));
+  await response.body?.cancel();
+  const receipt = await directory.canaryReceipt(runId);
+  const hit = receipt?.hit ?? null;
+  const observed = hit !== null && response.status === 404;
+  const elapsed = receipt && hit !== null ? (hit - receipt.armed) + " ms" : "unknown";
+  const auditVisible = await confirmDrillAudit(
+    env, operator, request, runId + " canary " + response.status + " " + elapsed, observed,
+  );
+  return {
+    title: "Canary drill", runId, findings: [
+      { check: "Canary request", status: observed ? "pass" : "review",
+        evidence: "HTTP " + response.status + " · Durable Object receipt " + (hit === null ? "missing" : "recorded in " + elapsed) + "." },
+      { check: "Globe audit event", status: auditVisible ? "pass" : "unknown",
+        evidence: auditVisible ? "The matching event was confirmed in the sealed admin audit log."
+          : "The matching audit event was unavailable on readback." },
+    ],
+  };
+}
+
+const scanNotices: Record<string, string> = {
+  invalid_hostname: "Enter an exact public hostname.",
+  proof_missing: "The expected TXT record is missing. Scans are paused until you verify the hostname.",
+  proof_unavailable: "DNS verification is temporarily unavailable. Scans are paused until you verify the hostname.",
+  proof_required: "Verify the hostname before running or scheduling a scan.",
+  host_not_pending: "Issue a fresh challenge for this hostname.",
+  scan_in_progress: "A scan is already running for this hostname.",
+  authorization_changed: "Hostname authorization changed. Reload the hostname before retrying.",
+  unknown_report: "This scan is outside the current history.",
+  invalid_schedule: "Choose Off, Daily, or Weekly.",
+};
+
+export async function adminPurpleTeamTools(
+  request: Request,
+  env: AdminEnv & PurpleTeamBindings,
+  applySecurityHeaders: SecurityHeadersFn,
+  dispatch: (request: Request) => Promise<Response>,
+): Promise<Response> {
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+
+  const url = new URL(request.url);
+  const directory = purpleTeamDirectory(env);
+  const hostnames = await directory.hostnames();
+  const requestedHost = url.searchParams.get("host");
+  const selected = requestedHost && hostnames.includes(requestedHost) ? requestedHost : hostnames[0];
+  const loadView = async (hostname?: string, reportId?: string) =>
+    hostname ? purpleTeamHost(env, hostname).view(reportId) : null;
+  const render = async (hostname = selected, options: { notice?: string; status?: number; result?: ToolResult; reportId?: string } = {}) =>
+    purpleTeamToolsPage({ ...options, hostnames, view: await loadView(hostname, options.reportId) }, applySecurityHeaders);
+
+  if (request.method !== "POST") return render(selected, { reportId: url.searchParams.get("report") ?? undefined });
+  if (request.headers.get("origin") !== url.origin) {
+    return json({ error: "same_origin_required" }, { status: 403 }, applySecurityHeaders);
+  }
+  if (!/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(request.headers.get("content-type") ?? "")) {
+    return json({ error: "form_required" }, { status: 415 }, applySecurityHeaders);
+  }
+  let fields: URLSearchParams;
+  try {
+    fields = new URLSearchParams(await readBoundedText(request.body, 2048));
+  } catch (error) {
+    const tooLarge = error instanceof BodyLimitError;
+    return json({ error: tooLarge ? "body_too_large" : "invalid_form" }, { status: tooLarge ? 413 : 400 }, applySecurityHeaders);
+  }
+
+  const tool = fields.get("tool");
+  if (!tool || !["access", "visibility", "drill", "canary", "register", "verify", "revoke", "schedule", "web", "baseline"].includes(tool)) {
+    return json({ error: "invalid_tool" }, { status: 400 }, applySecurityHeaders);
+  }
+  const limited = await rateLimitDurable(
+    env, "purple:tools:" + tool + ":" + gate.user.id, tool === "web" ? 5 : 4, 60_000, applySecurityHeaders,
+  );
+  if (limited) return limited;
+
+  if (tool === "access" || tool === "visibility") {
+    const result = tool === "access"
+      ? { title: "Globe access checks", findings: await runAdminControlChecks(request, dispatch) }
+      : { title: "Globe signed-out view", findings: await runSignedOutView(request, dispatch) };
+    return render(selected, { result });
+  }
+  if (tool === "drill") return render(selected, { result: await runAccessDrill(request, env, gate.user) });
+  if (tool === "canary") return render(selected, { result: await runCanaryDrill(request, env, gate.user, dispatch) });
+
+  const hostname = scanHostname(fields.get("hostname") ?? "");
+  if (!hostname) return render(selected, { status: 400, notice: scanNotices.invalid_hostname });
+  if (tool !== "register" && !hostnames.includes(hostname)) {
+    return json({ error: "domain_not_verified" }, { status: 403 }, applySecurityHeaders);
+  }
+  const state = purpleTeamHost(env, hostname);
+  const by = gate.user.id;
+  let command;
+  let notice = "";
+  switch (tool) {
+    case "register":
+      command = await state.register(hostname, by);
+      if (command.ok && !hostnames.includes(hostname)) {
+        await directory.addHost(hostname);
+        hostnames.push(hostname);
+        hostnames.sort();
+      }
+      notice = "DNS challenge ready.";
+      break;
+    case "verify":
+      command = await state.verify(by);
+      notice = "Hostname verified.";
+      break;
+    case "revoke":
+      command = await state.revoke(by);
+      notice = "Hostname verification revoked.";
+      break;
+    case "schedule": {
+      const schedule = fields.get("schedule");
+      if (schedule !== "off" && schedule !== "daily" && schedule !== "weekly") {
+        return render(hostname, { status: 400, notice: scanNotices.invalid_schedule });
+      }
+      command = await state.setSchedule(schedule);
+      notice = schedule === "off" ? "Recurring scans disabled." : "Recurring scans scheduled.";
+      break;
+    }
+    case "baseline":
+      command = await state.approveBaseline(fields.get("report") ?? "", by);
+      notice = "Baseline approved.";
+      break;
+    case "web":
+      command = await state.scan(by);
+      notice = "Web checks complete.";
+      break;
+    default:
+      return json({ error: "invalid_tool" }, { status: 400 }, applySecurityHeaders);
+  }
+  await writeAudit(env, {
+    at: new Date().toISOString(), adminUserId: by, adminFingerprint: gate.user.fingerprint,
+    action: "purple_host_" + tool, detail: hostname, ip: clientIp(request), ok: command.ok,
+  });
+  return command.ok ? render(hostname, { notice, reportId: command.reportId ?? (tool === "baseline" ? fields.get("report") ?? undefined : undefined) })
+    : render(hostname, { status: 409, notice: scanNotices[command.error] ?? "The action is unavailable. Retry after reloading the hostname." });
+}
+
 /**
- * GET /admin/purple-team — admin-only Purple Team Recon console.
+ * GET /admin/purple-team/recon — admin-only Purple Team Recon console.
  * Requires an allowlisted admin session AND an exact fingerprint allowlist
  * match. Non-admins get the same 401/403 JSON as the admin API.
  * The page sets its own CSP (it calls public recon APIs client-side) and is
  * never cached or indexed.
  */
-export async function adminPurpleTeamPage(
+export async function adminPurpleTeamReconPage(
   request: Request,
   env: AdminEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
-  const fpDenied = await rejectUnlessAllowlistedFingerprint(
-    request,
-    env,
-    gate.user,
-    applySecurityHeaders,
-  );
-  if (fpDenied) return fpDenied;
 
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",
@@ -554,6 +807,7 @@ export async function adminPurpleTeamPage(
 }
 
 const PURPLE_TEAM_ADVISORY_LINKS = `
+<p><a style="color:var(--pur)" href="/admin/purple-team">Back to Purple Team tools</a></p>
 <div class="card">
   <h2>Software vulnerability intelligence <span class="tag blue">OSV</span></h2>
   <p>Check installed software versions against published security advisories.</p>
@@ -567,12 +821,8 @@ export async function adminPurpleTeamAdvisories(
   env: AdminEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
-  const fingerprintDenied = await rejectUnlessAllowlistedFingerprint(
-    request, env, gate.user, applySecurityHeaders,
-  );
-  if (fingerprintDenied) return fingerprintDenied;
 
   const url = new URL(request.url);
   if (request.method === "POST" && request.headers.get("origin") !== url.origin) {
@@ -697,15 +947,8 @@ export async function adminPurpleTeamCt(
   env: AdminEnv,
   applySecurityHeaders?: SecurityHeadersFn,
 ): Promise<Response> {
-  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
-  const fpDenied = await rejectUnlessAllowlistedFingerprint(
-    request,
-    env,
-    gate.user,
-    applySecurityHeaders,
-  );
-  if (fpDenied) return fpDenied;
 
   const domain = (new URL(request.url).searchParams.get("domain") || "")
     .trim()

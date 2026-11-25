@@ -37,11 +37,13 @@ import {
   adminListAdmins,
   adminAddAdmin,
   adminRemoveAdmin,
-  adminPurpleTeamPage,
+  adminPurpleTeamReconPage,
+  adminPurpleTeamTools,
   adminRevokeTransit,
   adminRevokeUnlimitedKeys,
   adminStatus,
 } from "./admin";
+import { CANARY_PATH, purpleTeamDirectory } from "./purpleTeamDirectory";
 import {
   claimCheckoutSession,
   ensureBillingCatalog,
@@ -3450,13 +3452,13 @@ function jsonResponse(data: unknown, init?: ResponseInit) {
   });
 }
 
-function methodNotAllowedResponse() {
+function methodNotAllowedResponse(allow = "GET, HEAD") {
   return jsonResponse(
     { error: "method_not_allowed" },
     {
       status: 405,
       headers: {
-        allow: "GET, HEAD",
+        allow,
         "cache-control": "no-store",
       },
     },
@@ -4391,13 +4393,27 @@ const UN_WEBTV_PLAYER_CSP = [
   "form-action 'none'",
 ].join("; ");
 
-export default {
+
+export { PurpleTeamHost } from "./purpleTeamHost";
+export { PurpleTeamDirectory } from "./purpleTeamDirectory";
+
+const worker = {
   async fetch(
     request: Request,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname.startsWith(CANARY_PATH)) {
+      const id = url.pathname.slice(CANARY_PATH.length);
+      if (request.method === "GET" && /^[a-f0-9-]{36}$/.test(id)) {
+        const limited = rateLimitOrNull("purple:canary:" + clientIpFromRequest(request), 10, 60_000, applySecurityHeaders);
+        if (limited) return limited;
+        await purpleTeamDirectory(env).hitCanary(id);
+      }
+      return new Response("Not Found", { status: 404, headers: { "cache-control": "no-store" } });
+    }
 
     // First-party UN Web TV 24h player (free Live Feed embed).
     // Served from Worker so we control CSP/XFO (static /* DENY would block framing).
@@ -4877,18 +4893,22 @@ export default {
       );
     }
 
-    // Admin-only Purple Team Recon console (HTML page, not JSON).
-    // Same session + fingerprint allowlist gates as the admin API.
+    const purpleTeamHome = url.pathname === "/admin/purple-team" || url.pathname === "/admin/purple-team/";
     if (
-      url.pathname === "/admin/purple-team" ||
-      url.pathname === "/admin/purple-team/"
+      url.pathname === "/admin/purple-team/recon" ||
+      (purpleTeamHome && isReadApiMethod(request) && url.searchParams.has("t"))
     ) {
-      if (!isReadApiMethod(request)) {
-        return methodNotAllowedResponse();
-      }
+      if (!isReadApiMethod(request)) return methodNotAllowedResponse();
       return withoutResponseBodyForHead(
         request,
-        await adminPurpleTeamPage(request, env, applySecurityHeaders),
+        await adminPurpleTeamReconPage(request, env, applySecurityHeaders),
+      );
+    }
+    if (purpleTeamHome) {
+      if (!isReadApiMethod(request) && request.method !== "POST") return methodNotAllowedResponse("GET, HEAD, POST");
+      return withoutResponseBodyForHead(
+        request,
+        await adminPurpleTeamTools(request, env, applySecurityHeaders, (probe) => worker.fetch(probe, env, ctx)),
       );
     }
 
@@ -4978,3 +4998,5 @@ export default {
     );
   },
 } satisfies ExportedHandler<Env>;
+
+export default worker;

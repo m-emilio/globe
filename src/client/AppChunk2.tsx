@@ -893,7 +893,7 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
                 rel="noopener noreferrer"
                 title="Purple team recon console (admins only)"
               >
-                Purple Team Recon
+                Purple Team
               </a>
             ) : null}
             <a

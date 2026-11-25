@@ -101,7 +101,7 @@ Admins are OpenPGP keys whose fingerprint is on the server allowlist. The Worker
 npx wrangler secret put ADMIN_FINGERPRINTS_EXTRA --name globe
 ```
 
-Each admin must sign in once with their device key (Sign in → Continue with device key) so the site registers that key. Admins also get **Menu → Purple Team Recon** (`/admin/purple-team`), an admin-only recon console gated server-side by the same session + fingerprint checks.
+Each admin must sign in once with their device key (Sign in → Continue with device key) so the site registers that key. Admins can open **Menu → Purple Team** to run access drills or check a verified hostname. The console requires an admin session and an allowlisted device fingerprint. The Recon tab opens the passive domain and certificate lookups.
 
 ### Optional Stripe (hardened, not required)
 
@@ -113,3 +113,19 @@ npx wrangler secret put STRIPE_SECRET_KEY
 npx wrangler secret put STRIPE_WEBHOOK_SECRET
 npx wrangler secret put TRANSIT_PUBLICAPI_V4
 ```
+
+### Purple Team tools
+
+- Add an exact public hostname and publish the displayed TXT challenge under the displayed DNS name. Keep the record published. Each scan checks it again. A missing record or DNS failure pauses that hostname’s recurring scans until an admin verifies it again.
+- Choose **Run web checks** or **Retest**. Each scan checks the public root over HTTP and HTTPS without following redirects. **Approve this baseline** records the selected scan and the approving admin. **Scan history** shows manual operators and scheduled runs. Set **Recurring scans** to Daily or Weekly to opt in.
+- **View Globe as signed out** checks Globe’s fixed route list. The access and containment drill uses disposable, in-memory test sessions and checks for its correlation ID in the existing admin audit. The canary drill uses an inert Globe URL and checks its receipt and corresponding audit entry.
+
+#### Served certificate observer
+
+Run `node services/tls-observer/server.mjs` on a private Node.js 22+ service with `TLS_OBSERVER_KEY` set to a strong shared secret. The observer listens on `127.0.0.1:8080` by default. Expose its `/observe` route to the Worker through a private proxy or a Cloudflare Tunnel protected by an Access service-token policy. Set these bindings on the Worker.
+
+- `TLS_OBSERVER_URL` is the observer’s HTTPS URL ending in `/observe`.
+- `TLS_OBSERVER_KEY` matches the observer secret. Store it as a secret on both sides.
+- `TLS_OBSERVER_ACCESS_ID` and `TLS_OBSERVER_ACCESS_SECRET` are the Access service-token bindings when the observer uses Cloudflare Access.
+
+The observer uses DNS, a pinned public address, and a validated TLS handshake on port 443. A failed handshake can make the served certificate’s expiry unavailable. Certificate Transparency evidence appears as a separate check.
