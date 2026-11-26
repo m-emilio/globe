@@ -657,8 +657,8 @@ export function AppChunk1({ b }: { b: GlobeApi }) {
             void startTransitCheckout();
           }}
           onToggleLayer={() => setContractsLayerOn((v) => !v)}
-          onSearch={(opts) => {
-            void loadSamContracts(opts);
+          onSearch={(opts, oneTimeKey) => {
+            void loadSamContracts(opts, oneTimeKey);
           }}
           formatUpdatedAt={formatPreviewDate}
         />

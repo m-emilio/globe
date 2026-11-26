@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { SamContractsPreview, SamOpportunityPreview } from "../shared";
 import { safeGlobeHref } from "./safeUrl";
 
@@ -18,15 +18,18 @@ export type ContractsHubProps = {
   onSignIn: () => void;
   onBuyAccess: () => void;
   onToggleLayer: () => void;
-  onSearch: (opts: {
-    preset: string;
-    q: string;
-    days: number;
-    setAside: string;
-    naicsGroup: string;
-    includeAwards: boolean;
-    force?: boolean;
-  }) => void;
+  onSearch: (
+    opts: {
+      preset: string;
+      q: string;
+      days: number;
+      setAside: string;
+      naicsGroup: string;
+      includeAwards: boolean;
+      force?: boolean;
+    },
+    oneTimeKey?: string,
+  ) => void;
   formatUpdatedAt: (iso: string) => string;
 };
 
@@ -162,6 +165,15 @@ export function ContractsHubPage(props: ContractsHubProps) {
     preview?.filters?.includeAwards ?? true,
   );
   const [filterLocal, setFilterLocal] = useState("");
+  const apiKeyInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const clearKey = () => {
+      if (apiKeyInput.current) apiKeyInput.current.value = "";
+    };
+    window.addEventListener("pagehide", clearKey);
+    return () => window.removeEventListener("pagehide", clearKey);
+  }, []);
 
   const opps = useMemo(() => {
     const list = preview?.opportunities ?? [];
@@ -183,6 +195,10 @@ export function ContractsHubPage(props: ContractsHubProps) {
   }, [preview, filterLocal]);
 
   const runSearch = (force = false) => {
+    if (locked || status === "loading") return;
+    const field = apiKeyInput.current;
+    const oneTimeKey = field?.value.trim() || undefined;
+    if (field) field.value = "";
     onSearch({
       preset,
       q,
@@ -191,7 +207,7 @@ export function ContractsHubPage(props: ContractsHubProps) {
       naicsGroup,
       includeAwards,
       force,
-    });
+    }, oneTimeKey);
   };
 
   return (
@@ -234,7 +250,7 @@ export function ContractsHubPage(props: ContractsHubProps) {
             first-class filters. Results plot on the globe by place of
             performance. Notices remain public on SAM.gov — you pay for
             FederalKey search, map pins, and workflow (same unlock as Transit /
-            Live Feed). API keys stay in Cloudflare secrets only.
+            Live Feed).
           </p>
         </section>
 
@@ -294,7 +310,14 @@ export function ContractsHubPage(props: ContractsHubProps) {
               {locked ? "Locked" : statusLabel(status, error)}
             </span>
           </div>
-          <div className="un-hub-card-body contracts-search-form">
+          <form
+            className="un-hub-card-body contracts-search-form"
+            autoComplete="off"
+            onSubmit={(e) => {
+              e.preventDefault();
+              runSearch();
+            }}
+          >
             <label className="contracts-field">
               <span>Sector preset</span>
               <select
@@ -316,9 +339,6 @@ export function ContractsHubPage(props: ContractsHubProps) {
                 onChange={(e) => setQ(e.target.value)}
                 placeholder="e.g. certificate authority, HSM, ICAM"
                 enterKeyHint="search"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") runSearch(false);
-                }}
               />
             </label>
             <div className="contracts-field-row">
@@ -400,12 +420,30 @@ export function ContractsHubPage(props: ContractsHubProps) {
                 </button>
               ))}
             </div>
+            {!locked && window.isSecureContext && (
+              <label className="contracts-field">
+                <span id="sam-key-label">SAM.gov API key (optional)</span>
+                <input
+                  ref={apiKeyInput}
+                  type="password"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  maxLength={256}
+                  disabled={status === "loading"}
+                  aria-labelledby="sam-key-label"
+                  aria-describedby="sam-key-help"
+                />
+                <small id="sam-key-help">
+                  Used for this search and cleared when you submit. Leave blank to use the configured key.
+                </small>
+              </label>
+            )}
             <div className="contracts-actions">
               <button
-                type="button"
+                type="submit"
                 className="un-hub-master on"
                 disabled={locked || status === "loading"}
-                onClick={() => runSearch(false)}
               >
                 {status === "loading" ? "Searching…" : "Search SAM.gov"}
               </button>
@@ -418,7 +456,7 @@ export function ContractsHubPage(props: ContractsHubProps) {
                 Force refresh
               </button>
             </div>
-          </div>
+          </form>
         </section>
 
         <section className="un-hub-card">
