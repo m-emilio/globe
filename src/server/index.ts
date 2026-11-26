@@ -1,6 +1,8 @@
 import { routePartykitRequest, Server } from "partyserver";
 import { CONNECTION_CHECK_PATH, type ConnectionDetails } from "../connectionSignals";
 import { FeedConnectionSignals } from "./feedConnectionSignals";
+import { closeSessionSockets, validSessionReference } from "./sessionContainment";
+import { OPERATIONS_PATH } from "./securityOperationsModel";
 import {
   adoptSessionToken,
   createAuthChallenge,
@@ -41,6 +43,8 @@ import {
   adminRemoveAdmin,
   adminPurpleTeamReconPage,
   adminPurpleTeamTools,
+  adminSecurityOperations,
+  adminSessionContainment,
   adminRevokeTransit,
   adminRevokeUnlimitedKeys,
   adminStatus,
@@ -416,6 +420,7 @@ type ConnectionState = {
   signedIn: boolean;
   /** Auth user id for mid-session entitlement re-check (chat revoke) */
   userId?: string;
+  sessionRef?: string;
 };
 
 /** Mask IPv4/IPv6 for paid feed only — never send full address on the wire. */
@@ -3977,13 +3982,46 @@ type ChatRateBucket = { windowStart: number; count: number };
 
 export class Globe extends Server<Env> {
   private connectionAttempts = new Map<string, ConnectionAttemptBucket>();
-  private connectionSignals = new FeedConnectionSignals(this.env);
+  private connectionSignals = new FeedConnectionSignals(this.env, () =>
+    this.env.PURPLE_TEAM_DIRECTORY ? purpleTeamDirectory(this.env).peerRequestsPaused() : Promise.resolve(false));
+  private recentRevocations = new Map<string, number>();
   /**
    * Chat rate limits live on the DO instance — NOT on connection.setState().
    * Mutating PartyServer WebSocket attachments for chat counters was risking
    * state corruption and broken feed/marker delivery after a chat send.
    */
   private chatRateByConn = new Map<string, ChatRateBucket>();
+
+  operationsStatus() {
+    const connections = [...this.getConnections<ConnectionState>()];
+    return {
+      sockets: connections.length,
+      signedIn: connections.filter(socket => socket.state?.signedIn).length,
+      feedEnabled: connections.filter(socket => socket.state?.feedPaid).length,
+      ...this.connectionSignals.status(),
+    };
+  }
+
+  sessionSocketCount(reference: string): number {
+    if (!validSessionReference(reference)) return 0;
+    return [...this.getConnections<ConnectionState>()].filter(socket => socket.state?.sessionRef === reference).length;
+  }
+
+  disconnectSession(reference: string): number {
+    if (!validSessionReference(reference)) return 0;
+    const now = Date.now();
+    for (const [ref, expires] of this.recentRevocations) {
+      if (expires <= now) this.recentRevocations.delete(ref);
+    }
+    this.recentRevocations.set(reference, now + 60_000);
+    return closeSessionSockets(this.getConnections<ConnectionState>(), reference, socket => {
+      this.connectionSignals.disconnect(socket);
+      const state = socket.state;
+      if (state) socket.setState({ ...state, feedPaid: false, signedIn: false, userId: undefined, sessionRef: undefined });
+      this.sendJson(socket, { type: "feed-access", paid: false });
+      this.closeConnection(socket, CLOSE_POLICY_VIOLATION, "session revoked");
+    });
+  }
 
   private getConnectionLimitReason(
     clientKey: string,
@@ -4068,17 +4106,25 @@ export class Globe extends Server<Env> {
     let signedIn = false;
     let feedPaid = false;
     let userId: string | undefined;
+    let sessionRef: string | undefined;
     let signalSessionId: string | undefined;
     try {
-      const session = await getSessionUser(
+      let session = await getSessionUser(
         ctx.request,
         this.env as AuthEnv,
       );
+      if (session && this.env.PURPLE_TEAM_DIRECTORY) {
+        const accepted = await purpleTeamDirectory(this.env).registerSessionRoom(
+          session.reference, this.name, Date.parse(session.expiresAt),
+        );
+        if (!accepted || (this.recentRevocations.get(session.reference) ?? 0) > Date.now()) session = null;
+      }
       signedIn = Boolean(session?.user.fingerprint);
       feedPaid = Boolean(
         session?.user && userHasFeatureAccess(session.user, this.env as AuthEnv),
       );
       userId = session?.user.id ? String(session.user.id).slice(0, 128) : undefined;
+      sessionRef = session?.reference;
       if (feedPaid && ctx.request.headers.get("origin") === new URL(ctx.request.url).origin) {
         signalSessionId = session?.sessionId;
       }
@@ -4086,6 +4132,7 @@ export class Globe extends Server<Env> {
       signedIn = false;
       feedPaid = false;
       userId = undefined;
+      sessionRef = undefined;
     }
 
     // Full IP only for server rate limits — never on the wire
@@ -4170,6 +4217,7 @@ export class Globe extends Server<Env> {
       feedPaid,
       signedIn,
       userId,
+      sessionRef,
     });
 
     // Tell this client whether it will receive feed events
@@ -4294,6 +4342,7 @@ export class Globe extends Server<Env> {
       }
     }
 
+    if (!conn.state?.feedPaid || conn.readyState !== WebSocket.OPEN) return;
     const text = sanitizeChatText(rec.text);
     if (!text) return;
 
@@ -4940,6 +4989,19 @@ const worker = {
       return withoutResponseBodyForHead(
         request,
         await adminPurpleTeamCt(request, env, applySecurityHeaders),
+      );
+    }
+
+    if (url.pathname === "/api/admin/containment") {
+      if (request.method !== "POST") return methodNotAllowedResponse("POST");
+      return adminSessionContainment(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === OPERATIONS_PATH) {
+      if (!isReadApiMethod(request) && request.method !== "POST") return methodNotAllowedResponse("GET, HEAD, POST");
+      return withoutResponseBodyForHead(
+        request,
+        await adminSecurityOperations(request, env, applySecurityHeaders, (probe) => worker.fetch(probe, env, ctx)),
       );
     }
 

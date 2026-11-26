@@ -16,6 +16,7 @@
 
 import * as openpgp from "openpgp";
 import { BodyLimitError, readBoundedRequestText } from "./boundedBody";
+import { sessionReference, type SessionGuard } from "./sessionContainment";
 import { accountHash, pqcLogDigest, privilegeSeal, readLogPepper } from "./pqcLogHash";
 
 const SESSION_COOKIE = "globe_session";
@@ -28,7 +29,7 @@ const SESSION_TOKEN_RE = /^[a-f0-9]{32,128}$/i;
 /** Cap concurrent sessions per user; oldest pruned on login */
 const MAX_SESSIONS_PER_USER = 8;
 
-export type AuthEnv = {
+export type AuthEnv = SessionGuard & {
   BILLING_KV?: KVNamespace;
   /** When "1" / "true", transit also requires a paid entitlement on the user. */
   TRANSIT_REQUIRE_PAYMENT?: string;
@@ -831,6 +832,30 @@ async function listUserSessions(
   }
 }
 
+export async function sessionRecordsForAccount(env: AuthEnv, userId: string) {
+  const kv = env.BILLING_KV;
+  if (!kv) return [];
+  const ids = [...new Set(await listUserSessions(env, userId))].slice(-MAX_SESSIONS_PER_USER);
+  const sessions = await Promise.all(ids.map(async sessionId => {
+    const raw = await kv.get(authSessionStorageKey(sessionId));
+    if (!raw) return null;
+    let session: SessionRecord;
+    try {
+      session = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (session?.userId !== userId || !hasUnexpiredTimestamp(session.expiresAt)) return null;
+    return {
+      sessionId,
+      reference: await sessionReference(sessionId),
+      createdAt: typeof session.createdAt === "string" && Number.isFinite(Date.parse(session.createdAt)) ? session.createdAt : null,
+      expiresAt: session.expiresAt,
+    };
+  }));
+  return sessions.filter(record => record !== null);
+}
+
 async function trackUserSession(
   env: AuthEnv,
   userId: string,
@@ -954,10 +979,14 @@ export function hasUnexpiredTimestamp(expiresAt: unknown): boolean {
   return typeof expiresAt === "string" && Date.parse(expiresAt) > Date.now();
 }
 
+export type SessionAuthEnv = SessionGuard & {
+  BILLING_KV?: { get(key: string): Promise<string | null>; delete(key: string): Promise<void> };
+};
+
 export async function getSessionUser(
   request: Request,
-  env: { BILLING_KV?: { get(key: string): Promise<string | null>; delete(key: string): Promise<void> } },
-): Promise<{ user: UserRecord; sessionId: string } | null> {
+  env: SessionAuthEnv,
+): Promise<{ user: UserRecord; sessionId: string; reference: string; expiresAt: string } | null> {
   if (!env.BILLING_KV) return null;
   const sessionId = readSessionId(request);
   if (!sessionId) return null;
@@ -987,7 +1016,11 @@ export async function getSessionUser(
     if (!user || user.id !== session.userId ||
         typeof user.fingerprint !== "string" || !user.fingerprint ||
         typeof user.publicKeyArmored !== "string" || !user.publicKeyArmored) return null;
-    return { user, sessionId };
+    const reference = await sessionReference(sessionId);
+    const directory = env.PURPLE_TEAM_DIRECTORY;
+    const revocations = directory ? directory.get(directory.idFromName("directory")) : env.sessionRevocations;
+    if (await revocations?.isSessionRevoked(reference)) return null;
+    return { user, sessionId, reference, expiresAt: session.expiresAt };
   } catch {
     return null;
   }
@@ -1814,13 +1847,13 @@ export async function getMe(
   );
 }
 
-export function paymentEnforcementEnabled(env: AuthEnv): boolean {
+export function paymentEnforcementEnabled(env: Pick<AuthEnv, "TRANSIT_REQUIRE_PAYMENT">): boolean {
   const v = env.TRANSIT_REQUIRE_PAYMENT?.trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes";
 }
 
 /** Stripe is optional unless TRANSIT_REQUIRE_PAYMENT is on. */
-export function userHasFeatureAccess(user: UserRecord, env: AuthEnv): boolean {
+export function userHasFeatureAccess(user: UserRecord, env: Pick<AuthEnv, "TRANSIT_REQUIRE_PAYMENT">): boolean {
   return !paymentEnforcementEnabled(env) || Boolean(user.transitPaid);
 }
 

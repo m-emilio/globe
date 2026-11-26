@@ -23,6 +23,7 @@ const SIGNAL_ERRORS = {
   unavailable: "That peer is unavailable. Choose an online peer and try again.",
   busy: "A check is already pending. Try again when it finishes.",
   "rate-limit": "Please wait a few seconds before trying again.",
+  paused: "An administrator has paused new connection requests.",
 };
 
 export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean) {

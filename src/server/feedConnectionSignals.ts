@@ -5,7 +5,7 @@ import {
   SIGNAL_TTL_MS,
   type SignalServerMessage,
 } from "../connectionSignals";
-import { getSessionUser, userHasFeatureAccess, type AuthEnv } from "./auth";
+import { getSessionUser, userHasFeatureAccess, type AuthEnv, type SessionAuthEnv } from "./auth";
 
 type Socket = Pick<WebSocket, "send" | "readyState">;
 type Peer = {
@@ -33,7 +33,18 @@ export class FeedConnectionSignals {
   private lastActions = new WeakMap<Socket, Partial<Record<"signal-availability" | "signal-request", number>>>();
   private enabling = new WeakMap<Socket, symbol>();
 
-  constructor(private env: AuthEnv) {}
+  constructor(
+    private env: SessionAuthEnv & Pick<AuthEnv, "TRANSIT_REQUIRE_PAYMENT">,
+    private requestsPaused?: () => Promise<boolean>,
+  ) {}
+
+  status() {
+    const now = Date.now();
+    return {
+      optedIn: this.peers.size,
+      pending: [...this.pending.values()].filter(signal => signal.expiresAt > now).length,
+    };
+  }
 
   connect(socket: Socket, sessionId?: string) {
     if (sessionId) this.sessions.set(socket, sessionId);
@@ -111,6 +122,8 @@ export class FeedConnectionSignals {
       if (!(await this.canExchange(peer, recipient))) {
         return this.send(socket, { type: "signal-error", reason: "unavailable" });
       }
+      if (await this.requestsPaused?.()) return this.send(socket, { type: "signal-error", reason: "paused" });
+      if (this.bySocket.get(socket) !== peer || this.peers.get(recipient.id) !== recipient) return;
       if (peer.outgoing || recipient.incoming) return this.send(socket, { type: "signal-error", reason: "busy" });
       const id = crypto.randomUUID();
       const invitation = { id, from: peer.id, check: message.check };

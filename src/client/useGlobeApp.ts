@@ -248,6 +248,11 @@ const isTradePulsePreview = getIsTradePulsePreview();
   const [adminAllowlistConfigured, setAdminAllowlistConfigured] =
     useState(false);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
+  useEffect(() => {
+    if (isAdmin && new URLSearchParams(window.location.search).get("admin") === "containment") {
+      setShowAdminPanel(true);
+    }
+  }, [isAdmin]);
   const [adminQuery, setAdminQuery] = useState("");
   const [adminLookupUser, setAdminLookupUser] = useState<{
     id: string;

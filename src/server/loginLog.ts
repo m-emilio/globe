@@ -201,9 +201,9 @@ export async function logAuthResponse(
   return response;
 }
 
-export async function listLoginAttempts(env: AuthEnv, take = 40): Promise<PublicLoginAttempt[]> {
+export async function listLoginAttempts(env: AuthEnv, take = 40, scanExtra = 40): Promise<PublicLoginAttempt[]> {
   if (!env.BILLING_KV) return [];
-  const scan = Math.min(Math.max(take, 1), 100) + 40;
+  const scan = Math.min(Math.max(take, 1), 100) + scanExtra;
   const listed = await env.BILLING_KV.list({ prefix: "auth:attempt:", limit: Math.min(scan, 200) });
   const entries: PublicLoginAttempt[] = [];
   for (const key of listed.keys) {
