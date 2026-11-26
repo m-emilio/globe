@@ -21,13 +21,8 @@ export class PurpleTeamDirectory extends DurableObject {
     )`);
   }
 
-  addHost(hostname: string): void {
-    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO hosts (hostname) VALUES (?)", hostname);
-  }
-
-  hostnames(): string[] {
-    return this.ctx.storage.sql.exec<{ hostname: string }>("SELECT hostname FROM hosts ORDER BY hostname")
-      .toArray().map((item) => item.hostname);
+  hasHost(hostname: string): boolean {
+    return this.ctx.storage.sql.exec("SELECT 1 FROM hosts WHERE hostname = ?", hostname).toArray().length > 0;
   }
 
   armCanary(id: string): void {
@@ -110,13 +105,13 @@ export class PurpleTeamDirectory extends DurableObject {
 
   operationsAlerts(): AlertRow[] {
     return this.ctx.storage.sql.exec<Omit<AlertRow, "exercise"> & { exercise: number }>(`SELECT *
-      FROM operations_alerts WHERE at >= ? ORDER BY state = 'resolved', at DESC, id LIMIT 32`,
+      FROM operations_alerts WHERE exercise = 0 AND at >= ? ORDER BY state = 'resolved', at DESC, id LIMIT 32`,
       Date.now() - 14 * 86_400_000).toArray().map(row => ({ ...row, exercise: row.exercise === 1 }));
   }
 
   setOperationsAlertState(id: string, state: AlertState, actor: string): boolean {
     const result = this.ctx.storage.sql.exec(`UPDATE operations_alerts SET state = ?, updatedBy = ?, updatedAt = ?
-      WHERE id = ? AND at >= ? AND state != ?`, state, actor, Date.now(), id, Date.now() - 14 * 86_400_000, state);
+      WHERE id = ? AND exercise = 0 AND at >= ? AND state != ?`, state, actor, Date.now(), id, Date.now() - 14 * 86_400_000, state);
     return result.rowsWritten > 0;
   }
 }

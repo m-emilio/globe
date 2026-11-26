@@ -101,7 +101,7 @@ Admins are OpenPGP keys whose fingerprint is on the server allowlist. The Worker
 npx wrangler secret put ADMIN_FINGERPRINTS_EXTRA --name globe
 ```
 
-Each admin must sign in once with their device key (Sign in → Continue with device key) so the site registers that key. Admins can open **Menu → Purple Team** to run access drills or check a verified hostname. The console requires an admin session and an allowlisted device fingerprint. The Recon tab opens the passive domain and certificate lookups.
+Each admin must sign in once with their device key (Sign in → Continue with device key) so the site registers that key. Open **Menu → Purple Team** with an admin session and an allowlisted device fingerprint.
 
 ### Optional Stripe (hardened, not required)
 
@@ -116,6 +116,8 @@ npx wrangler secret put TRANSIT_PUBLICAPI_V4
 
 ### Purple Team tools
 
-- Add an exact public hostname and publish the displayed TXT challenge under the displayed DNS name. Keep the record published. Each scan checks it again. A missing record or DNS failure pauses that hostname’s recurring scans until an admin verifies it again.
-- Choose **Run web checks** or **Retest**. Each scan checks the public root over HTTP and HTTPS without following redirects, and shows expiration dates from public Certificate Transparency records. **Approve this baseline** records the selected scan and the approving admin. **Scan history** shows manual operators and scheduled runs. Set **Recurring scans** to Daily or Weekly to opt in.
-- **View Globe as signed out** checks Globe’s fixed route list. The access and containment drill uses disposable, in-memory test sessions and checks for its correlation ID in the existing admin audit. The canary drill uses an inert Globe URL and checks its receipt and corresponding audit entry.
+- **Run Globe checks** verifies four Globe routes and checks for both a canary receipt and its audit entry. The page also shows a snapshot of the default Live Feed room.
+- **Run local drills** exercises session revocation and Live Feed invitation isolation with disposable fixtures. Each run has an entry in the admin audit log.
+- **Evaluate recent events** samples recent sign-in and audit records for the alert inbox. Admins can acknowledge, resolve, and reopen alerts.
+
+Website scans and their schedules are retired. Existing report links open saved reports and approved baselines in read-only mode. Live containment remains available in Admin after device-key unlock.

@@ -2,7 +2,7 @@ import type { SignalServerMessage } from "../connectionSignals";
 import { authSessionStorageKey, authUserStorageKey, getSessionUser, type SessionAuthEnv } from "./auth";
 import { FeedConnectionSignals } from "./feedConnectionSignals";
 import { closeSessionSockets, sessionReference } from "./sessionContainment";
-import type { ToolFinding } from "./verifiedDomainScan";
+import type { ToolFinding } from "./purpleTeamTools";
 
 function testResult(check: string, passed: boolean, evidence: string): ToolFinding {
   return { check, status: passed ? "pass" : "review", evidence };

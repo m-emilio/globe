@@ -888,7 +888,7 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
                 className="menu-item admin-menu-item purple-team-menu-item"
                 target="_blank"
                 rel="noopener noreferrer"
-                title="Purple team recon console (admins only)"
+                title="Globe health checks, drills, and alerts"
               >
                 Purple Team
               </a>
