@@ -36,18 +36,15 @@ import {
   adminListLoginAttempts,
   adminListUsers,
   adminLookupUser,
-  adminPurpleTeamAdvisories,
-  adminPurpleTeamCt,
   adminListAdmins,
   adminAddAdmin,
   adminRemoveAdmin,
-  adminPurpleTeamReconPage,
-  adminPurpleTeamTools,
   adminSecurityOperations,
   adminSessionContainment,
   adminRevokeTransit,
   adminRevokeUnlimitedKeys,
   adminStatus,
+  retiredPurpleTeamRoute,
 } from "./admin";
 import { CANARY_PATH, purpleTeamDirectory } from "./purpleTeamDirectory";
 import {
@@ -4964,40 +4961,13 @@ const worker = {
       return adminDeleteUser(request, env, applySecurityHeaders);
     }
 
-    if (
-      url.pathname === "/admin/purple-team/osv" ||
-      url.pathname === "/admin/purple-team/vulnerabilities" ||
-      url.pathname === "/admin/purple-team/assessment" ||
-      url.pathname === "/admin/purple-team/dependency-audit"
-    ) {
-      const acceptsPost = url.pathname === "/admin/purple-team/assessment" ||
-        url.pathname === "/admin/purple-team/dependency-audit";
-      if (!isReadApiMethod(request) && !(acceptsPost && request.method === "POST")) {
-        return methodNotAllowedResponse();
-      }
-      return withoutResponseBodyForHead(
-        request,
-        await adminPurpleTeamAdvisories(request, env, applySecurityHeaders),
-      );
-    }
-
-    // Admin-only CT subdomain lookup used by the recon page (fallback proxy).
-    if (url.pathname === "/admin/purple-team/ct") {
-      if (!isReadApiMethod(request)) {
-        return methodNotAllowedResponse();
-      }
-      return withoutResponseBodyForHead(
-        request,
-        await adminPurpleTeamCt(request, env, applySecurityHeaders),
-      );
-    }
-
     if (url.pathname === "/api/admin/containment") {
       if (request.method !== "POST") return methodNotAllowedResponse("POST");
       return adminSessionContainment(request, env, applySecurityHeaders);
     }
 
-    if (url.pathname === OPERATIONS_PATH) {
+    if (url.pathname === OPERATIONS_PATH || url.pathname === OPERATIONS_PATH + "/" ||
+      url.pathname === OPERATIONS_PATH + "/operations") {
       if (!isReadApiMethod(request) && request.method !== "POST") return methodNotAllowedResponse("GET, HEAD, POST");
       return withoutResponseBodyForHead(
         request,
@@ -5005,23 +4975,12 @@ const worker = {
       );
     }
 
-    const purpleTeamHome = url.pathname === "/admin/purple-team" || url.pathname === "/admin/purple-team/";
-    if (
-      url.pathname === "/admin/purple-team/recon" ||
-      (purpleTeamHome && isReadApiMethod(request) && url.searchParams.has("t"))
-    ) {
-      if (!isReadApiMethod(request)) return methodNotAllowedResponse();
-      return withoutResponseBodyForHead(
-        request,
-        await adminPurpleTeamReconPage(request, env, applySecurityHeaders),
-      );
-    }
-    if (purpleTeamHome) {
-      if (!isReadApiMethod(request) && request.method !== "POST") return methodNotAllowedResponse("GET, HEAD, POST");
-      return withoutResponseBodyForHead(
-        request,
-        await adminPurpleTeamTools(request, env, applySecurityHeaders, (probe) => worker.fetch(probe, env, ctx)),
-      );
+    if (url.pathname.startsWith(OPERATIONS_PATH + "/")) {
+      const tool = url.pathname.slice(OPERATIONS_PATH.length + 1).replace(/\/$/, "");
+      if (["recon", "osv", "vulnerabilities", "assessment", "dependency-audit", "ct"].includes(tool)) {
+        return withoutResponseBodyForHead(request,
+          await retiredPurpleTeamRoute(request, env, applySecurityHeaders, tool !== "ct"));
+      }
     }
 
     // --- Stripe Payment Link + webhook entitlement ---

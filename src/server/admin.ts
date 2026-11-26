@@ -19,9 +19,7 @@ import * as openpgp from "openpgp";
 import {
   assertNoPrivateKeyMaterial,
   authSessionStorageKey,
-  authUserStorageKey,
   sessionRecordsForAccount,
-  SESSION_COOKIE,
   clientIp,
   getSessionUser,
   hasUnexpiredTimestamp,
@@ -63,21 +61,12 @@ import {
 import { AUTH_BAN_SECONDS, AUTH_FAIL_LIMIT, AUTH_FAIL_WINDOW_SECONDS } from "./authBan";
 import { listLoginAttempts, readLoginChainTip } from "./loginLog";
 import { BodyLimitError, readBoundedText } from "./boundedBody";
-import {
-  assessmentPage,
-  dependencyAuditPage,
-  lookupPackageAdvisories,
-  packageAdvisoriesPage,
-} from "./purpleTeamAdvisories";
-import { PURPLE_TEAM_CSP, PURPLE_TEAM_HTML } from "./purpleTeamHtml";
 import { CANARY_PATH, purpleTeamDirectory, purpleTeamHost, type PurpleTeamBindings } from "./purpleTeamDirectory";
-import { scanHostname } from "./purpleTeamDns";
-import { purpleTeamToolsPage, runAdminControlChecks, runSignedOutView, type ToolResult } from "./purpleTeamTools";
+import type { ToolFinding, ToolResult } from "./purpleTeamTools";
 import { operationsPage, type OperationsPageData } from "./securityOperationsPage";
 import { runFeedIsolationDrill, runSessionContainmentDrill } from "./securityOperationsDrills";
-import { detectOperationsAlerts, previewOperationsPolicy, rehearsalAlerts, RECENT_AUDIT_LIMIT, RECENT_LOGIN_LIMIT } from "./securityOperationsModel";
+import { detectOperationsAlerts, OPERATIONS_PATH, RECENT_AUDIT_LIMIT, RECENT_LOGIN_LIMIT } from "./securityOperationsModel";
 import { validSessionReference } from "./sessionContainment";
-import type { ToolFinding } from "./verifiedDomainScan";
 import {
   PQC_LOG_ALG,
   PQC_LOG_BYTES,
@@ -572,72 +561,6 @@ async function confirmDrillAudit(
   }
 }
 
-async function runAccessDrill(request: Request, env: AdminEnv, operator: UserRecord): Promise<ToolResult> {
-  const runId = crypto.randomUUID();
-  const at = new Date().toISOString();
-  const testAdmin: UserRecord = {
-    id: "drill-admin", fingerprint: randomHex(20), publicKeyArmored: "drill fixture", primaryUserId: null, createdAt: at,
-  };
-  const regular: UserRecord = { ...testAdmin, id: "drill-user", fingerprint: randomHex(20) };
-  const active: AdminEnv = { ADMIN_FINGERPRINTS: testAdmin.fingerprint };
-  const ordinarySession = randomHex(32);
-  const disposableSession = randomHex(32);
-  const fixtureData = new Map<string, string>();
-  for (const [id, user] of [[ordinarySession, regular], [disposableSession, testAdmin]] as const) {
-    fixtureData.set(authUserStorageKey(user.id), JSON.stringify(user));
-    fixtureData.set(authSessionStorageKey(id), JSON.stringify({
-      userId: user.id, createdAt: at, expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    }));
-  }
-  const fixtureKv = {
-    async get(key: string) { return fixtureData.get(key) ?? null; },
-    async delete(key: string) { fixtureData.delete(key); },
-  };
-  // The fixtures exercise the same session reader and gates with only local records.
-  // Neither test identities nor session tokens are written to production KV.
-  const findings: ToolFinding[] = [];
-
-  async function execute(
-    check: string, label: string, expected: number, fixtureEnv: AdminEnv, sessionId?: string,
-    started?: number,
-  ) {
-    let signal: string | null = null;
-    const audit: RecordAudit = async (entry) => { signal = entry.action; };
-    const fixtureRequest = new Request(new URL("/admin/purple-team", request.url), {
-      headers: sessionId ? { cookie: SESSION_COOKIE + "=" + sessionId } : undefined,
-    });
-    const session = await getSessionUser(fixtureRequest, { BILLING_KV: fixtureKv });
-    const gate = await authorizeAdminSession(fixtureRequest, fixtureEnv, session, undefined, audit);
-    const denied = gate.ok
-      ? await rejectUnlessAllowlistedFingerprint(fixtureRequest, fixtureEnv, gate.user, undefined, audit)
-      : gate.response;
-    const observed = denied?.status ?? 200;
-    const elapsed = started === undefined ? "" : " · " + (Date.now() - started) + " ms to denial";
-    const expectedSignal = label === "ordinary" ? "admin_denied"
-      : label === "revoked-role" ? "admin_fingerprint_denied" : null;
-    const matches = observed === expected && signal === expectedSignal;
-    const auditVisible = await confirmDrillAudit(
-      env, operator, request, runId + " " + label + " " + observed + " " + (signal ?? "session-gate"), matches,
-    );
-    findings.push({
-      check, status: !matches ? "review" : auditVisible ? "pass" : "unknown",
-      evidence: "Expected HTTP " + expected + " · Observed HTTP " + observed + elapsed +
-        " · " + (auditVisible ? "Globe audit event confirmed." : "Globe audit event was unavailable on readback."),
-      remediation: !matches ? "Review the admin session and fingerprint checks for this scenario." : undefined,
-    });
-  }
-
-  await execute("Signed-out visitor", "signed-out", 401, active);
-  await execute("Regular test account", "ordinary", 403, active, ordinarySession);
-  await execute("Allowlisted test admin", "active-admin", 200, active, disposableSession);
-  await execute("Test admin fingerprint removed", "revoked-role", 403, { ADMIN_USER_IDS: testAdmin.id }, disposableSession);
-  const revokedAt = Date.now();
-  await fixtureKv.delete(authSessionStorageKey(disposableSession));
-  await execute("Disposable session revoked", "revoked-session", 401, active, disposableSession, revokedAt);
-
-  return { title: "Access and containment drill", runId, findings };
-}
-
 async function runCanaryDrill(
   request: Request,
   env: AdminEnv & PurpleTeamBindings,
@@ -667,18 +590,6 @@ async function runCanaryDrill(
   };
 }
 
-const scanNotices: Record<string, string> = {
-  invalid_hostname: "Enter an exact public hostname.",
-  proof_missing: "The expected TXT record is missing. Scans are paused until you verify the hostname.",
-  proof_unavailable: "DNS verification is temporarily unavailable. Scans are paused until you verify the hostname.",
-  proof_required: "Verify the hostname before running or scheduling a scan.",
-  host_not_pending: "Issue a fresh challenge for this hostname.",
-  scan_in_progress: "A scan is already running for this hostname.",
-  authorization_changed: "Hostname authorization changed. Reload the hostname before retrying.",
-  unknown_report: "This scan is outside the current history.",
-  invalid_schedule: "Choose Off, Daily, or Weekly.",
-};
-
 type OperationsEnv = AdminEnv & PurpleTeamBindings & Pick<Env, "Globe">;
 const globeRoom = (env: OperationsEnv, name: string) => env.Globe.get(env.Globe.idFromName(name));
 
@@ -691,23 +602,33 @@ export async function adminSecurityOperations(
   const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
   const directory = purpleTeamDirectory(env);
+  const url = new URL(request.url);
   const render = async (details: Partial<OperationsPageData> = {}) => {
-    const [room, pause, inbox] = await Promise.allSettled([
+    const [room, inbox] = await Promise.allSettled([
       globeRoom(env, "default").operationsStatus(),
-      directory.peerRequestsPaused(),
       directory.operationsAlerts(),
     ]);
     return operationsPage({
       checkedAt: new Date().toISOString(),
       edge: String(request.cf?.colo ?? "").slice(0, 8),
       room: room.status === "fulfilled" ? room.value : null,
-      paused: pause.status === "fulfilled" ? pause.value : null,
       inbox: inbox.status === "fulfilled" ? inbox.value : null,
       ...details,
     }, applySecurityHeaders);
   };
-  if (request.method !== "POST") return render();
-  const url = new URL(request.url);
+  if (request.method !== "POST") {
+    const host = url.searchParams.get("host");
+    if (!host) return render();
+    try {
+      if (host.length <= 253 && await directory.hasHost(host)) {
+        const archive = await purpleTeamHost(env, host).view(url.searchParams.get("report") || undefined);
+        if (archive.state?.hostname === host) return await render({ archive });
+      }
+      return render({ notice: "Saved website report unavailable.", status: 404 });
+    } catch {
+      return render({ notice: "Saved website reports are temporarily unavailable.", status: 503 });
+    }
+  }
   if (request.headers.get("origin") !== url.origin) {
     return json({ error: "same_origin_required" }, { status: 403 }, applySecurityHeaders);
   }
@@ -737,32 +658,9 @@ export async function adminSecurityOperations(
   };
 
   try {
-    if (tool === "revocation") return await result("Session and socket containment", await runSessionContainmentDrill());
-    if (tool === "isolation") return await result("Live Feed isolation drill", await runFeedIsolationDrill());
-    if (tool === "rehearsal") {
-      const started = Date.now();
-      const alerts = rehearsalAlerts(runId, started);
-      await directory.recordOperationsAlerts(alerts);
-      const inbox = await directory.operationsAlerts();
-      const expected = ["rejected-logins", "admin-change"] as const;
-      return await result("Detection rehearsal", expected.map((kind, index) => {
-        const found = inbox.some(row => row.exercise && row.kind === kind && row.id.startsWith("exercise:" + runId + ":"));
-        return {
-          check: index === 0 ? "Denied sign-in detection" : "Admin role-change detection",
-          status: found ? "pass" : "review",
-          evidence: found ? "Exercise alert confirmed in the SOC inbox in " + (Date.now() - started) + " ms."
-            : "The matching exercise alert was unavailable.",
-        };
-      }));
-    }
-    if (tool === "preview") {
-      const quota = Number(fields.get("quota"));
-      if (!Number.isInteger(quota) || quota < 1 || quota > 20) return await render({ notice: "Choose a quota from 1 to 20." });
-      const policy = { requireFingerprint: fields.has("fingerprint"), sameOrigin: fields.has("same_origin"), quota };
-      return await render({
-        policy,
-        result: { title: "Policy preview", findings: previewOperationsPolicy(policy) },
-      });
+    if (tool === "drills") {
+      const [session, feed] = await Promise.all([runSessionContainmentDrill(), runFeedIsolationDrill()]);
+      return await result("Local session and Live Feed drills", [...session, ...feed]);
     }
     if (tool === "evaluate") {
       const [logins, audits] = await Promise.all([
@@ -790,12 +688,12 @@ export async function adminSecurityOperations(
         : "The alert state is already current or the alert has expired.";
       return await render({ notice });
     }
-    if (tool === "health") {
+    if (tool === "checks" || tool === "health") {
       const checks = [
         { path: "/", check: "Globe shell", expected: 200 },
         { path: "/api/auth/me", check: "Session endpoint", expected: 200 },
         { path: "/api/live-feed/connection", check: "Live Feed connection endpoint", expected: 200 },
-        { path: "/admin/purple-team/operations", check: "Operations signed-out gate", expected: 401 },
+        { path: OPERATIONS_PATH, check: "Purple Team signed-out gate", expected: 401 },
       ];
       const findings: ToolFinding[] = [];
       for (const spec of checks) {
@@ -813,12 +711,36 @@ export async function adminSecurityOperations(
           findings.push({ check: spec.check, status: "unknown", evidence: "The Worker did not return a response." });
         }
       }
-      return await render({ result: { title: "Globe service checks", findings } });
+      let canaryId: string | undefined;
+      try {
+        const canary = await runCanaryDrill(request, env, gate.user, dispatch);
+        canaryId = canary.runId;
+        findings.push(...canary.findings);
+      } catch {
+        findings.push({ check: "Canary", status: "unknown", evidence: "The canary receipt could not be checked." });
+      }
+      return await render({ result: { title: "Globe checks", runId: canaryId, findings } });
     }
   } catch {
     return render({ notice: "An operations service was unavailable. Refresh its state before retrying.", status: 503 });
   }
   return json({ error: "invalid_tool" }, { status: 400 }, applySecurityHeaders);
+}
+
+export async function retiredPurpleTeamRoute(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders: SecurityHeadersFn,
+  page: boolean,
+): Promise<Response> {
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  if (page && (request.method === "GET" || request.method === "HEAD")) {
+    const headers = new Headers({ location: OPERATIONS_PATH, "cache-control": "private, no-store" });
+    applySecurityHeaders(headers);
+    return new Response(null, { status: 303, headers });
+  }
+  return json({ error: "purple_team_tool_retired" }, { status: 410 }, applySecurityHeaders);
 }
 
 export async function adminSessionContainment(
@@ -902,349 +824,6 @@ export async function adminSessionContainment(
   } catch {
     return send({ error: "operations_unavailable", message: "The operations service is unavailable. Check its state before retrying." }, 503);
   }
-}
-
-export async function adminPurpleTeamTools(
-  request: Request,
-  env: AdminEnv & PurpleTeamBindings,
-  applySecurityHeaders: SecurityHeadersFn,
-  dispatch: (request: Request) => Promise<Response>,
-): Promise<Response> {
-  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
-  if (!gate.ok) return gate.response;
-
-  const url = new URL(request.url);
-  const directory = purpleTeamDirectory(env);
-  const hostnames = await directory.hostnames();
-  const requestedHost = url.searchParams.get("host");
-  const selected = requestedHost && hostnames.includes(requestedHost) ? requestedHost : hostnames[0];
-  const loadView = async (hostname?: string, reportId?: string) =>
-    hostname ? purpleTeamHost(env, hostname).view(reportId) : null;
-  const render = async (hostname = selected, options: { notice?: string; status?: number; result?: ToolResult; reportId?: string } = {}) =>
-    purpleTeamToolsPage({ ...options, hostnames, view: await loadView(hostname, options.reportId) }, applySecurityHeaders);
-
-  if (request.method !== "POST") return render(selected, { reportId: url.searchParams.get("report") ?? undefined });
-  if (request.headers.get("origin") !== url.origin) {
-    return json({ error: "same_origin_required" }, { status: 403 }, applySecurityHeaders);
-  }
-  if (!/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(request.headers.get("content-type") ?? "")) {
-    return json({ error: "form_required" }, { status: 415 }, applySecurityHeaders);
-  }
-  let fields: URLSearchParams;
-  try {
-    fields = new URLSearchParams(await readBoundedText(request.body, 2048));
-  } catch (error) {
-    const tooLarge = error instanceof BodyLimitError;
-    return json({ error: tooLarge ? "body_too_large" : "invalid_form" }, { status: tooLarge ? 413 : 400 }, applySecurityHeaders);
-  }
-
-  const tool = fields.get("tool");
-  if (!tool || !["access", "visibility", "drill", "canary", "register", "verify", "revoke", "schedule", "web", "baseline"].includes(tool)) {
-    return json({ error: "invalid_tool" }, { status: 400 }, applySecurityHeaders);
-  }
-  const limited = await rateLimitDurable(
-    env, "purple:tools:" + tool + ":" + gate.user.id, tool === "web" ? 5 : 4, 60_000, applySecurityHeaders,
-  );
-  if (limited) return limited;
-
-  if (tool === "access" || tool === "visibility") {
-    const result = tool === "access"
-      ? { title: "Globe access checks", findings: await runAdminControlChecks(request, dispatch) }
-      : { title: "Globe signed-out view", findings: await runSignedOutView(request, dispatch) };
-    return render(selected, { result });
-  }
-  if (tool === "drill") return render(selected, { result: await runAccessDrill(request, env, gate.user) });
-  if (tool === "canary") return render(selected, { result: await runCanaryDrill(request, env, gate.user, dispatch) });
-
-  const hostname = scanHostname(fields.get("hostname") ?? "");
-  if (!hostname) return render(selected, { status: 400, notice: scanNotices.invalid_hostname });
-  if (tool !== "register" && !hostnames.includes(hostname)) {
-    return json({ error: "domain_not_verified" }, { status: 403 }, applySecurityHeaders);
-  }
-  const state = purpleTeamHost(env, hostname);
-  const by = gate.user.id;
-  let command;
-  let notice = "";
-  switch (tool) {
-    case "register":
-      command = await state.register(hostname, by);
-      if (command.ok && !hostnames.includes(hostname)) {
-        await directory.addHost(hostname);
-        hostnames.push(hostname);
-        hostnames.sort();
-      }
-      notice = "DNS challenge ready.";
-      break;
-    case "verify":
-      command = await state.verify(by);
-      notice = "Hostname verified.";
-      break;
-    case "revoke":
-      command = await state.revoke(by);
-      notice = "Hostname verification revoked.";
-      break;
-    case "schedule": {
-      const schedule = fields.get("schedule");
-      if (schedule !== "off" && schedule !== "daily" && schedule !== "weekly") {
-        return render(hostname, { status: 400, notice: scanNotices.invalid_schedule });
-      }
-      command = await state.setSchedule(schedule);
-      notice = schedule === "off" ? "Recurring scans disabled." : "Recurring scans scheduled.";
-      break;
-    }
-    case "baseline":
-      command = await state.approveBaseline(fields.get("report") ?? "", by);
-      notice = "Baseline approved.";
-      break;
-    case "web":
-      command = await state.scan(by);
-      notice = "Web checks complete.";
-      break;
-    default:
-      return json({ error: "invalid_tool" }, { status: 400 }, applySecurityHeaders);
-  }
-  await writeAudit(env, {
-    at: new Date().toISOString(), adminUserId: by, adminFingerprint: gate.user.fingerprint,
-    action: "purple_host_" + tool, detail: hostname, ip: clientIp(request), ok: command.ok,
-  });
-  return command.ok ? render(hostname, { notice, reportId: command.reportId ?? (tool === "baseline" ? fields.get("report") ?? undefined : undefined) })
-    : render(hostname, { status: 409, notice: scanNotices[command.error] ?? "The action is unavailable. Retry after reloading the hostname." });
-}
-
-/**
- * GET /admin/purple-team/recon — admin-only Purple Team Recon console.
- * Requires an allowlisted admin session AND an exact fingerprint allowlist
- * match. Non-admins get the same 401/403 JSON as the admin API.
- * The page sets its own CSP (it calls public recon APIs client-side) and is
- * never cached or indexed.
- */
-export async function adminPurpleTeamReconPage(
-  request: Request,
-  env: AdminEnv,
-  applySecurityHeaders?: SecurityHeadersFn,
-): Promise<Response> {
-  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
-  if (!gate.ok) return gate.response;
-
-  const headers = new Headers({
-    "content-type": "text/html; charset=utf-8",
-    "cache-control": "private, no-store",
-    vary: "Cookie",
-    "x-robots-tag": "noindex, nofollow, noarchive",
-    "content-security-policy": PURPLE_TEAM_CSP,
-    "referrer-policy": "no-referrer",
-  });
-  // Fills the remaining site security headers without overriding the CSP above.
-  applySecurityHeaders?.(headers);
-  const html = PURPLE_TEAM_HTML.replace('<div class="wrap">', '<div class="wrap">' + PURPLE_TEAM_ADVISORY_LINKS);
-  return new Response(html, { status: 200, headers });
-}
-
-const PURPLE_TEAM_ADVISORY_LINKS = `
-<p><a style="color:var(--pur)" href="/admin/purple-team">Back to Purple Team tools</a></p>
-<div class="card">
-  <h2>Software vulnerability intelligence <span class="tag blue">OSV</span></h2>
-  <p>Check installed software versions against published security advisories.</p>
-  <a style="color:var(--pur)" href="/admin/purple-team/vulnerabilities">Open vulnerability checker</a> ·
-  <a style="color:var(--pur)" href="/admin/purple-team/assessment">Assessment &amp; Risk Center</a> ·
-  <a style="color:var(--pur)" href="/admin/purple-team/dependency-audit">Run dependency audit</a>
-</div>`;
-
-export async function adminPurpleTeamAdvisories(
-  request: Request,
-  env: AdminEnv,
-  applySecurityHeaders?: SecurityHeadersFn,
-): Promise<Response> {
-  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
-  if (!gate.ok) return gate.response;
-
-  const url = new URL(request.url);
-  if (request.method === "POST" && request.headers.get("origin") !== url.origin) {
-    return json({ error: "same_origin_required" }, { status: 403 }, applySecurityHeaders);
-  }
-  const limit = (action: string, requests: number) =>
-    rateLimitDurable(env, "purple:" + action + ":" + gate.user.id, requests, 60_000, applySecurityHeaders);
-
-  switch (url.pathname) {
-    case "/admin/purple-team/assessment": {
-      const limited = await limit("center", 12);
-      return limited ?? assessmentPage(request, url.searchParams, applySecurityHeaders);
-    }
-    case "/admin/purple-team/dependency-audit": {
-      const limited = request.method === "POST" ? await limit("repo-audit", 2) : null;
-      return limited ?? dependencyAuditPage(request, applySecurityHeaders);
-    }
-    case "/admin/purple-team/vulnerabilities": {
-      const limited = url.searchParams.has("package") ? await limit("osv", 10) : null;
-      return limited ?? packageAdvisoriesPage(url.searchParams, applySecurityHeaders);
-    }
-    case "/admin/purple-team/osv": {
-      const limited = await limit("osv", 10);
-      if (limited) return limited;
-      const { data, status } = await lookupPackageAdvisories(url.searchParams);
-      return json(data, { status }, applySecurityHeaders);
-    }
-    default:
-      return json({ error: "not_found" }, { status: 404 }, applySecurityHeaders);
-  }
-}
-
-const PURPLE_CT_DOMAIN_RE =
-  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
-const PURPLE_CT_CACHE_TTL_SEC = 3600;
-const PURPLE_CT_MAX_NAMES = 5000;
-const PURPLE_CT_MAX_PAGES = 3;
-
-type PurpleCtResult = { source: string; names: string[]; partial: boolean };
-
-async function purpleCtFetchJson(url: string, timeoutMs: number): Promise<unknown> {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: ctl.signal,
-      headers: { accept: "application/json", "user-agent": "globe-purple-team-ct/1.0" },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function purpleCtNames(list: unknown[], domain: string): string[] {
-  const out = new Set<string>();
-  for (const raw of list) {
-    const n = String(raw ?? "").toLowerCase().trim().replace(/^\*\./, "");
-    if ((n === domain || n.endsWith("." + domain)) && n.length <= 253) out.add(n);
-    if (out.size >= PURPLE_CT_MAX_NAMES) break;
-  }
-  return [...out].sort();
-}
-
-/** Cert Spotter issuances API (paged via ?after=<last id>, a few pages max). */
-async function purpleCtFromCertSpotter(domain: string): Promise<PurpleCtResult> {
-  const names: unknown[] = [];
-  let after = "";
-  let partial = false;
-  for (let page = 0; page < PURPLE_CT_MAX_PAGES; page++) {
-    const url =
-      "https://api.certspotter.com/v1/issuances?domain=" +
-      encodeURIComponent(domain) +
-      "&include_subdomains=true&expand=dns_names" +
-      (after ? "&after=" + encodeURIComponent(after) : "");
-    let rows: unknown;
-    try {
-      rows = await purpleCtFetchJson(url, 12_000);
-    } catch (err) {
-      // 429 / timeout after the first page: keep what we have.
-      if (page > 0) {
-        partial = true;
-        break;
-      }
-      throw err;
-    }
-    if (!Array.isArray(rows) || rows.length === 0) break;
-    for (const row of rows as Array<{ id?: string; dns_names?: unknown[] }>) {
-      for (const n of row?.dns_names ?? []) names.push(n);
-    }
-    const last = (rows[rows.length - 1] as { id?: string } | undefined)?.id;
-    if (!last || String(last) === after) break;
-    after = String(last);
-    if (page === PURPLE_CT_MAX_PAGES - 1) partial = true;
-  }
-  return { source: "Cert Spotter", names: purpleCtNames(names, domain), partial };
-}
-
-/** crt.sh JSON (slow; fallback only). */
-async function purpleCtFromCrtSh(domain: string): Promise<PurpleCtResult> {
-  const rows = await purpleCtFetchJson(
-    "https://crt.sh/?q=" + encodeURIComponent("%." + domain) + "&output=json",
-    20_000,
-  );
-  if (!Array.isArray(rows)) throw new Error("bad crt.sh response");
-  const names: unknown[] = [];
-  for (const row of rows as Array<{ name_value?: string }>) {
-    for (const n of String(row?.name_value ?? "").split("\n")) names.push(n);
-  }
-  return { source: "crt.sh", names: purpleCtNames(names, domain), partial: false };
-}
-
-/**
- * GET /admin/purple-team/ct?domain=<apex> — admin-gated CT subdomain lookup
- * used by the recon page when the browser can't reach Cert Spotter directly.
- * Fixed upstreams only (Cert Spotter, then crt.sh), strict domain validation,
- * results cached in BILLING_KV for an hour. Not an open proxy.
- */
-export async function adminPurpleTeamCt(
-  request: Request,
-  env: AdminEnv,
-  applySecurityHeaders?: SecurityHeadersFn,
-): Promise<Response> {
-  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
-  if (!gate.ok) return gate.response;
-
-  const domain = (new URL(request.url).searchParams.get("domain") || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\.$/, "");
-  if (!PURPLE_CT_DOMAIN_RE.test(domain)) {
-    return json(
-      {
-        error: "invalid_domain",
-        message: "Pass ?domain=<registrable domain>, letters/digits/hyphens only.",
-      },
-      { status: 400 },
-      applySecurityHeaders,
-    );
-  }
-
-  const cacheKey = `purple:ct:v1:${domain}`;
-  if (env.BILLING_KV) {
-    try {
-      const hit = await env.BILLING_KV.get(cacheKey);
-      if (hit) {
-        return json({ ...JSON.parse(hit), cached: true }, { status: 200 }, applySecurityHeaders);
-      }
-    } catch {
-      // cache miss on error
-    }
-  }
-
-  const errors: string[] = [];
-  let result: PurpleCtResult | null = null;
-  const sources: Array<[string, (d: string) => Promise<PurpleCtResult>]> = [
-    ["certspotter", purpleCtFromCertSpotter],
-    ["crt.sh", purpleCtFromCrtSh],
-  ];
-  for (const [label, source] of sources) {
-    try {
-      result = await source(domain);
-      break;
-    } catch (err) {
-      const e = err as { name?: string; message?: string };
-      errors.push(`${label}: ${e?.name === "AbortError" ? "timeout" : String(e?.message ?? err).slice(0, 80)}`);
-    }
-  }
-  if (!result) {
-    return json(
-      { error: "upstream_unavailable", message: "No CT source answered.", errors },
-      { status: 502 },
-      applySecurityHeaders,
-    );
-  }
-
-  const payload = { domain, ...result, fetchedAt: new Date().toISOString(), errors };
-  if (env.BILLING_KV) {
-    try {
-      await env.BILLING_KV.put(cacheKey, JSON.stringify(payload), {
-        expirationTtl: PURPLE_CT_CACHE_TTL_SEC,
-      });
-    } catch {
-      // caching is best-effort
-    }
-  }
-  return json({ ...payload, cached: false }, { status: 200 }, applySecurityHeaders);
 }
 
 /**
