@@ -1,6 +1,7 @@
 import React from "react";
 import type { GlobeApi } from "./useGlobeApp";
 import { Cobe } from "./CobeGlobe";
+import { ReconGlobeOverlay } from "./ReconGlobeOverlay";
 import { FloatingChrome } from "./FloatingChrome";
 import { safeGlobeHref } from "./safeUrl";
 import type { UnGlobalPreview } from "../shared";
@@ -262,7 +263,8 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
           )}
         </FloatingChrome>
       )}<div className={`main-content ${showTradePulsePanel ? "trade-pulse-main" : ""}`}>
-        <div className="globe-stage">
+        <div className="globe-stage" style={{position:"relative"}}>
+          <ReconGlobeOverlay enabled={Boolean(isAdmin && authUser)} />
           <Cobe
             counter={counter}
             positions={positions.current}
