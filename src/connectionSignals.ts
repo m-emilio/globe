@@ -43,7 +43,7 @@ export type SignalServerMessage =
   | { type: "signal-sent"; id: string; to: string; check: ConnectionCheck }
   | { type: "signal-result"; id: string; outcome: CheckOutcome }
   | { type: "signal-cancel"; id: string }
-  | { type: "signal-error"; reason: "unavailable" | "busy" | "rate-limit" };
+  | { type: "signal-error"; reason: "unavailable" | "busy" | "rate-limit" | "paused" };
 
 export function isConnectionCheck(value: unknown): value is ConnectionCheck {
   return typeof value === "string" && Object.hasOwn(CONNECTION_CHECKS, value);

@@ -92,7 +92,7 @@ export async function runAdminControlChecks(request: Request, dispatch: Dispatch
   return findings;
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character,
   );
@@ -106,6 +106,7 @@ export async function runSignedOutView(request: Request, dispatch: Dispatch): Pr
     [PURPLE_TEAM_PATH + "/vulnerabilities", true],
     [PURPLE_TEAM_PATH + "/assessment", true],
     [PURPLE_TEAM_PATH + "/dependency-audit", true],
+    [PURPLE_TEAM_PATH + "/operations", true],
   ] as const;
   const findings: ToolFinding[] = [];
   for (const [path, guarded] of pages) {
@@ -128,7 +129,7 @@ export async function runSignedOutView(request: Request, dispatch: Dispatch): Pr
   return findings;
 }
 
-function showChecks(findings: ToolFinding[]): string {
+export function showChecks(findings: ToolFinding[]): string {
   const labels = { pass: "Pass", review: "Review", unknown: "Unknown" };
   return `<ul class="checks">${findings.map(({ check, status, evidence, remediation }) => `
     <li>
@@ -277,6 +278,7 @@ export function purpleTeamToolsPage(page: ToolsPage, applySecurityHeaders?: Secu
       <h1>Purple Team</h1>
       <nav aria-label="Purple Team">
         <span aria-current="page">Tools</span>
+        <a href="/admin/purple-team/operations">Operations</a>
         <a href="/admin/purple-team/recon">Recon</a>
         <a href="/admin/purple-team/vulnerabilities">Advisory lookup</a>
         <a href="/admin/purple-team/dependency-audit">Dependency audit</a>

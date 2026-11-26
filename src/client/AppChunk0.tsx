@@ -9,6 +9,7 @@ import { ActivityFeed, type ActivityFilter } from "./ActivityFeed";
 import { formatFingerprint, getKeyGenProfile, keyGenProfilesBySafety, SAFETY_LEVEL_META, shortFingerprint, S2K_PROTOCOLS, SYMMETRIC_CIPHERS, type AeadModeId, type KeyGenProfileId, type S2kProtocolId, type SymmetricCipherId } from "./pgpAuth";
 import { NearbyMap, TransitPanelContent } from "./lazyPanels";
 import { AdminManageAdmins } from "./AdminManageAdmins";
+import { AdminContainment } from "./AdminContainment";
 import { DEFAULT_WEATHER_LOCATION, formatForecastDay, formatForecastHour } from "./globeModel";
 
 type AccessMark = "stripe" | "admin" | "unrecorded" | null;
@@ -792,6 +793,8 @@ export function AppChunk0({ b, standaloneFeed }: { b: GlobeApi; standaloneFeed: 
                     </button>
                   </div>
                 )}
+
+                <AdminContainment elevated={adminElevationValid()} />
 
                 <AdminManageAdmins
                   adminElevationValid={adminElevationValid}

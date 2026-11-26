@@ -20,6 +20,7 @@ import {
   assertNoPrivateKeyMaterial,
   authSessionStorageKey,
   authUserStorageKey,
+  sessionRecordsForAccount,
   SESSION_COOKIE,
   clientIp,
   getSessionUser,
@@ -72,6 +73,10 @@ import { PURPLE_TEAM_CSP, PURPLE_TEAM_HTML } from "./purpleTeamHtml";
 import { CANARY_PATH, purpleTeamDirectory, purpleTeamHost, type PurpleTeamBindings } from "./purpleTeamDirectory";
 import { scanHostname } from "./purpleTeamDns";
 import { purpleTeamToolsPage, runAdminControlChecks, runSignedOutView, type ToolResult } from "./purpleTeamTools";
+import { operationsPage, type OperationsPageData } from "./securityOperationsPage";
+import { runFeedIsolationDrill, runSessionContainmentDrill } from "./securityOperationsDrills";
+import { detectOperationsAlerts, previewOperationsPolicy, rehearsalAlerts, RECENT_AUDIT_LIMIT, RECENT_LOGIN_LIMIT } from "./securityOperationsModel";
+import { validSessionReference } from "./sessionContainment";
 import type { ToolFinding } from "./verifiedDomainScan";
 import {
   PQC_LOG_ALG,
@@ -379,12 +384,13 @@ async function listPrefixedKeys(env: AdminEnv, prefix: string): Promise<string[]
   return names;
 }
 
-async function listPublicAudits(env: AdminEnv, take = 40): Promise<PublicAudit[]> {
+async function listPublicAudits(env: AdminEnv, take = 40, includeLegacy = true): Promise<PublicAudit[]> {
   if (!env.BILLING_KV) return [];
   const scan = Math.min(Math.max(take, 1), 100);
   const pepper = readLogPepper(env);
-  const sealed = (await listPrefixedKeys(env, "admin:seal:")).slice(0, scan);
-  const legacy = await listPrefixedKeys(env, "admin:audit:");
+  const sealed = includeLegacy ? (await listPrefixedKeys(env, "admin:seal:")).slice(0, scan)
+    : (await env.BILLING_KV.list({ prefix: "admin:seal:", limit: scan })).keys.map(key => key.name);
+  const legacy = includeLegacy ? await listPrefixedKeys(env, "admin:audit:") : [];
   const names = [...sealed, ...legacy.slice(-scan)];
   const entries: PublicAudit[] = [];
   for (const name of names) {
@@ -672,6 +678,231 @@ const scanNotices: Record<string, string> = {
   unknown_report: "This scan is outside the current history.",
   invalid_schedule: "Choose Off, Daily, or Weekly.",
 };
+
+type OperationsEnv = AdminEnv & PurpleTeamBindings & Pick<Env, "Globe">;
+const globeRoom = (env: OperationsEnv, name: string) => env.Globe.get(env.Globe.idFromName(name));
+
+export async function adminSecurityOperations(
+  request: Request,
+  env: OperationsEnv,
+  applySecurityHeaders: SecurityHeadersFn,
+  dispatch: (request: Request) => Promise<Response>,
+): Promise<Response> {
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  const directory = purpleTeamDirectory(env);
+  const render = async (details: Partial<OperationsPageData> = {}) => {
+    const [room, pause, inbox] = await Promise.allSettled([
+      globeRoom(env, "default").operationsStatus(),
+      directory.peerRequestsPaused(),
+      directory.operationsAlerts(),
+    ]);
+    return operationsPage({
+      checkedAt: new Date().toISOString(),
+      edge: String(request.cf?.colo ?? "").slice(0, 8),
+      room: room.status === "fulfilled" ? room.value : null,
+      paused: pause.status === "fulfilled" ? pause.value : null,
+      inbox: inbox.status === "fulfilled" ? inbox.value : null,
+      ...details,
+    }, applySecurityHeaders);
+  };
+  if (request.method !== "POST") return render();
+  const url = new URL(request.url);
+  if (request.headers.get("origin") !== url.origin) {
+    return json({ error: "same_origin_required" }, { status: 403 }, applySecurityHeaders);
+  }
+  if (!/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(request.headers.get("content-type") ?? "")) {
+    return json({ error: "form_required" }, { status: 415 }, applySecurityHeaders);
+  }
+  let fields: URLSearchParams;
+  try {
+    fields = new URLSearchParams(await readBoundedText(request.body, 2048));
+  } catch (error) {
+    return error instanceof BodyLimitError ? bodyTooLargeResponse(applySecurityHeaders)
+      : json({ error: "invalid_form" }, { status: 400 }, applySecurityHeaders);
+  }
+  const limited = await rateLimitDurable(env, "purple:operations:" + gate.user.id, 8, 60_000, applySecurityHeaders);
+  if (limited) return limited;
+  const tool = fields.get("tool");
+  const runId = crypto.randomUUID();
+  const result = async (title: string, findings: ToolFinding[]) => {
+    const passed = findings.every(finding => finding.status === "pass");
+    const receipt = await confirmDrillAudit(env, gate.user, request, runId + " " + tool, passed);
+    return render({
+      result: { title, runId, findings: [...findings, {
+        check: "Exercise audit receipt", status: receipt ? "pass" : "unknown",
+        evidence: receipt ? "Confirmed in the sealed admin audit log." : "The audit entry could not be confirmed.",
+      }] },
+    });
+  };
+
+  try {
+    if (tool === "revocation") return await result("Session and socket containment", await runSessionContainmentDrill());
+    if (tool === "isolation") return await result("Live Feed isolation drill", await runFeedIsolationDrill());
+    if (tool === "rehearsal") {
+      const started = Date.now();
+      const alerts = rehearsalAlerts(runId, started);
+      await directory.recordOperationsAlerts(alerts);
+      const inbox = await directory.operationsAlerts();
+      const expected = ["rejected-logins", "admin-change"] as const;
+      return await result("Detection rehearsal", expected.map((kind, index) => {
+        const found = inbox.some(row => row.exercise && row.kind === kind && row.id.startsWith("exercise:" + runId + ":"));
+        return {
+          check: index === 0 ? "Denied sign-in detection" : "Admin role-change detection",
+          status: found ? "pass" : "review",
+          evidence: found ? "Exercise alert confirmed in the SOC inbox in " + (Date.now() - started) + " ms."
+            : "The matching exercise alert was unavailable.",
+        };
+      }));
+    }
+    if (tool === "preview") {
+      const quota = Number(fields.get("quota"));
+      if (!Number.isInteger(quota) || quota < 1 || quota > 20) return await render({ notice: "Choose a quota from 1 to 20." });
+      const policy = { requireFingerprint: fields.has("fingerprint"), sameOrigin: fields.has("same_origin"), quota };
+      return await render({
+        policy,
+        result: { title: "Policy preview", findings: previewOperationsPolicy(policy) },
+      });
+    }
+    if (tool === "evaluate") {
+      const [logins, audits] = await Promise.all([
+        listLoginAttempts(env, RECENT_LOGIN_LIMIT, 0),
+        listPublicAudits(env, RECENT_AUDIT_LIMIT, false),
+      ]);
+      const alerts = detectOperationsAlerts(logins, audits, Date.now());
+      await directory.recordOperationsAlerts(alerts);
+      return await render({ notice: "Evaluated " + logins.length + " sign-in records and " + audits.length +
+        " audit records. Matched " + alerts.length + " detections." });
+    }
+    if (tool === "alert_state") {
+      const id = fields.get("alert") ?? "";
+      const state = fields.get("state");
+      if (!/^[a-z0-9:-]{4,256}$/.test(id) || (state !== "acknowledged" && state !== "resolved" && state !== "open")) {
+        return json({ error: "invalid_alert_update" }, { status: 400 }, applySecurityHeaders);
+      }
+      const actor = accountHash(gate.user.fingerprint, readLogPepper(env)) || userSeal(gate.user.id);
+      const changed = await directory.setOperationsAlertState(id, state, actor);
+      const auditRecorded = changed ? Boolean(await writeAudit(env, {
+        at: new Date().toISOString(), adminUserId: gate.user.id, adminFingerprint: gate.user.fingerprint,
+        action: "operations_alert_state", detail: state + " " + id.slice(0, 140), ip: clientIp(request), ok: true,
+      })) : false;
+      const notice = changed ? "Alert updated." + (auditRecorded ? "" : " Audit receipt unavailable.")
+        : "The alert state is already current or the alert has expired.";
+      return await render({ notice });
+    }
+    if (tool === "health") {
+      const checks = [
+        { path: "/", check: "Globe shell", expected: 200 },
+        { path: "/api/auth/me", check: "Session endpoint", expected: 200 },
+        { path: "/api/live-feed/connection", check: "Live Feed connection endpoint", expected: 200 },
+        { path: "/admin/purple-team/operations", check: "Operations signed-out gate", expected: 401 },
+      ];
+      const findings: ToolFinding[] = [];
+      for (const spec of checks) {
+        const started = Date.now();
+        try {
+          const response = await dispatch(new Request(new URL(spec.path, url), { method: "HEAD" }));
+          await response.body?.cancel();
+          findings.push({
+            check: spec.check,
+            status: response.status === 429 ? "unknown" : response.status === spec.expected ? "pass" : "review",
+            evidence: "Expected HTTP " + spec.expected + " · Observed HTTP " + response.status +
+              " · " + (Date.now() - started) + " ms inside the Worker.",
+          });
+        } catch {
+          findings.push({ check: spec.check, status: "unknown", evidence: "The Worker did not return a response." });
+        }
+      }
+      return await render({ result: { title: "Globe service checks", findings } });
+    }
+  } catch {
+    return render({ notice: "An operations service was unavailable. Refresh its state before retrying.", status: 503 });
+  }
+  return json({ error: "invalid_tool" }, { status: 400 }, applySecurityHeaders);
+}
+
+export async function adminSessionContainment(
+  request: Request,
+  env: OperationsEnv,
+  applySecurityHeaders: SecurityHeadersFn,
+): Promise<Response> {
+  const send = (body: unknown, status = 200) => json(body, { status }, applySecurityHeaders);
+  if (request.headers.get("origin") !== new URL(request.url).origin) return send({ error: "same_origin_required" }, 403);
+  const gate = await requireAdminMutation(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  const limited = await rateLimitDurable(env, "purple:containment:" + gate.user.id, 12, 60_000, applySecurityHeaders);
+  if (limited) return limited;
+  if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get("content-type") ?? "")) {
+    return send({ error: "json_required" }, 415);
+  }
+  let body: { action?: unknown; account?: unknown; reference?: unknown; paused?: unknown };
+  try {
+    body = await readJsonBody(request, 2048) as typeof body;
+  } catch (error) {
+    return error instanceof BodyLimitError ? bodyTooLargeResponse(applySecurityHeaders)
+      : send({ error: "invalid_json" }, 400);
+  }
+  const directory = purpleTeamDirectory(env);
+  const audit = async (action: string, detail: string, targetFingerprint?: string) => Boolean(await writeAudit(env, {
+    at: new Date().toISOString(), adminUserId: gate.user.id, adminFingerprint: gate.user.fingerprint,
+    action, detail, targetFingerprint, ip: clientIp(request), ok: true,
+  }));
+  try {
+    if (body?.action === "status") return send({ paused: await directory.peerRequestsPaused() });
+    if (body?.action === "pause" && typeof body.paused === "boolean") {
+      await directory.setPeerRequestsPaused(body.paused);
+      const auditRecorded = await audit("operations_peer_pause", body.paused ? "paused" : "resumed");
+      return send({ paused: await directory.peerRequestsPaused(), auditRecorded });
+    }
+    if ((body?.action === "retest" || body?.action === "finish_disconnect") && validSessionReference(body.reference)) {
+      const reference = body.reference;
+      const revoked = await directory.isSessionRevoked(reference);
+      if (!revoked) return send({ error: "revocation_unavailable" }, 404);
+      const rooms = new Set(["default", ...await directory.sessionRooms(reference)]);
+      if (body.action === "finish_disconnect") {
+        const results = await Promise.allSettled([...rooms].map(room => globeRoom(env, room).disconnectSession(reference)));
+        await audit("operations_session_disconnect",
+          "session " + reference.slice(0, 12) + " · unconfirmed rooms " + results.filter(row => row.status === "rejected").length);
+      }
+      const counts = await Promise.allSettled([...rooms].map(room => globeRoom(env, room).sessionSocketCount(reference)));
+      const open = counts.reduce((sum, row) => sum + (row.status === "fulfilled" ? row.value : 0), 0);
+      return send({ revoked, open, unknownRooms: counts.filter(row => row.status === "rejected").length });
+    }
+    if (body?.action !== "sessions" && body?.action !== "revoke") return send({ error: "invalid_action" }, 400);
+    const lookup = typeof body.account === "string" ? body.account.trim() : "";
+    if (!lookup || lookup.length > 128) return send({ error: "invalid_account", message: "Enter an exact account ID or fingerprint." }, 400);
+    const fingerprint = normalizeFingerprint(lookup);
+    const user = await getUserById(env, lookup) ??
+      (fingerprint && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(fingerprint) ? await getUserByFingerprint(env, fingerprint) : null);
+    if (!user) return send({ error: "account_not_found", message: "Account not found." }, 404);
+    const sessions = await sessionRecordsForAccount(env, user.id);
+    if (body.action === "sessions") return send({
+      account: user.id,
+      fingerprint: maskFingerprint(user.fingerprint),
+      sessions: await Promise.all(sessions.map(async entry => ({
+        reference: entry.reference, createdAt: entry.createdAt, expiresAt: entry.expiresAt,
+        current: entry.sessionId === gate.sessionId,
+        revoked: await directory.isSessionRevoked(entry.reference),
+      }))),
+    });
+    if (!validSessionReference(body.reference)) return send({ error: "invalid_session_reference" }, 400);
+    const selected = sessions.find(entry => entry.reference === body.reference);
+    if (!selected) return send({ error: "session_unavailable", message: "Reload the account’s sessions." }, 404);
+    if (selected.sessionId === gate.sessionId) return send({ error: "current_session", message: "Use Sign out to end this session." }, 409);
+    await directory.revokeSession(selected.reference, Date.parse(selected.expiresAt));
+    const rooms = new Set(["default", ...await directory.sessionRooms(selected.reference)]);
+    const results = await Promise.allSettled([...rooms].map(room => globeRoom(env, room).disconnectSession(selected.reference)));
+    const disconnected = results.reduce((sum, row) => sum + (row.status === "fulfilled" ? row.value : 0), 0);
+    const unknownRooms = results.filter(row => row.status === "rejected").length;
+    const kvRemoved = await env.BILLING_KV?.delete(authSessionStorageKey(selected.sessionId)).then(() => true, () => false) ?? false;
+    const auditRecorded = await audit("operations_session_revoke",
+      "session " + selected.reference.slice(0, 12) + " · disconnected " + disconnected + " · unconfirmed rooms " + unknownRooms,
+      user.fingerprint);
+    return send({ revoked: true, reference: selected.reference, disconnected, unknownRooms, kvRemoved, auditRecorded });
+  } catch {
+    return send({ error: "operations_unavailable", message: "The operations service is unavailable. Check its state before retrying." }, 503);
+  }
+}
 
 export async function adminPurpleTeamTools(
   request: Request,
