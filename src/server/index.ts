@@ -4618,10 +4618,10 @@ const worker = {
     }
 
     // SAM.gov contracting search — paid gate (login + Stripe when enforced).
-    // API key is Worker secret only. Never public edge-cache (cookie-auth data).
+    // POST carries a one-time key. Responses are private for both search methods.
     if (url.pathname === "/api/sam-contracts-preview") {
-      if (!isReadApiMethod(request)) {
-        return methodNotAllowedResponse();
+      if (!isReadApiMethod(request) && request.method !== "POST") {
+        return methodNotAllowedResponse("GET, HEAD, POST");
       }
       const gate = await requireTransitAccess(
         request,

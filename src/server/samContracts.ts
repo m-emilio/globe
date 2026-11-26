@@ -2,10 +2,11 @@
  * SAM.gov Opportunities Public API proxy for FederalKey Globe.
  *
  * Security:
- * - API key only from Worker secret SAM_API_KEY (never client / git / responses)
+ * - Use the configured Worker secret or a key supplied for one search.
+ * - One-time requests bypass both result caches.
  * - HTTPS host allowlist: api.sam.gov only; no redirects
  * - Query params allowlisted; secrets redacted from errors
- * - Edge + memory cache never stores the key
+ * - The SAM.gov subrequest disables caching and never logs its URL.
  */
 
 import type {
@@ -14,6 +15,8 @@ import type {
   SamOpportunityPreview,
   SamSetAsideCode,
 } from "../shared";
+import { readJsonBody } from "./auth";
+import { BodyLimitError, readBoundedText } from "./boundedBody";
 
 const SAM_API_HOST = "api.sam.gov";
 const SAM_API_PATH = "/opportunities/v2/search";
@@ -30,6 +33,8 @@ const MAX_RESULTS = 60;
 const MAX_REMOTE_QUERIES = 5;
 const MAX_LIMIT = 40;
 const REQUEST_TIMEOUT_MS = 18_000;
+const MAX_SEARCH_BODY_BYTES = 1_024;
+const MAX_SAM_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 /** FederalKey / PKI-aligned NAICS (6-digit). */
 export const SAM_NAICS_CATALOG: Record<string, string> = {
@@ -332,7 +337,7 @@ function sanitizeNaicsList(raw: string[]): string[] {
 
 function parseSearchQuery(url: URL): SearchQuery {
   const presetRaw = (url.searchParams.get("preset") || "pki").toLowerCase();
-  const preset = PRESETS[presetRaw] ? presetRaw : "pki";
+  const preset = Object.hasOwn(PRESETS, presetRaw) ? presetRaw : "pki";
   const q = sanitizeQuery(url.searchParams.get("q") || "");
   let days = Number.parseInt(url.searchParams.get("days") || "30", 10);
   if (!Number.isFinite(days)) days = 30;
@@ -610,48 +615,32 @@ async function samHttpGet(
     return { ok: false, http: 0, body: "", error: "Date range required" };
   }
 
-  // api_key is required by SAM as a query param — never log this URL
-  safe.api_key = apiKey;
   const qs = new URLSearchParams(safe);
+  // SAM.gov requires api_key as an upstream query parameter.
+  qs.set("api_key", apiKey);
   const url = `https://${SAM_API_HOST}${SAM_API_PATH}?${qs.toString()}`;
-  // Clear key from local map ASAP after building URL
-  delete safe.api_key;
 
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    // Workers only support redirect "follow" | "manual" (not "error").
-    // Use manual + reject 3xx so we never follow off allowlisted host.
     const response = await fetch(url, {
       method: "GET",
       redirect: "manual",
-      signal: controller.signal,
+      cache: "no-store",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       headers: {
         accept: "application/json",
         "user-agent": "FederalKey-Globe/1.0 (defense contracting research)",
       },
     });
-    clearTimeout(timer);
-    if (response.status >= 300 && response.status < 400) {
-      return {
-        ok: false,
-        http: response.status,
-        body: "",
-        error: "Blocked redirect from SAM.gov (SSRF guard)",
-      };
-    }
-    const body = await response.text();
     if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
       return {
         ok: false,
         http: response.status,
         body: "",
-        error: redact(
-          `SAM.gov HTTP ${response.status}: ${body.slice(0, 200)}`,
-          apiKey,
-        ),
+        error: `SAM.gov returned HTTP ${response.status}.`,
       };
     }
+    const body = response.body ? await readBoundedText(response.body, MAX_SAM_RESPONSE_BYTES) : "";
     // Defense: never return body containing the key to callers that might log it
     if (body.includes(apiKey)) {
       return {
@@ -662,13 +651,12 @@ async function samHttpGet(
       };
     }
     return { ok: true, http: response.status, body, error: "" };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "sam_upstream_error";
+  } catch {
     return {
       ok: false,
       http: 0,
       body: "",
-      error: redact(msg, apiKey),
+      error: "Could not read the SAM.gov response.",
     };
   }
 }
@@ -740,10 +728,9 @@ function buildMarkers(opps: SamOpportunityPreview[]): SamContractMarker[] {
 }
 
 async function pullLive(
-  env: SamEnv,
+  apiKey: string,
   query: SearchQuery,
 ): Promise<SamContractsPreview> {
-  const apiKey = (env.SAM_API_KEY || "").trim();
   const pulledAt = new Date().toISOString();
   const preset = PRESETS[query.preset] || PRESETS.pki;
   const dates = dateRange(query.days);
@@ -793,7 +780,7 @@ async function pullLive(
       dataMode: "unavailable",
       queryLabel: "SAM.gov API key not configured",
       notes: [
-        "Set Worker secret SAM_API_KEY (Cloudflare Secrets) — never commit keys.",
+        "Enter a SAM.gov API key in the search form.",
         "Create a free key at sam.gov → Account Details → Public API Key.",
       ],
       error: "sam_api_key_missing",
@@ -882,7 +869,7 @@ async function pullLive(
         dataMode: "unavailable",
         queryLabel: preset.label,
         notes: [
-          "SAM.gov rejected the API key. Rotate the key at sam.gov and update Cloudflare secret SAM_API_KEY.",
+          "SAM.gov rejected the API key. Check the key in your SAM.gov account and try again.",
         ],
         error: "sam_unauthorized",
       };
@@ -926,9 +913,6 @@ async function pullLive(
     );
   }
   notes.push(
-    "API key is held only in Cloudflare Worker secrets and never sent to the browser.",
-  );
-  notes.push(
     "Map pins use place-of-performance city/state centroids (approximate).",
   );
   notes.push(
@@ -949,7 +933,7 @@ async function pullLive(
 }
 
 /**
- * Authenticated GET handler for /api/sam-contracts-preview
+ * Authenticated searches. GET/HEAD use the configured key and POST uses a one-time key.
  * (caller must enforce login + paid gate; never edge-cache publicly).
  */
 export async function getSamContractsPreview(
@@ -957,11 +941,36 @@ export async function getSamContractsPreview(
   env: SamEnv,
 ): Promise<Response> {
   const url = new URL(request.url);
+  const oneTime = request.method === "POST";
+  let apiKey = (env.SAM_API_KEY || "").trim();
+  if (oneTime) {
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if ((!loopback && url.protocol !== "https:") || request.headers.get("origin") !== url.origin) {
+      return samRequestError(403, "origin_rejected", "Submit the key from the Globe Contracting tab.");
+    }
+    const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+    if (contentType !== "application/json") {
+      return samRequestError(415, "unsupported_media_type", "Submit the key as JSON.");
+    }
+    try {
+      const body = await readJsonBody(request, MAX_SEARCH_BODY_BYTES) as { apiKey?: unknown } | null;
+      const supplied = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
+      if (!validateApiKey(supplied)) {
+        return samRequestError(400, "sam_api_key_invalid", "Enter a valid SAM.gov API key and try again.");
+      }
+      apiKey = supplied;
+    } catch (error) {
+      if (error instanceof BodyLimitError) {
+        return samRequestError(413, "body_too_large", "The request exceeds the size limit.");
+      }
+      return samRequestError(400, "invalid_json", "The search request could not be read.");
+    }
+  }
   const query = parseSearchQuery(url);
-  const key = cacheKey(query);
+  const key = oneTime ? null : cacheKey(query);
   const force = url.searchParams.get("force") === "1";
 
-  if (!force) {
+  if (key && !force) {
     const mem = memoryCache.get(key);
     if (mem && Date.now() - mem.at < MEMORY_TTL_MS) {
       return new Response(mem.body, {
@@ -997,10 +1006,12 @@ export async function getSamContractsPreview(
     }
   }
 
-  const preview = await pullLive(env, query);
+  const preview = await pullLive(apiKey, query);
+  const message = preview.error === "sam_api_key_missing" ? "Enter a SAM.gov API key for this search."
+    : preview.error === "sam_unauthorized" ? "SAM.gov rejected the API key. Check the key and try again."
+    : undefined;
   // Hard scrub: ensure key never appears in JSON
-  const apiKey = (env.SAM_API_KEY || "").trim();
-  let json = JSON.stringify(preview);
+  let json = JSON.stringify({ ...preview, message });
   if (apiKey && json.includes(apiKey)) {
     json = json.split(apiKey).join("[redacted]");
   }
@@ -1012,14 +1023,16 @@ export async function getSamContractsPreview(
         ? 502
         : 200;
 
-  memoryCache.set(key, { at: Date.now(), body: json, status });
-  if (env.BILLING_KV && status === 200 && preview.opportunityCount > 0) {
-    try {
-      await env.BILLING_KV.put(key, json, {
-        expirationTtl: CACHE_SECONDS,
-      });
-    } catch {
-      // ignore
+  if (key) {
+    memoryCache.set(key, { at: Date.now(), body: json, status });
+    if (env.BILLING_KV && status === 200 && preview.opportunityCount > 0) {
+      try {
+        await env.BILLING_KV.put(key, json, {
+          expirationTtl: CACHE_SECONDS,
+        });
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -1029,8 +1042,15 @@ export async function getSamContractsPreview(
       "content-type": "application/json; charset=utf-8",
       "cache-control":
         status === 200 ? BROWSER_CACHE : "no-store",
-      "x-sam-cache": "miss",
+      "x-sam-cache": oneTime ? "bypass" : "miss",
       "x-sam-mode": preview.dataMode,
     },
+  });
+}
+
+function samRequestError(status: number, error: string, message: string): Response {
+  return Response.json({ error, message }, {
+    status,
+    headers: { "cache-control": BROWSER_CACHE },
   });
 }

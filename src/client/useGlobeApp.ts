@@ -2489,6 +2489,7 @@ const isTradePulsePreview = getIsTradePulsePreview();
       includeAwards: boolean;
       force: boolean;
     }>,
+    oneTimeKey?: string,
   ) => {
     const next = {
       ...contractsQuery,
@@ -2531,12 +2532,18 @@ const isTradePulsePreview = getIsTradePulsePreview();
       ...next,
       force: Boolean(opts?.force),
     });
-    if (opts?.force) {
+    if (opts?.force && !oneTimeKey) {
       clearPreviewCache(url);
     }
 
     try {
-      const response = await authFetch(url);
+      const response = await authFetch(url, oneTimeKey ? {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ apiKey: oneTimeKey }),
+        cache: "no-store",
+        redirect: "error",
+      } : undefined);
       const payload = (await response.json()) as
         | SamContractsPreview
         | {
