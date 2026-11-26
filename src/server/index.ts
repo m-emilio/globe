@@ -1,4 +1,6 @@
 import { routePartykitRequest, Server } from "partyserver";
+import { CONNECTION_CHECK_PATH, type ConnectionDetails } from "../connectionSignals";
+import { FeedConnectionSignals } from "./feedConnectionSignals";
 import {
   adoptSessionToken,
   createAuthChallenge,
@@ -3975,6 +3977,7 @@ type ChatRateBucket = { windowStart: number; count: number };
 
 export class Globe extends Server<Env> {
   private connectionAttempts = new Map<string, ConnectionAttemptBucket>();
+  private connectionSignals = new FeedConnectionSignals(this.env);
   /**
    * Chat rate limits live on the DO instance — NOT on connection.setState().
    * Mutating PartyServer WebSocket attachments for chat counters was risking
@@ -4065,6 +4068,7 @@ export class Globe extends Server<Env> {
     let signedIn = false;
     let feedPaid = false;
     let userId: string | undefined;
+    let signalSessionId: string | undefined;
     try {
       const session = await getSessionUser(
         ctx.request,
@@ -4075,6 +4079,9 @@ export class Globe extends Server<Env> {
         session?.user && userHasFeatureAccess(session.user, this.env as AuthEnv),
       );
       userId = session?.user.id ? String(session.user.id).slice(0, 128) : undefined;
+      if (feedPaid && ctx.request.headers.get("origin") === new URL(ctx.request.url).origin) {
+        signalSessionId = session?.sessionId;
+      }
     } catch {
       signedIn = false;
       feedPaid = false;
@@ -4167,6 +4174,7 @@ export class Globe extends Server<Env> {
 
     // Tell this client whether it will receive feed events
     this.sendJson(conn, { type: "feed-access", paid: feedPaid });
+    this.connectionSignals.connect(conn, signalSessionId);
 
     // Include self so the client sees its own marker + "You joined" in Live Feed
     this.sendJson(conn, {
@@ -4231,12 +4239,12 @@ export class Globe extends Server<Env> {
    * only to peers with feature access. Never writes chat to DO storage, KV, or logs.
    */
   onMessage(conn: Connection<ConnectionState>, message: string | ArrayBuffer) {
-    void this.handleChatMessage(conn, message).catch(() => {
-      // Never let chat errors break the socket / DO isolate
+    return this.handleSocketMessage(conn, message).catch(() => {
+      // Keep a failed diagnostic or chat message isolated from the globe link.
     });
   }
 
-  private async handleChatMessage(
+  private async handleSocketMessage(
     conn: Connection<ConnectionState>,
     message: string | ArrayBuffer,
   ) {
@@ -4259,7 +4267,10 @@ export class Globe extends Server<Env> {
     if (proto !== Object.prototype && proto !== null) return;
 
     const rec = parsed as Record<string, unknown>;
-    if (rec.type !== "chat") return;
+    if (rec.type !== "chat") {
+      if (conn.state?.position) await this.connectionSignals.handle(conn, rec);
+      return;
+    }
     // Reject unexpected large payloads with extra keys (DoS / smuggling)
     if (Object.keys(rec).length > 4) return;
 
@@ -4341,6 +4352,7 @@ export class Globe extends Server<Env> {
   }
 
   onCloseOrError(connection: Connection) {
+    this.connectionSignals.disconnect(connection);
     // Drop chat rate bucket for this socket (ephemeral)
     try {
       this.chatRateByConn.delete(connection.id);
@@ -4411,6 +4423,31 @@ const worker = {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === CONNECTION_CHECK_PATH) {
+      if (!isReadApiMethod(request)) return methodNotAllowedResponse();
+      const limited = rateLimitOrNull("feed:connection:" + clientIpFromRequest(request), 30, 60_000, applySecurityHeaders);
+      if (limited) return withoutResponseBodyForHead(request, limited);
+      const cookieOnly = new Request(url.origin, {
+        headers: { cookie: request.headers.get("cookie") ?? "" },
+      });
+      let sessionCookie: ConnectionDetails["sessionCookie"] = "unknown";
+      try {
+        sessionCookie = (await getSessionUser(cookieOnly, env)) ? "verified" : "no-session";
+      } catch {
+        // A transient session storage failure doesn't affect the HTTPS check.
+      }
+      const details: ConnectionDetails = {
+        httpProtocol: limitApiText(request.cf?.httpProtocol, 24) || null,
+        tlsVersion: limitApiText(request.cf?.tlsVersion, 24) || null,
+        edge: limitApiText(request.cf?.colo, 8) || null,
+        country: limitApiText(request.cf?.country, 4) || null,
+        sessionCookie,
+      };
+      return withoutResponseBodyForHead(request, jsonResponse(details, {
+        headers: { "cache-control": "private, no-store" },
+      }));
+    }
 
     if (url.pathname.startsWith(CANARY_PATH)) {
       const id = url.pathname.slice(CANARY_PATH.length);

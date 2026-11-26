@@ -1448,12 +1448,13 @@ a.nav-title:focus-visible {
 
 /* Live Feed app window host (opened from dock) */
 .live-feed-app-host {
+  --live-feed-bottom: max(88px, calc(env(safe-area-inset-bottom, 0px) + 78px));
   position: fixed;
   left: max(12px, env(safe-area-inset-left, 0px));
-  bottom: max(88px, calc(env(safe-area-inset-bottom, 0px) + 78px));
+  bottom: var(--live-feed-bottom);
   z-index: 1140;
   pointer-events: none;
-  max-width: min(380px, calc(100vw - 24px));
+  width: min(460px, calc(100vw - 24px));
 }
 
 .live-feed-app-host .activity-floating {
@@ -6378,17 +6379,19 @@ button[aria-busy="true"],
   pointer-events: auto;
 }
 
-.activity-floating-app {
-  max-width: min(380px, calc(100vw - 24px));
+.live-feed-app-host .activity-floating-app {
+  width: 100%;
+  max-width: none;
 }
 
 .activity-floating-app:not(.activity-floating-open) {
   display: none;
 }
 
-.activity-menu-app {
-  width: min(360px, calc(100vw - 24px));
-  max-height: min(640px, calc(100dvh - var(--nav-offset, 70px) - 120px));
+.live-feed-app-host .activity-menu-app {
+  box-sizing: border-box;
+  width: 100%;
+  max-height: min(660px, calc(100dvh - var(--nav-offset, 70px) - var(--live-feed-bottom) - 8px));
   box-shadow:
     0 16px 48px rgba(0, 0, 0, 0.55),
     0 0 28px rgba(0, 217, 255, 0.2);
@@ -6583,26 +6586,26 @@ button[aria-busy="true"],
   contain: layout paint style;
 }
 
-/* Section tabs: UN TV (free) | Visitors | Support */
 .feed-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   flex: 0 0 auto;
 }
 
 .feed-tab {
+  position: relative;
   appearance: none;
   border: 0;
   border-right: 1px solid rgba(255, 255, 255, 0.06);
   background: transparent;
   color: #8b949e;
-  font-size: 11px;
+  font-size: clamp(9px, 2.7vw, 11px);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  padding: 10px 6px;
+  padding: 10px 4px;
   cursor: pointer;
   min-height: 42px;
   display: flex;
@@ -6626,6 +6629,19 @@ button[aria-busy="true"],
   box-shadow: inset 0 -2px 0 #4dabf7;
 }
 
+.feed-tab:focus-visible,
+.feed-tab-panel:focus-visible {
+  outline: 2px solid #74c0fc;
+  outline-offset: -2px;
+}
+
+.feed-tab-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
 .feed-tab-badge {
   font-size: 9px;
   font-weight: 800;
@@ -6639,6 +6655,163 @@ button[aria-busy="true"],
 .feed-tab-badge.locked {
   background: rgba(245, 196, 48, 0.16);
   color: #ffe8a3;
+}
+
+.feed-tab-request-count {
+  position: absolute;
+  right: 3px;
+  top: 2px;
+  padding: 1px 4px;
+  line-height: 1;
+}
+
+.live-feed-request-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid #0b1018;
+  border-radius: 50%;
+  background: #ffd166;
+  pointer-events: none;
+}
+
+.feed-connection {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  color: #e3edf5;
+  font-size: 13px;
+  text-align: left;
+}
+
+.feed-connection-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #2d495b;
+  border-radius: 6px;
+  background: #0d1b27;
+}
+
+.feed-connection-card h4,
+.feed-connection-card p {
+  margin: 0;
+}
+
+.feed-connection-card h4 {
+  color: #e9f5ff;
+  font-size: 14px;
+}
+
+.feed-connection-card p {
+  line-height: 1.4;
+}
+
+.feed-connection-card .feed-connection-note {
+  margin: 6px 0;
+  color: #a8bccd;
+  font-size: 12px;
+}
+
+.feed-connection-heading,
+.feed-connection-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.feed-connection-details {
+  margin: 10px 0 0;
+}
+
+.feed-connection-details div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid #243b4a;
+}
+
+.feed-connection-details dt {
+  color: #a8bccd;
+}
+
+.feed-connection-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.feed-connection button,
+.feed-connection select {
+  min-height: 36px;
+  padding: 5px 8px;
+  border: 1px solid #436783;
+  border-radius: 4px;
+  background: #102637;
+  color: #e6f3fc;
+  font: inherit;
+}
+
+.feed-connection button:not(:disabled) {
+  cursor: pointer;
+}
+
+.feed-connection button:hover:not(:disabled) {
+  background: #1b3c53;
+}
+
+.feed-connection :disabled {
+  opacity: 0.64;
+}
+
+.feed-connection-consent {
+  display: flex;
+  align-items: start;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.feed-connection-consent input {
+  margin: 2px 0 0;
+  accent-color: #4dabf7;
+}
+
+.feed-connection-form {
+  display: grid;
+  gap: 8px;
+}
+
+.feed-connection-field {
+  display: grid;
+  grid-template-columns: 47px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+}
+
+.feed-connection-form button {
+  justify-self: end;
+}
+
+.feed-connection-invite,
+.feed-connection-card .feed-connection-result {
+  margin-top: 10px;
+  padding: 8px;
+  border-left: 2px solid #74c0fc;
+  background: #132c3e;
+}
+
+@media (max-height: 480px) {
+  .live-feed-app-host .activity-menu-app {
+    overflow: auto;
+  }
+
+  .live-feed-app-host .feed-tab-panel {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
 }
 
 /* Free UN Web TV / UNTV (not paywalled) */
@@ -7531,16 +7704,10 @@ button[aria-busy="true"],
   }
 
   .live-feed-app-host {
+    --live-feed-bottom: max(78px, calc(env(safe-area-inset-bottom, 0px) + 70px));
     left: max(8px, env(safe-area-inset-left, 0px));
     right: max(8px, env(safe-area-inset-right, 0px));
-    bottom: max(78px, calc(env(safe-area-inset-bottom, 0px) + 70px));
-    max-width: none;
-  }
-
-  .activity-floating-app,
-  .activity-menu-app {
-    max-width: 100%;
-    width: 100%;
+    width: auto;
   }
 
   .nav-globe-controls-slot .globe-controls-toggle {
@@ -7558,12 +7725,18 @@ button[aria-busy="true"],
 
   .mac-dock {
     bottom: max(6px, env(safe-area-inset-bottom, 0px));
+    max-width: calc(100vw - 12px);
   }
 
   .mac-dock-inner {
+    box-sizing: border-box;
+    max-width: 100%;
+    justify-content: flex-start;
     gap: 2px;
     padding: 6px 10px 8px;
     border-radius: 18px;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
 
   .mac-dock-item {
@@ -7576,7 +7749,7 @@ button[aria-busy="true"],
 
   .mac-dock-item:hover,
   .mac-dock-item:focus-visible {
-    transform: translateY(-6px) scale(1.12);
+    transform: none;
   }
 
   .mac-dock-icon {

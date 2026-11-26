@@ -291,20 +291,16 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
                     ? "live-feed-dock-offline"
                     : ""
             }`}
-            onClick={() =>
-              runRateLimitedButtonAction("activity-toggle", () =>
-                setShowActivityMenu((open) => !open),
-              )
-            }
-            aria-label="Live Feed app"
+            onClick={() => setShowActivityMenu((open) => !open)}
+            aria-label={b.connectionSignals.incoming ? "Live Feed app, connection request pending" : "Live Feed app"}
             title={
               liveFeedAccess === "ok"
                 ? "Live Feed — visitor signals & web support"
                 : liveFeedAccess === "login_required"
-                  ? "Live Feed — sign in, then Stripe ($20)"
+                 ? "Live Feed — UN TV, connection checks, and sign-in for visitor activity"
                   : "Live Feed — Stripe unlock required ($20)"
             }
-            aria-pressed={showActivityMenu}
+            aria-haspopup="dialog"
             aria-controls="live-feed-menu"
             aria-expanded={showActivityMenu}
           >
@@ -329,6 +325,7 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
                 <circle cx="18.5" cy="12" r="2" />
                 <circle cx="20" cy="18" r="1.5" />
               </svg>
+              {b.connectionSignals.incoming && <span className="live-feed-request-dot" aria-hidden="true" />}
             </span>
             <span className="mac-dock-label">Feed</span>
           </button>
