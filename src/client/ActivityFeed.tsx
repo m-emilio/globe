@@ -204,6 +204,10 @@ const FEED_TABS = [
   { id: "support", label: "Support", free: false },
 ] as const;
 type FeedTab = (typeof FEED_TABS)[number]["id"];
+export const LIVE_FEED_PATH = "/live-feed";
+
+type FeedWindowSize = { width: number; height: number };
+type FeedResize = FeedWindowSize & { pointerId: number; x: number; y: number };
 
 /** Official public streams + chamber deep-links (static). */
 const UN_TV_CHANNELS: readonly UnTvChannel[] = [
@@ -348,6 +352,7 @@ type ActivityFeedProps = {
   chatMessages?: LiveChatMessage[];
   onSendChat?: (text: string) => boolean;
   connectionSignals: ConnectionSignals;
+  standalone?: boolean;
   /**
    * When false, the built-in launcher is hidden (e.g. opened from the dock app).
    * Panel still renders when `open` is true.
@@ -379,6 +384,7 @@ export function ActivityFeed({
   chatMessages = [],
   onSendChat,
   connectionSignals,
+  standalone = false,
   showLauncher = true,
 }: ActivityFeedProps) {
   const isLocked = access !== "ok";
@@ -395,7 +401,14 @@ export function ActivityFeed({
   const [unTvChannelId, setUnTvChannelId] = useState<string | null>(null);
   const [unTvPlaying, setUnTvPlaying] = useState(false);
   /** Default to free TV tab so paid lock UI is not the first thing users see */
-  const [feedTab, setFeedTab] = useState<FeedTab>("tv");
+  const [feedTab, setFeedTab] = useState<FeedTab>(() => {
+    const requested = standalone ? new URLSearchParams(window.location.search).get("tab") : null;
+    return FEED_TABS.find(tab => tab.id === requested)?.id ?? "tv";
+  });
+  const [expanded, setExpanded] = useState(false);
+  const [windowSize, setWindowSize] = useState<FeedWindowSize | null>(null);
+  const drag = useRef<FeedResize | null>(null);
+  const fullScreen = standalone || expanded;
   const menuRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const chatListRef = useRef<HTMLDivElement>(null);
@@ -427,8 +440,22 @@ export function ActivityFeed({
     if (!open) {
       setUnTvPlaying(false);
       setCopyState("idle");
+      setExpanded(false);
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!open || !fullScreen) return;
+    const appRoot = document.getElementById("root");
+    const previousOverflow = document.body.style.overflow;
+    const wasInert = appRoot?.inert ?? false;
+    document.body.style.overflow = "hidden";
+    if (appRoot && !standalone) appRoot.inert = true;
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      if (appRoot && !standalone) appRoot.inert = wasInert;
+    };
+  }, [open, fullScreen, standalone]);
 
   // Relative timestamps only while Activity/Support tabs need them
   useEffect(() => {
@@ -610,13 +637,31 @@ export function ActivityFeed({
   const selectTab = (tab: FeedTab) => {
     setFeedTab(tab);
     if (tab !== "tv") setUnTvPlaying(false);
+    if (standalone) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("tab", tab);
+      window.history.replaceState(window.history.state, "", url);
+    }
+  };
+
+  const resizeWindow = (width: number, height: number) => {
+    const bounds = menuRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const navOffset = getComputedStyle(document.documentElement).getPropertyValue("--nav-offset");
+    const navHeight = Number.parseFloat(navOffset) || 70;
+    const maxWidth = Math.max(1, window.innerWidth - bounds.left - 8);
+    const maxHeight = Math.max(1, bounds.bottom - navHeight - 8);
+    setWindowSize({
+      width: Math.round(Math.min(maxWidth, Math.max(320, width))),
+      height: Math.round(Math.min(maxHeight, Math.max(244, height))),
+    });
   };
 
   return (
     <div
       className={`activity-floating ${showLauncher ? "" : "activity-floating-app"} ${
         open ? "activity-floating-open" : ""
-      }`}
+      } ${open && fullScreen ? "activity-floating-fullscreen" : ""}`}
     >
       {showLauncher ? (
         <button
@@ -664,15 +709,33 @@ export function ActivityFeed({
           ref={menuRef}
           className={`activity-menu ${isCompact ? "activity-menu-compact" : ""} ${
             isLocked ? "activity-menu-locked" : ""
-          } ${showLauncher ? "" : "activity-menu-app"}`}
-          role="dialog"
+          } ${showLauncher ? "" : "activity-menu-app"} ${fullScreen ? "activity-menu-fullscreen" : ""} ${
+            !fullScreen && windowSize ? "activity-menu-resized" : ""
+          }`}
+          style={!fullScreen && windowSize ? { width: windowSize.width, height: windowSize.height } : undefined}
+          role={standalone ? "region" : "dialog"}
           aria-label="Live activity feed"
-          aria-modal="false"
+          aria-modal={!standalone && expanded ? true : undefined}
           onKeyDown={e => {
-            if (e.key === "Escape") {
+            if (e.key === "Escape" && !standalone) {
               e.preventDefault();
               e.stopPropagation();
-              onClose();
+              if (expanded) setExpanded(false);
+              else onClose();
+            }
+            if (expanded && e.key === "Tab") {
+              const focusable = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(
+                "a[href], button, input, select, textarea, iframe, [tabindex]",
+              )).filter(node => node.tabIndex >= 0 && !node.matches(":disabled") && node.getClientRects().length);
+              const first = focusable[0];
+              const last = focusable.at(-1);
+              if (e.shiftKey && e.target === first && last) {
+                e.preventDefault();
+                last.focus();
+              } else if (!e.shiftKey && e.target === last && first) {
+                e.preventDefault();
+                first.focus();
+              }
             }
           }}
         >
@@ -700,14 +763,75 @@ export function ActivityFeed({
                   <span>{counter}</span>
                 </div>
               )}
-              <button
-                type="button"
-                className="activity-close-btn"
-                onClick={onClose}
-                aria-label="Close live feed"
-              >
-                ×
-              </button>
+              {standalone ? (
+                <a className="activity-window-action activity-globe-link" href="/">← Globe</a>
+              ) : (
+                <>
+                  {!fullScreen && <button
+                    type="button"
+                    className="activity-window-action activity-resize-handle"
+                    aria-label="Resize live feed"
+                    title="Drag to resize. Arrow keys resize and Home resets."
+                    onPointerDown={e => {
+                      const bounds = menuRef.current?.getBoundingClientRect();
+                      if (e.button !== 0 || !bounds) return;
+                      drag.current = {
+                        pointerId: e.pointerId, x: e.clientX, y: e.clientY,
+                        width: bounds.width, height: bounds.height,
+                      };
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                    }}
+                    onPointerMove={e => {
+                      const start = drag.current;
+                      if (start?.pointerId !== e.pointerId) return;
+                      resizeWindow(start.width + e.clientX - start.x, start.height + start.y - e.clientY);
+                    }}
+                    onLostPointerCapture={() => { drag.current = null; }}
+                    onKeyDown={e => {
+                      if (e.key === "Home") {
+                        e.preventDefault();
+                        setWindowSize(null);
+                        return;
+                      }
+                      const bounds = menuRef.current?.getBoundingClientRect();
+                      if (!bounds) return;
+                      const step = 32;
+                      const width = e.key === "ArrowRight" ? step : e.key === "ArrowLeft" ? -step : 0;
+                      const height = e.key === "ArrowUp" ? step : e.key === "ArrowDown" ? -step : 0;
+                      if (!width && !height) return;
+                      e.preventDefault();
+                      resizeWindow(bounds.width + width, bounds.height + height);
+                    }}
+                  ><span aria-hidden="true">⤢</span></button>}
+                  <a
+                    className="activity-window-action"
+                    href={`${LIVE_FEED_PATH}?tab=${feedTab}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="Open live feed in new tab"
+                    title="Open Live Feed in a new tab"
+                  >
+                    <span className="activity-popout-icon" aria-hidden="true" />
+                    <span className="activity-window-label" aria-hidden="true">New tab</span>
+                  </a>
+                  <button
+                    type="button"
+                    className="activity-window-action"
+                    onClick={() => setExpanded(value => !value)}
+                    aria-label={expanded ? "Restore live feed size" : "Make live feed full screen"}
+                    title={expanded ? "Restore size" : "Full screen"}
+                  >
+                    <span aria-hidden="true">{expanded ? "▣" : "⛶"}</span>
+                    <span className="activity-window-label" aria-hidden="true">{expanded ? "Restore" : "Full screen"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="activity-close-btn"
+                    onClick={onClose}
+                    aria-label="Close live feed"
+                  >×</button>
+                </>
+              )}
             </div>
           </header>
 

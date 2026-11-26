@@ -4437,11 +4437,17 @@ const worker = {
       } catch {
         // A transient session storage failure doesn't affect the HTTPS check.
       }
+      const tcpMs = request.cf?.clientTcpRtt;
+      const asn = request.cf?.asn;
       const details: ConnectionDetails = {
         httpProtocol: limitApiText(request.cf?.httpProtocol, 24) || null,
         tlsVersion: limitApiText(request.cf?.tlsVersion, 24) || null,
+        tlsCipher: limitApiText(request.cf?.tlsCipher, 64) || null,
         edge: limitApiText(request.cf?.colo, 8) || null,
         country: limitApiText(request.cf?.country, 4) || null,
+        edgeTcpMs: typeof tcpMs === "number" && Number.isFinite(tcpMs) && tcpMs >= 0 ? Math.round(tcpMs) : null,
+        networkAsn: typeof asn === "number" && Number.isSafeInteger(asn) && asn > 0 ? asn : null,
+        networkOrganization: limitApiText(request.cf?.asOrganization, 96) || null,
         sessionCookie,
       };
       return withoutResponseBodyForHead(request, jsonResponse(details, {

@@ -91,7 +91,7 @@ function AccessBadge({
   );
 }
 
-export function AppChunk0({ b }: { b: GlobeApi }) {
+export function AppChunk0({ b, standaloneFeed }: { b: GlobeApi; standaloneFeed: boolean }) {
   const { activityFeed, activityFilter, adminAllowlistConfigured, adminAudit, adminBusy, adminClaim, adminClaimAll, adminDeleteUser, adminElevationExpiresAt, adminElevationValid, adminError, adminGrant, adminGrantKind, adminLookup, adminLookupUser, adminMessage, adminNote, adminQuery, adminSessionId, adminUsers, adminUsersComplete, adminUsersCursor, adminUsersFilter, authBusy, authError, authMessage, authMode, authUser, chatMessages, checkoutBusy, clearActivityFeed, clearAdminElevation, clearSensitiveAuthState, counter, deviceKeys, dismissSiteTour, exportAead, exportAeadMode, exportAllowUnencrypted, exportArgonMemExp, exportArgonParallel, exportArgonPasses, exportCipher, exportPassphrase, exportPassphrase2, exportS2k, exportS2kIterByte, fetchNearbyMapForTransit, forecastView, generatedPublic, handleActivityFilterChange, handleDeviceSignIn, handleExportPrivateKey, handleGenerateKeypair, handleImportDeviceKey, handleRemoveDeviceKey, isAdmin, isCompactFeed, isFeedPaused, keyGenProfile, keyPassphrase, liveFeedAccess, loadAdminUsers, loadLocalTransit, loadNearbyPaths, loadWeatherFeed, navBarRef, nearbyError, nearbyPreview, nearbyRadiusM, nearbyStatus, paymentRequired, refreshDeviceKeys, regPublicKey, registerWithPublicKey, runRateLimitedButtonAction, selectedDeviceFp, selectedDeviceKey, sendChatMessage, setAdminError, setAdminLookupUser, setAdminMessage, setAdminNote, setAdminQuery, setAdminSessionId, setAdminUsers, setAdminUsersFilter, setAuthError, setAuthMessage, setAuthMode, setExportAead, setExportAeadMode, setExportAllowUnencrypted, setExportArgonMemExp, setExportArgonParallel, setExportArgonPasses, setExportCipher, setExportPassphrase, setExportPassphrase2, setExportS2k, setExportS2kIterByte, setForecastView, setIsCompactFeed, setIsFeedPaused, setKeyGenProfile, setKeyPassphrase, setRegPublicKey, setSelectedDeviceFp, setShowActivityMenu, setShowAdminPanel, setShowAuthPanel, setShowImportDevice, setShowMenu, setShowNearbyPanel, setShowTransitPanel, setShowWeatherForecast, setShowWeatherPanel, setSocketStatus, showActivityMenu, showAdminPanel, showAuthPanel, showImportDevice, showNearbyPanel, showSiteTour, showTransitPanel, showWeatherForecast, showWeatherPanel, socket, socketStatus, startTransitCheckout, transitDistanceM, transitError, transitPreview, transitStatus, unlockAdminPrivileges, weatherError, weatherFeed, weatherGlow, weatherStatus } = b;
   return (
     <>
@@ -1143,7 +1143,9 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
             )}
           </div>
         </div>
-      )}{showSiteTour && <SiteTour onDone={dismissSiteTour} />}<nav className="nav-bar" ref={navBarRef}>
+      )}
+      {!standaloneFeed && showSiteTour && <SiteTour onDone={dismissSiteTour} />}
+      {!standaloneFeed && <nav className="nav-bar" ref={navBarRef}>
         <div className="nav-left">
           <a
             className="nav-title"
@@ -1178,10 +1180,11 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
             <span className="menu-icon">v</span>
           </button>
         </div>
-      </nav>
+      </nav>}
       {createPortal(<div className="live-feed-app-host">
         <ActivityFeed
-          open={showActivityMenu}
+          open={standaloneFeed || showActivityMenu}
+          standalone={standaloneFeed}
           showLauncher={false}
           onToggle={() => setShowActivityMenu((open) => !open)}
           onClose={() => setShowActivityMenu(false)}

@@ -17,6 +17,7 @@ type OutgoingSignal = {
   outcome?: CheckOutcome | "expired" | "cancelled";
 };
 type Ping = { id: string; promise: Promise<number | null>; finish: (ms: number | null) => void };
+type SocketHistory = { connectedAt: number | null; disconnectedAt: number | null; connections: number };
 
 const SIGNAL_ERRORS = {
   unavailable: "That peer is unavailable. Choose an online peer and try again.",
@@ -31,6 +32,9 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
   const [incoming, setIncoming] = useState<SignalInvitation | null>(null);
   const [outgoing, setOutgoing] = useState<OutgoingSignal | null>(null);
   const [notice, setNotice] = useState("");
+  const [socketHistory, setSocketHistory] = useState<SocketHistory>({
+    connectedAt: null, disconnectedAt: null, connections: 0,
+  });
   const ping = useRef<Ping | null>(null);
 
   const send = useCallback((message: SignalClientMessage) => {
@@ -52,7 +56,17 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
   }, []);
 
   useEffect(() => {
+    const onOpen = () => {
+      const at = Date.now();
+      setSocketHistory(prev => prev.connectedAt === null
+        ? { ...prev, connectedAt: at, connections: prev.connections + 1 }
+        : prev);
+    };
     const onClose = () => {
+      const at = Date.now();
+      setSocketHistory(prev => prev.connectedAt === null
+        ? prev
+        : { ...prev, connectedAt: null, disconnectedAt: at });
       setAllowed(false);
       clearRoster();
       ping.current?.finish(null);
@@ -108,9 +122,12 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
           break;
       }
     };
+    if (socket.readyState === WebSocket.OPEN) onOpen();
+    socket.addEventListener("open", onOpen);
     socket.addEventListener("message", onMessage);
     socket.addEventListener("close", onClose);
     return () => {
+      socket.removeEventListener("open", onOpen);
       socket.removeEventListener("message", onMessage);
       socket.removeEventListener("close", onClose);
       ping.current?.finish(null);
@@ -183,7 +200,7 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
     return promise;
   }, [send, socket]);
 
-  return { canRequest, self, peers, incoming, outgoing, notice, setAvailability, requestCheck, reply, pingSocket };
+  return { canRequest, self, peers, incoming, outgoing, notice, setAvailability, requestCheck, reply, pingSocket, socketHistory };
 }
 
 export type ConnectionSignals = ReturnType<typeof useConnectionSignals>;

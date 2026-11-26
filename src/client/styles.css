@@ -1449,12 +1449,20 @@ a.nav-title:focus-visible {
 /* Live Feed app window host (opened from dock) */
 .live-feed-app-host {
   --live-feed-bottom: max(88px, calc(env(safe-area-inset-bottom, 0px) + 78px));
+  --live-feed-left: max(12px, env(safe-area-inset-left, 0px));
+  --live-feed-right: max(12px, env(safe-area-inset-right, 0px));
   position: fixed;
-  left: max(12px, env(safe-area-inset-left, 0px));
+  left: var(--live-feed-left);
   bottom: var(--live-feed-bottom);
   z-index: 1140;
   pointer-events: none;
-  width: min(460px, calc(100vw - 24px));
+  width: min(460px, calc(100vw - var(--live-feed-left) - var(--live-feed-right)));
+}
+
+.live-feed-app-host:has(.activity-floating-fullscreen) {
+  inset: 0;
+  width: auto;
+  z-index: 1250;
 }
 
 .live-feed-app-host .activity-floating {
@@ -6391,10 +6399,66 @@ button[aria-busy="true"],
 .live-feed-app-host .activity-menu-app {
   box-sizing: border-box;
   width: 100%;
+  max-width: calc(100vw - var(--live-feed-left) - var(--live-feed-right));
   max-height: min(660px, calc(100dvh - var(--nav-offset, 70px) - var(--live-feed-bottom) - 8px));
   box-shadow:
     0 16px 48px rgba(0, 0, 0, 0.55),
     0 0 28px rgba(0, 217, 255, 0.2);
+}
+
+.live-feed-app-host .activity-menu-resized {
+  max-height: calc(100dvh - var(--nav-offset, 70px) - var(--live-feed-bottom) - 8px);
+}
+
+.live-feed-app-host .activity-menu-fullscreen {
+  width: 100%;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+    env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  background: #080f17;
+  box-shadow: none;
+}
+
+.activity-menu-fullscreen .activity-header {
+  padding: 14px clamp(12px, 2.8vw, 28px);
+}
+
+.activity-menu-fullscreen .activity-header h3 {
+  font-size: clamp(16px, 3vw, 22px);
+}
+
+.activity-menu-fullscreen .activity-status-row {
+  padding-inline: clamp(12px, 2.8vw, 28px);
+}
+
+.activity-menu-fullscreen .feed-tab-panel > .feed-connection,
+.activity-menu-fullscreen .feed-tab-panel > .un-tv-panel {
+  max-width: 1200px;
+  margin-inline: auto;
+}
+
+.activity-menu-fullscreen .un-tv-player,
+.activity-menu-resized .un-tv-player {
+  max-height: 58dvh;
+}
+
+.activity-menu-fullscreen .activity-list,
+.activity-menu-resized .activity-list {
+  max-height: none;
+}
+
+.activity-menu-fullscreen .live-chat,
+.activity-menu-resized .live-chat {
+  max-height: none;
+}
+
+.activity-menu-fullscreen .live-chat-list,
+.activity-menu-resized .live-chat-list {
+  max-height: 44dvh;
 }
 
 .activity-launcher {
@@ -6584,6 +6648,7 @@ button[aria-busy="true"],
   /* No backdrop-filter — blurs fight WebGL globe and kill FPS */
   position: relative;
   contain: layout paint style;
+  container-type: inline-size;
 }
 
 .feed-tabs {
@@ -6686,6 +6751,15 @@ button[aria-busy="true"],
   text-align: left;
 }
 
+@container (min-width: 740px) {
+  .feed-connection {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    align-items: start;
+    gap: 16px;
+    padding: 20px;
+  }
+}
+
 .feed-connection-card {
   min-width: 0;
   padding: 12px;
@@ -6733,6 +6807,12 @@ button[aria-busy="true"],
   gap: 8px;
   padding: 6px 0;
   border-top: 1px solid #243b4a;
+}
+
+.feed-connection-subheading {
+  margin: 14px 0 0;
+  color: #d5e6f4;
+  font-size: 12px;
 }
 
 .feed-connection-details dt {
@@ -7111,7 +7191,7 @@ button[aria-busy="true"],
 .activity-header-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
   flex-shrink: 0;
 }
 
@@ -7124,9 +7204,11 @@ button[aria-busy="true"],
   font-size: 14px;
 }
 
-.activity-close-btn {
-  width: 28px;
-  height: 28px;
+.activity-close-btn,
+.activity-window-action {
+  box-sizing: border-box;
+  min-width: 32px;
+  min-height: 32px;
   border: 1px solid rgba(0, 217, 255, 0.4);
   border-radius: 3px;
   background: transparent;
@@ -7138,11 +7220,76 @@ button[aria-busy="true"],
   align-items: center;
   justify-content: center;
   padding: 0;
+  text-decoration: none;
 }
 
-.activity-close-btn:hover {
+.activity-globe-link {
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.activity-window-label {
+  display: none;
+}
+
+.activity-popout-icon {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  border-bottom: 1px solid currentColor;
+  border-left: 1px solid currentColor;
+  border-bottom-left-radius: 2px;
+}
+
+.activity-popout-icon::before,
+.activity-popout-icon::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  content: "";
+  border-top: 1px solid currentColor;
+}
+
+.activity-popout-icon::before {
+  width: 6px;
+  height: 6px;
+  border-right: 1px solid currentColor;
+}
+
+.activity-popout-icon::after {
+  width: 12px;
+  transform: rotate(-45deg);
+  transform-origin: right center;
+}
+
+@container (min-width: 545px) {
+  .activity-window-label {
+    display: inline;
+    margin-left: 5px;
+    font-size: 12px;
+  }
+
+  .activity-window-action:has(.activity-window-label) {
+    padding-inline: 8px;
+  }
+}
+
+.activity-resize-handle {
+  cursor: nesw-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.activity-close-btn:hover,
+.activity-window-action:hover {
   background: #00d9ff;
   color: #0a0e27;
+}
+
+.activity-close-btn:focus-visible,
+.activity-window-action:focus-visible {
+  outline: 2px solid #74c0fc;
+  outline-offset: 2px;
 }
 
 .pulse-dot {
@@ -7705,8 +7852,10 @@ button[aria-busy="true"],
 
   .live-feed-app-host {
     --live-feed-bottom: max(78px, calc(env(safe-area-inset-bottom, 0px) + 70px));
-    left: max(8px, env(safe-area-inset-left, 0px));
-    right: max(8px, env(safe-area-inset-right, 0px));
+    --live-feed-left: max(8px, env(safe-area-inset-left, 0px));
+    --live-feed-right: max(8px, env(safe-area-inset-right, 0px));
+    left: var(--live-feed-left);
+    right: var(--live-feed-right);
     width: auto;
   }
 
