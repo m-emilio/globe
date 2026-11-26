@@ -1,4 +1,5 @@
 import React, { Suspense } from "react";
+import { createPortal } from "react-dom";
 import type { GlobeApi } from "./useGlobeApp";
 import { Cobe } from "./CobeGlobe";
 import { FloatingChrome } from "./FloatingChrome";
@@ -1177,20 +1178,13 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
             <span className="menu-icon">v</span>
           </button>
         </div>
-      </nav>{/* Live Feed app window — launched from the bottom dock */}<div className="live-feed-app-host" aria-live="polite">
+      </nav>
+      {createPortal(<div className="live-feed-app-host">
         <ActivityFeed
           open={showActivityMenu}
           showLauncher={false}
-          onToggle={() =>
-            runRateLimitedButtonAction("activity-toggle", () =>
-              setShowActivityMenu((open) => !open),
-            )
-          }
-          onClose={() =>
-            runRateLimitedButtonAction("activity-close", () =>
-              setShowActivityMenu(false),
-            )
-          }
+          onToggle={() => setShowActivityMenu((open) => !open)}
+          onClose={() => setShowActivityMenu(false)}
           counter={counter}
           events={activityFeed}
           onClear={() =>
@@ -1213,6 +1207,7 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
           socketStatus={socketStatus}
           isSocketConnected={socketStatus === "connected"}
           access={liveFeedAccess}
+          paymentRequired={paymentRequired}
           checkoutBusy={checkoutBusy}
           onReconnectSocket={() => {
             setSocketStatus("connecting");
@@ -1237,8 +1232,10 @@ export function AppChunk0({ b }: { b: GlobeApi }) {
           }}
           chatMessages={chatMessages}
           onSendChat={sendChatMessage}
+          connectionSignals={b.connectionSignals}
         />
-      </div>{showTransitPanel && (
+      </div>, document.body)}
+      {showTransitPanel && (
         <FloatingChrome
           className="transit-panel"
           role="dialog"

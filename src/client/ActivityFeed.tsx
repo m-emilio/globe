@@ -5,6 +5,8 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { ConnectionPanel } from "./ConnectionPanel";
+import type { ConnectionSignals } from "./useConnectionSignals";
 
 export type ActivityEventType = "connect" | "disconnect";
 
@@ -195,7 +197,13 @@ type UnTvChannel =
       pageUrl: string;
     };
 
-type FeedTab = "tv" | "activity" | "support";
+const FEED_TABS = [
+  { id: "tv", label: "UN TV", free: true },
+  { id: "connection", label: "Connection", free: true },
+  { id: "activity", label: "Visitors", free: false },
+  { id: "support", label: "Support", free: false },
+] as const;
+type FeedTab = (typeof FEED_TABS)[number]["id"];
 
 /** Official public streams + chamber deep-links (static). */
 const UN_TV_CHANNELS: readonly UnTvChannel[] = [
@@ -330,6 +338,7 @@ type ActivityFeedProps = {
   socketStatus?: GlobeSocketStatus;
   /** Stripe-paid unlock — feed content is hidden until ok */
   access: LiveFeedAccess;
+  paymentRequired?: boolean;
   checkoutBusy?: boolean;
   onSignIn?: () => void;
   onBuyAccess?: () => void;
@@ -338,6 +347,7 @@ type ActivityFeedProps = {
   /** Paid web-support chat in Live Feed (client memory only; server-gated) */
   chatMessages?: LiveChatMessage[];
   onSendChat?: (text: string) => boolean;
+  connectionSignals: ConnectionSignals;
   /**
    * When false, the built-in launcher is hidden (e.g. opened from the dock app).
    * Panel still renders when `open` is true.
@@ -361,12 +371,14 @@ export function ActivityFeed({
   isSocketConnected,
   socketStatus: socketStatusProp,
   access,
+  paymentRequired = false,
   checkoutBusy = false,
   onSignIn,
   onBuyAccess,
   onReconnectSocket,
   chatMessages = [],
   onSendChat,
+  connectionSignals,
   showLauncher = true,
 }: ActivityFeedProps) {
   const isLocked = access !== "ok";
@@ -384,6 +396,7 @@ export function ActivityFeed({
   const [unTvPlaying, setUnTvPlaying] = useState(false);
   /** Default to free TV tab so paid lock UI is not the first thing users see */
   const [feedTab, setFeedTab] = useState<FeedTab>("tv");
+  const menuRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const chatListRef = useRef<HTMLDivElement>(null);
   const stickToTopRef = useRef(true);
@@ -419,22 +432,23 @@ export function ActivityFeed({
 
   // Relative timestamps only while Activity/Support tabs need them
   useEffect(() => {
-    if (!open || feedTab === "tv") return;
+    if (!open || (feedTab !== "activity" && feedTab !== "support")) return;
     const id = window.setInterval(() => setNow(Date.now()), 2000);
     return () => window.clearInterval(id);
   }, [open, feedTab]);
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
+    const opener = document.activeElement;
+    const menu = menuRef.current;
+    menu?.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
+    return () => {
+      const active = document.activeElement;
+      if (opener instanceof HTMLElement && (active === document.body || menu?.contains(active))) {
+        opener.focus({ preventScroll: true });
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open]);
 
   useEffect(() => {
     const openIdentity = () => {
@@ -585,13 +599,18 @@ export function ActivityFeed({
 
   const launcherTitle = isLocked
     ? access === "login_required"
-      ? "Live Feed is locked — sign in, then buy Stripe access. Globe socket is separate."
+      ? "Live Feed — UN TV, connection checks, and sign-in for visitor activity"
       : "Live Feed is locked until Stripe ($20). Globe markers still work over the free socket."
     : isLinkUp
       ? "Live visitor feed (unlocked)"
       : isLinkConnecting
         ? "Connecting public globe socket…"
         : "Globe socket disconnected — reconnect to resume feed events";
+
+  const selectTab = (tab: FeedTab) => {
+    setFeedTab(tab);
+    if (tab !== "tv") setUnTvPlaying(false);
+  };
 
   return (
     <div
@@ -642,12 +661,20 @@ export function ActivityFeed({
       {open && (
         <section
           id="live-feed-menu"
+          ref={menuRef}
           className={`activity-menu ${isCompact ? "activity-menu-compact" : ""} ${
             isLocked ? "activity-menu-locked" : ""
           } ${showLauncher ? "" : "activity-menu-app"}`}
           role="dialog"
           aria-label="Live activity feed"
           aria-modal="false"
+          onKeyDown={e => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              onClose();
+            }
+          }}
         >
           <header className="activity-header">
             <div className="activity-title-group">
@@ -655,8 +682,8 @@ export function ActivityFeed({
               <p>
                 {isLocked
                   ? access === "login_required"
-                    ? "Feed content locked — sign in, then Stripe ($20)"
-                    : "Feed content locked — Stripe checkout required"
+                    ? "Sign in for visitor activity and support"
+                    : "Visitor activity and support require checkout"
                   : !isLinkUp
                     ? isLinkConnecting
                       ? "Globe link connecting… feed events wait for socket"
@@ -732,39 +759,60 @@ export function ActivityFeed({
             className="feed-tabs"
             role="tablist"
             aria-label="Live Feed sections"
+            onKeyDown={e => {
+              const index = FEED_TABS.findIndex(tab => tab.id === feedTab);
+              const last = FEED_TABS.length - 1;
+              let next: number;
+              switch (e.key) {
+                case "ArrowLeft": next = index === 0 ? last : index - 1; break;
+                case "ArrowRight": next = index === last ? 0 : index + 1; break;
+                case "Home": next = 0; break;
+                case "End": next = last; break;
+                default: return;
+              }
+              e.preventDefault();
+              const tab = FEED_TABS[next];
+              selectTab(tab.id);
+              e.currentTarget.querySelector<HTMLButtonElement>("#live-feed-tab-" + tab.id)?.focus();
+            }}
           >
-            {(
-              [
-                { id: "tv" as const, label: "UN TV", free: true },
-                { id: "activity" as const, label: "Visitors", free: false },
-                { id: "support" as const, label: "Support", free: false },
-              ] as const
-            ).map((tab) => (
+            {FEED_TABS.map((tab) => (
               <button
                 key={tab.id}
+                id={"live-feed-tab-" + tab.id}
                 type="button"
                 role="tab"
                 aria-selected={feedTab === tab.id}
+                aria-controls={"live-feed-panel-" + tab.id}
+                tabIndex={feedTab === tab.id ? 0 : -1}
                 className={`feed-tab ${feedTab === tab.id ? "active" : ""} ${
                   !tab.free && isLocked ? "feed-tab-locked" : ""
                 }`}
-                onClick={() => {
-                  setFeedTab(tab.id);
-                  // Tear down player when leaving TV tab (globe FPS)
-                  if (tab.id !== "tv") setUnTvPlaying(false);
-                }}
+                onClick={() => selectTab(tab.id)}
               >
                 {tab.label}
-                {tab.free ? (
+                {tab.id === "connection" && connectionSignals.incoming ? (
+                  <span className="feed-tab-badge feed-tab-request-count" aria-label="Request pending">1</span>
+                ) : tab.id === "tv" ? (
                   <span className="feed-tab-badge">Free</span>
-                ) : isLocked ? (
-                  <span className="feed-tab-badge locked">$</span>
+                ) : !tab.free && access === "payment_required" ? (
+                  <span className="feed-tab-badge locked" aria-label="Checkout required">$</span>
                 ) : null}
               </button>
             ))}
           </div>
 
-          {feedTab === "tv" ? (
+          <div
+            key={feedTab}
+            className="feed-tab-panel"
+            id={"live-feed-panel-" + feedTab}
+            role="tabpanel"
+            aria-labelledby={"live-feed-tab-" + feedTab}
+            tabIndex={0}
+          >
+          {feedTab === "connection" ? (
+            <ConnectionPanel signals={connectionSignals} socketStatus={socketStatus} access={access} onSignIn={onSignIn} />
+          ) : feedTab === "tv" ? (
             <div className="un-tv-panel" aria-label="UN Web TV and UNTV">
               <p className="un-tv-blurb">
                 Free official webcasts —{" "}
@@ -885,7 +933,7 @@ export function ActivityFeed({
             </div>
           ) : null}
 
-          {feedTab !== "tv" && isLocked ? (
+          {(feedTab === "activity" || feedTab === "support") && (isLocked ? (
             <div className="activity-lock-panel" role="status">
               <div className="activity-lock-badge">
                 {access === "login_required" ? "Sign in required" : "Stripe required"}
@@ -920,7 +968,9 @@ export function ActivityFeed({
               </div>
               <p className="activity-lock-note">
                 {access === "login_required"
-                  ? "Globe markers stay free. Visitor feed and support chat unlock after PGP sign-in."
+                  ? paymentRequired
+                    ? "Visitor activity and support require PGP sign-in and checkout."
+                    : "Visitor activity and support are available after PGP sign-in."
                   : "Globe markers stay free. Paid feed and support chat are server-gated after payment."}
               </p>
             </div>
@@ -1231,7 +1281,8 @@ export function ActivityFeed({
               </>
               ) : null}
             </>
-          )}
+          ))}
+          </div>
         </section>
       )}
     </div>
