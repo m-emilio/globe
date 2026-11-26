@@ -883,18 +883,6 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
                 Manage admins
               </button>
             ) : null}
-            {authUser && isAdmin ? (
-              // UI hint only: /admin/purple-team is gated server-side.
-              <a
-                href="/admin/purple-team"
-                className="menu-item admin-menu-item purple-team-menu-item"
-                target="_blank"
-                rel="noopener noreferrer"
-                title="Purple team recon console (admins only)"
-              >
-                Purple Team
-              </a>
-            ) : null}
             <a
               href="https://104041.webmail.dynadot.com/user/signin.html"
               className="menu-item"
