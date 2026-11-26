@@ -29,6 +29,6 @@ export function ReconGlobeOverlay({enabled}:{enabled:boolean}) {
       </svg><label>Relationship evidence <select value={selected} onChange={e=>setSelected(e.target.value)} style={{maxWidth:"100%"}}>{nodes.map(n=><option key={n.id} value={n.id}>{n.label}</option>)}</select></label>
       <ul>{report.graph.edges.filter(e=>e.from===selected||e.to===selected).map((e,i)=><li key={i}>{nodes.find(n=>n.id===e.from)?.label} — {e.relationship} — {nodes.find(n=>n.id===e.to)?.label}</li>)}</ul>
       <details><summary>Source status</summary>{report.sources?.map((s,i)=><div key={i}>{s.source}: {s.status}</div>)}</details></>}
-      <p><a href="/admin/purple-team/recon">Open full recon workspace</a></p></>}
+      <p><a href="/admin/purple-team/recon">Full reconnaissance workspace</a></p><details><summary>Secondary utilities</summary><ul><li><a href="/admin/purple-team">Authorized asset assessments</a></li><li><a href="/admin/purple-team/operations">Incident operations</a></li><li><a href="/admin/purple-team/assessment">Vulnerability intelligence</a></li><li><a href="/admin/purple-team/dependency-audit">Dependency audit</a></li></ul></details></>}
   </aside>;
 }
