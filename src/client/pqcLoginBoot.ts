@@ -37,7 +37,6 @@ function ensureIdentityLayer(): void {
     ".menu-dropdown .menu-section-location .menu-section-title{padding-right:46px}",
     ".pki-hub .pki-hub-cve-list{max-height:none!important;overflow:visible!important}",
     "#globe-menu-close{width:36px;height:36px;border:1px solid rgba(0,217,255,.65);border-radius:4px;background:rgba(0,0,0,.92);color:#00d9ff;font:22px/1 inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}",
-    "#globe-feed-resize{z-index:1160;width:36px;height:36px}",
     ".nav-center:not(:empty){display:flex!important;flex:1 1 auto!important;width:auto!important;order:0!important;justify-content:center!important;align-items:center!important;min-width:0!important;grid-template-columns:none!important}",
     "#globe-header-identity{height:32px;min-height:32px;max-width:100%;padding:0 12px;border:1.5px solid #6e7681;border-radius:3px;background:rgba(0,0,0,.82);color:#9aa4b2;font:700 11px/1 var(--font-ui,inherit);letter-spacing:.08em;text-transform:uppercase;cursor:pointer;white-space:nowrap;box-sizing:border-box}",
     "#globe-header-identity[data-level=guest]{border-color:#6e7681;color:#9aa4b2;background:rgba(0,0,0,.72);box-shadow:none}",
@@ -92,121 +91,8 @@ function placeMenuClose(): void {
   button.style.zIndex = "1300";
 }
 
-type FeedResize = {
-  pointerId: number;
-  startX: number;
-  startY: number;
-  width: number;
-  height: number;
-  left: number;
-  top: number;
-};
-
-let feedResize: FeedResize | null = null;
-
-function resizeFeed(feed: HTMLElement, width: number, height: number): void {
-  const host = feed.closest(".live-feed-app-host");
-  if (host instanceof HTMLElement && host.dataset.globeFeedAnchored !== "1") {
-    const hostRect = host.getBoundingClientRect();
-    host.style.top = `${hostRect.top}px`;
-    host.style.left = `${hostRect.left}px`;
-    host.style.bottom = "auto";
-    host.style.right = "auto";
-    host.dataset.globeFeedAnchored = "1";
-  }
-  feed.style.width = `${width}px`;
-  feed.style.height = `${height}px`;
-  feed.style.maxWidth = "none";
-  feed.style.maxHeight = "none";
-  feed.style.overflow = "hidden";
-  if (host instanceof HTMLElement) {
-    host.style.maxWidth = "none";
-    host.style.width = `${width}px`;
-  }
-  const floating = feed.parentElement;
-  if (floating instanceof HTMLElement) {
-    floating.style.maxWidth = "none";
-    floating.style.width = `${width}px`;
-  }
-  const regions = feed.querySelectorAll(".activity-list, .un-tv-panel, .activity-lock-panel");
-  for (let i = 0; i < regions.length; i++) {
-    const region = regions[i];
-    if (!(region instanceof HTMLElement)) continue;
-    region.style.maxHeight = "none";
-    region.style.flex = "1 1 auto";
-    region.style.minHeight = "0";
-  }
-}
-
-function resetFeedHost(): void {
-  const host = document.querySelector(".live-feed-app-host");
-  if (!(host instanceof HTMLElement) || host.dataset.globeFeedAnchored !== "1") return;
-  host.style.top = "";
-  host.style.left = "";
-  host.style.bottom = "";
-  host.style.right = "";
-  host.style.width = "";
-  host.style.maxWidth = "";
-  delete host.dataset.globeFeedAnchored;
-  const floating = host.querySelector(".activity-floating");
-  if (floating instanceof HTMLElement) {
-    floating.style.width = "";
-    floating.style.maxWidth = "";
-  }
-}
-
-function placeFeedResize(): void {
-  const feed = document.getElementById("live-feed-menu");
-  let grip = document.getElementById("globe-feed-resize");
-  if (!(feed instanceof HTMLElement)) {
-    grip?.remove();
-    if (!feedResize) resetFeedHost();
-    return;
-  }
-  if (!(grip instanceof HTMLElement)) {
-    grip = document.createElement("div");
-    grip.id = "globe-feed-resize";
-    grip.className = "floating-chrome-resize";
-    grip.setAttribute("role", "separator");
-    grip.setAttribute("aria-label", "Resize live feed");
-    grip.title = "Drag to resize";
-    grip.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
-      const current = document.getElementById("live-feed-menu");
-      if (!(current instanceof HTMLElement)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const rect = current.getBoundingClientRect();
-      feedResize = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        width: rect.width,
-        height: rect.height,
-        left: rect.left,
-        top: rect.top,
-      };
-      if (grip instanceof HTMLElement) {
-        try {
-          grip.setPointerCapture(event.pointerId);
-        } catch {
-          // The window listener still receives the move.
-        }
-      }
-    });
-    document.body.append(grip);
-  }
-  const rect = feed.getBoundingClientRect();
-  grip.style.position = "fixed";
-  grip.style.left = `${rect.right - 36}px`;
-  grip.style.top = `${rect.bottom - 36}px`;
-  grip.style.right = "auto";
-  grip.style.bottom = "auto";
-}
-
 function placeFloatingControls(): void {
   placeMenuClose();
-  placeFeedResize();
   document.getElementById("globe-pki-cve-pager")?.remove();
 }
 
@@ -404,34 +290,6 @@ const observer = new MutationObserver(() => watch());
 observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
 watch();
 
-window.addEventListener("pointermove", (event) => {
-  if (feedResize && event.pointerId === feedResize.pointerId) {
-    const feed = document.getElementById("live-feed-menu");
-    if (feed instanceof HTMLElement) {
-      event.preventDefault();
-      const minW = 220;
-      const minH = 180;
-      const maxW = Math.max(minW, window.innerWidth - feedResize.left - 8);
-      const maxH = Math.max(minH, window.innerHeight - feedResize.top - 8);
-      resizeFeed(
-        feed,
-        Math.min(maxW, Math.max(minW, feedResize.width + (event.clientX - feedResize.startX))),
-        Math.min(maxH, Math.max(minH, feedResize.height + (event.clientY - feedResize.startY))),
-      );
-    }
-  }
-  placeFloatingControls();
-}, { passive: false });
-window.addEventListener("pointerup", (event) => {
-  if (!feedResize || event.pointerId !== feedResize.pointerId) return;
-  feedResize = null;
-  placeFloatingControls();
-});
-window.addEventListener("pointercancel", (event) => {
-  if (!feedResize || event.pointerId !== feedResize.pointerId) return;
-  feedResize = null;
-  placeFloatingControls();
-});
 window.addEventListener("resize", () => placeFloatingControls());
 window.addEventListener("scroll", () => placeFloatingControls(), true);
 window.setInterval(() => {

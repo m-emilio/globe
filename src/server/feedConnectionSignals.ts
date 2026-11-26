@@ -20,6 +20,7 @@ type PendingSignal = {
   sender: Peer;
   recipient: Peer;
   expiresAt: number;
+  replying?: boolean;
 };
 
 /** Scoped to the existing Globe room. Consent and pending requests end with the socket. */
@@ -29,7 +30,7 @@ export class FeedConnectionSignals {
   private peers = new Map<string, Peer>();
   private pending = new Map<string, PendingSignal>();
   private lastPing = new WeakMap<Socket, number>();
-  private lastAction = new WeakMap<Socket, number>();
+  private lastActions = new WeakMap<Socket, Partial<Record<"signal-availability" | "signal-request", number>>>();
   private enabling = new WeakMap<Socket, symbol>();
 
   constructor(private env: AuthEnv) {}
@@ -63,11 +64,16 @@ export class FeedConnectionSignals {
       return;
     }
     if (message.type !== "signal-availability" && message.type !== "signal-request" && message.type !== "signal-reply") return;
-    if (now - (this.lastAction.get(socket) ?? 0) < 350) {
-      this.send(socket, { type: "signal-error", reason: "rate-limit" });
-      return;
+    const action = message.type;
+    if (action !== "signal-reply") {
+      const last = this.lastActions.get(socket) ?? {};
+      if (now - (last[action] ?? 0) < 350) {
+        this.send(socket, { type: "signal-error", reason: "rate-limit" });
+        return;
+      }
+      last[action] = now;
+      this.lastActions.set(socket, last);
     }
-    this.lastAction.set(socket, now);
     this.expireSignals(now);
 
     if (message.type === "signal-availability" && fields === 2 && message.accepting === true) {
@@ -119,7 +125,8 @@ export class FeedConnectionSignals {
     }
     if (message.type === "signal-reply" && fields === 3 && isSignalId(message.id) && isCheckOutcome(message.outcome)) {
       const signal = this.pending.get(message.id);
-      if (!signal || signal.recipient !== peer) return;
+      if (!signal || signal.recipient !== peer || signal.replying) return;
+      signal.replying = true;
       const allowed = await this.canExchange(signal.sender, peer);
       if (this.pending.get(signal.id) !== signal) return;
       this.clear(signal);
