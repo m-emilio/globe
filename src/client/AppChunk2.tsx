@@ -1,6 +1,7 @@
 import React from "react";
 import type { GlobeApi } from "./useGlobeApp";
 import { Cobe } from "./CobeGlobe";
+import { ReconGlobeOverlay } from "./ReconGlobeOverlay";
 import { FloatingChrome } from "./FloatingChrome";
 import { safeGlobeHref } from "./safeUrl";
 import type { UnGlobalPreview } from "../shared";
@@ -262,7 +263,8 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
           )}
         </FloatingChrome>
       )}<div className={`main-content ${showTradePulsePanel ? "trade-pulse-main" : ""}`}>
-        <div className="globe-stage">
+        <div className="globe-stage" style={{position:"relative"}}>
+          <ReconGlobeOverlay enabled={Boolean(isAdmin && authUser)} />
           <Cobe
             counter={counter}
             positions={positions.current}
@@ -880,18 +882,6 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
               >
                 Manage admins
               </button>
-            ) : null}
-            {authUser && isAdmin ? (
-              // UI hint only: /admin/purple-team is gated server-side.
-              <a
-                href="/admin/purple-team"
-                className="menu-item admin-menu-item purple-team-menu-item"
-                target="_blank"
-                rel="noopener noreferrer"
-                title="Purple team recon console (admins only)"
-              >
-                Purple Team
-              </a>
             ) : null}
             <a
               href="https://104041.webmail.dynadot.com/user/signin.html"
