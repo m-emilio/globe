@@ -13,8 +13,12 @@ export const CONNECTION_CHECK_PATH = "/api/live-feed/connection";
 export type ConnectionDetails = {
   httpProtocol: string | null;
   tlsVersion: string | null;
+  tlsCipher: string | null;
   edge: string | null;
   country: string | null;
+  edgeTcpMs: number | null;
+  networkAsn: number | null;
+  networkOrganization: string | null;
   sessionCookie: "verified" | "no-session" | "unknown";
 };
 

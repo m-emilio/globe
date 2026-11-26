@@ -13,7 +13,13 @@ import type { GlobeSocketStatus, LiveFeedAccess } from "./ActivityFeed";
 import type { ConnectionSignals } from "./useConnectionSignals";
 
 type HttpCheck = { ms: number; details: ConnectionDetails };
-type LocalChecks = { http: HttpCheck | null; websocketMs: number | null; webRtc: boolean; checkedAt: number };
+type LocalChecks = {
+  http: HttpCheck | null;
+  websocketMs: number | null;
+  socketConnectedAt: number | null;
+  webRtc: boolean;
+  checkedAt: number;
+};
 
 async function checkGlobeHttp(): Promise<HttpCheck | null> {
   const started = performance.now();
@@ -73,7 +79,7 @@ export function ConnectionPanel({ signals, socketStatus, access, onSignIn }: {
   access: LiveFeedAccess;
   onSignIn?: () => void;
 }) {
-  const { canRequest, self, peers, incoming, outgoing, notice, setAvailability, requestCheck, reply, pingSocket } = signals;
+  const { canRequest, self, peers, incoming, outgoing, notice, setAvailability, requestCheck, reply, pingSocket, socketHistory } = signals;
   const [online, setOnline] = useState(() => navigator.onLine);
   const [results, setResults] = useState<LocalChecks | null>(null);
   const [checking, setChecking] = useState(false);
@@ -96,7 +102,13 @@ export function ConnectionPanel({ signals, socketStatus, access, onSignIn }: {
     setChecking(true);
     try {
       const [http, websocketMs] = await Promise.all([checkGlobeHttp(), pingSocket()]);
-      setResults({ http, websocketMs, webRtc: checkWebRtc(), checkedAt: Date.now() });
+      setResults({
+        http,
+        websocketMs,
+        socketConnectedAt: socketHistory.connectedAt,
+        webRtc: checkWebRtc(),
+        checkedAt: Date.now(),
+      });
     } finally {
       setChecking(false);
     }
@@ -119,6 +131,11 @@ export function ConnectionPanel({ signals, socketStatus, access, onSignIn }: {
 
   const http = results?.http;
   const details = http?.details;
+  const websocketMs = socketStatus === "connected" && results?.socketConnectedAt === socketHistory.connectedAt
+    ? results?.websocketMs : null;
+  const network = [details?.networkOrganization, details?.networkAsn ? "AS" + details.networkAsn : null]
+    .filter(Boolean).join(" · ");
+  const socketLabel = socketStatus === "connected" ? "Connected" : socketStatus === "connecting" ? "Connecting" : "Offline";
   const cookie = details?.sessionCookie === "verified" ? "Session verified"
     : details?.sessionCookie === "no-session" ? "No active Globe session" : "Unknown";
 
@@ -133,18 +150,29 @@ export function ConnectionPanel({ signals, socketStatus, access, onSignIn }: {
         </div>
         <dl className="feed-connection-details">
           <div><dt>Browser network</dt><dd>{online ? "Online" : "Offline"}</dd></div>
-          <div><dt>Globe WebSocket</dt><dd>{socketStatus}{socketStatus === "connected" && results?.websocketMs != null ? " · " + results.websocketMs + " ms" : ""}</dd></div>
-          {results && <>
-            <div><dt>HTTPS to Globe</dt><dd>{http ? http.ms + " ms" : "Unknown"}</dd></div>
+          <div><dt>Globe WebSocket</dt><dd>{socketLabel}{websocketMs != null ? " · " + websocketMs + " ms" : ""}</dd></div>
+          {socketStatus === "connected" && socketHistory.connectedAt !== null && (
+            <div><dt>Connected since</dt><dd>{new Date(socketHistory.connectedAt).toLocaleTimeString()}</dd></div>
+          )}
+          <div><dt>Reconnects this tab</dt><dd>{Math.max(0, socketHistory.connections - 1)}</dd></div>
+          {socketHistory.disconnectedAt !== null && (
+            <div><dt>Last disconnect</dt><dd>{new Date(socketHistory.disconnectedAt).toLocaleTimeString()}</dd></div>
+          )}
+        </dl>
+        {results ? <>
+          <h5 className="feed-connection-subheading">Last check</h5>
+          <dl className="feed-connection-details">
+            <div><dt>HTTPS round trip</dt><dd>{http ? http.ms + " ms" : "Unknown"}</dd></div>
             <div><dt>HTTP / TLS</dt><dd>{[details?.httpProtocol, details?.tlsVersion].filter(Boolean).join(" · ") || "Unknown"}</dd></div>
+            <div><dt>TLS cipher</dt><dd>{details?.tlsCipher || "Unavailable"}</dd></div>
             <div><dt>Cloudflare edge</dt><dd>{[details?.edge, details?.country].filter(Boolean).join(" · ") || "Unknown"}</dd></div>
+            <div><dt>Edge TCP estimate</dt><dd>{details?.edgeTcpMs != null ? details.edgeTcpMs + " ms" : "Unavailable"}</dd></div>
+            <div><dt>Network</dt><dd>{network || "Unavailable"}</dd></div>
             <div><dt>Globe session cookie</dt><dd>{cookie}</dd></div>
             <div><dt>WebRTC data channels</dt><dd>{results.webRtc ? "Browser support available" : "Unavailable"}</dd></div>
-          </>}
-        </dl>
-        {results
-          ? <p className="feed-connection-note" role="status">Checked at {new Date(results.checkedAt).toLocaleTimeString()}.</p>
-          : <p className="feed-connection-note">Run checks for latency, edge protocol, session cookie, and WebRTC support.</p>}
+          </dl>
+          <p className="feed-connection-note" role="status">Checked at {new Date(results.checkedAt).toLocaleTimeString()}.</p>
+        </> : <p className="feed-connection-note">Run checks for transport latency, TLS, and browser support.</p>}
       </section>
 
       <section className="feed-connection-card" aria-labelledby="feed-peer-requests">
