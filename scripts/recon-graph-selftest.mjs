@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { build } from "esbuild";
+const bundle = await build({entryPoints:["src/reconGraphModel.ts"],bundle:true,write:false,format:"esm",platform:"node"});
+const {parseReconReport} = await import("data:text/javascript;base64,"+Buffer.from(bundle.outputFiles[0].contents).toString("base64"));
+const fixture={target:{kind:"asn",value:"AS64500"},observedAt:"2026-01-01T00:00:00Z",graph:{nodes:[{id:"target",label:"AS64500",type:"asn"},{id:"holder",label:"Fixture",type:"organization"}],edges:[{from:"target",to:"holder",relationship:"registered holder"},{from:"target",to:"missing",relationship:"invalid"}]}};
+assert.equal(parseReconReport(fixture).graph.edges.length,1);
+assert.throws(()=>parseReconReport(null));
+assert.throws(()=>parseReconReport({target:{kind:"asn",value:"AS64500"}}));
+assert.equal(parseReconReport({...fixture,graph:{nodes:Array.from({length:30},(_,i)=>({id:String(i),label:String(i),type:"fixture"})),edges:[]}}).graph.nodes.length,24);
+console.log("Recon graph fixture checks passed");
