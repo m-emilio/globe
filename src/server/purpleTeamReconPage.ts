@@ -1,3 +1,4 @@
+import type { PurpleFinding } from "./purpleTeamFindings";
 import type { ConnectionDetails } from "../connectionSignals";
 import type { ReconAddress } from "../reconAddress";
 import type { IpRecon } from "./reconIp";
@@ -309,6 +310,36 @@ export function reconCertificatePage(expected: string, applySecurityHeaders: (he
   }, applySecurityHeaders);
 }
 
+const PURPLE_TECHNIQUES = {
+  T1566: { label: "Phishing", path: "T1566/" },
+  "T1584.002": { label: "Compromise Infrastructure · DNS Server", path: "T1584/002/" },
+  "T1588.004": { label: "Obtain Capabilities · Digital Certificates", path: "T1588/004/" },
+};
+const FINDING_LABELS = {
+  low: { text: "Low", className: "review" },
+  unknown: { text: "Unknown", className: "unknown" },
+  observed: { text: "Observed", className: "pass" },
+};
+
+function renderPurpleFindings(findings: PurpleFinding[]): string {
+  return `<section class="panel" aria-labelledby="purple-findings-title">
+    <h2 id="purple-findings-title">Purple Findings</h2>
+    <p class="small">Public DNS evidence · Blue-team action · Related ATT&amp;CK technique</p>
+    <ul class="rows">${findings.map(finding => {
+      const technique = PURPLE_TECHNIQUES[finding.technique];
+      const status = FINDING_LABELS[finding.status];
+      return `<li>
+        <div class="check-head"><strong>${escapeHtml(finding.control)}</strong>
+          <span class="status ${status.className}">${status.text}</span>
+        </div>
+        <p><strong>Red</strong> · ${escapeHtml(finding.red)}</p>
+        <p><strong>Blue</strong> · ${escapeHtml(finding.blue)}</p>
+        <p class="small"><a href="https://attack.mitre.org/techniques/${technique.path}">${finding.technique} ${technique.label}</a></p>
+      </li>`;
+    }).join("")}</ul>
+  </section>`;
+}
+
 export function reconPage(page: ReconPageData, applySecurityHeaders: (headers: Headers) => void): Response {
   const observedAt = page.snapshot?.at ?? new Date().toISOString();
   const results = page.results
@@ -316,6 +347,7 @@ export function reconPage(page: ReconPageData, applySecurityHeaders: (headers: H
       <p class="small">Saved ${snapshotTime(page.snapshot.at)}</p>
       ${!page.download ? `<a href="${snapshotLink(page.domain, page.snapshot.id)}&amp;download=1">Download report</a>` : ""}
     </section>` : ""}
+    ${page.results.purpleFindings?.length ? renderPurpleFindings(page.results.purpleFindings) : ""}
     <section class="panel" aria-labelledby="pki-title">
       <h2 id="pki-title">CA and PKI analysis</h2>
       ${renderPkiFacts(page.results.dns.find(record => record.label === "CAA") ?? null, page.results.certificates, observedAt)}

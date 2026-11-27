@@ -1,5 +1,6 @@
 import { readBoundedText } from "./boundedBody";
 import { parseReconAddress, type ReconAddress } from "../reconAddress";
+import type { PurpleFinding } from "./purpleTeamFindings";
 import type { MailPolicyReview } from "./purpleTeamMail";
 
 export const RECON_PATH = "/admin/purple-team/recon";
@@ -7,13 +8,15 @@ export const RECON_CERTIFICATE_PATH = RECON_PATH + "/certificate";
 
 const PUBLIC_DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
 const PRIVATE_SUFFIX = /\.(?:arpa|example|internal|invalid|local|localhost|onion|test)$/;
-const DNS_TYPES = { A: 1, AAAA: 28, CNAME: 5, MX: 15, NS: 2, PTR: 12, CAA: 257, TXT: 16 };
+export const DNS_TYPES = { A: 1, AAAA: 28, CNAME: 5, DNAME: 39, MX: 15, NS: 2, PTR: 12, CAA: 257, TXT: 16, SOA: 6, DS: 43, DNSKEY: 48 };
 type DnsType = keyof typeof DNS_TYPES;
+type DnsAnswer = { type?: number; name?: unknown; data?: unknown };
 
 export type DnsRecordGroup = {
   label: string;
   values: string[] | null;
   limited: boolean;
+  responseCode?: 0 | 3;
 };
 
 export type LoggedCertificate = {
@@ -37,6 +40,7 @@ export type ReconResults = {
   dns: DnsRecordGroup[];
   certificates: CertificateResults | null;
   mail?: MailPolicyReview;
+  purpleFindings?: PurpleFinding[];
 };
 
 export type AddressPki = {
@@ -66,28 +70,50 @@ export async function readPublicJson(url: URL, accept: string, maxBytes: number,
   }
 }
 
+export async function readReconDns(
+  name: string,
+  type: DnsType,
+  { timeoutMs, dnssec = false }: { timeoutMs?: number; dnssec?: boolean } = {},
+): Promise<{ status: 0 | 3; authenticated: boolean; answer: DnsAnswer[]; authority: DnsAnswer[] }> {
+  const url = new URL("https://cloudflare-dns.com/dns-query");
+  url.search = new URLSearchParams({ name, type }).toString();
+  if (dnssec) {
+    url.searchParams.set("do", "true");
+    url.searchParams.set("cd", "false");
+  }
+  const body = await readPublicJson(url, "application/dns-json", 65_536, timeoutMs) as {
+    Status?: number;
+    TC?: boolean;
+    AD?: boolean;
+    Answer?: DnsAnswer[];
+    Authority?: DnsAnswer[];
+  };
+  if (body.TC || (body.Status !== 0 && body.Status !== 3) ||
+      (body.Answer !== undefined && !Array.isArray(body.Answer)) ||
+      (body.Authority !== undefined && !Array.isArray(body.Authority))) {
+    throw new Error("Incomplete DNS response.");
+  }
+  return {
+    status: body.Status,
+    authenticated: body.AD === true,
+    answer: body.Answer ?? [],
+    authority: body.Authority ?? [],
+  };
+}
+
 async function readDns(
   name: string, type: DnsType, label: string = type, policy?: RegExp, timeoutMs?: number,
 ): Promise<DnsRecordGroup> {
-  const url = new URL("https://cloudflare-dns.com/dns-query");
-  url.search = new URLSearchParams({ name, type }).toString();
   try {
-    const body = await readPublicJson(url, "application/dns-json", 65_536, timeoutMs) as {
-      Status?: number;
-      TC?: boolean;
-      Answer?: { type?: number; data?: unknown }[];
-    };
-    if (body.TC || (body.Status !== 0 && body.Status !== 3) ||
-        (body.Answer !== undefined && !Array.isArray(body.Answer))) {
-      throw new Error("Incomplete DNS response.");
-    }
-    const answers = body.Status === 0 ? (body.Answer ?? []) : [];
+    const response = await readReconDns(name, type, { timeoutMs });
+    const answers = response.status === 0 ? response.answer : [];
     const values = [...new Set(answers.flatMap((answer) =>
       answer?.type === DNS_TYPES[type] && typeof answer.data === "string" && (!policy || policy.test(answer.data))
         ? [answer.data] : [],
     ))];
-    return { label, values: values.slice(0, 10).map(value => value.slice(0, 640)),
-      limited: values.length > 10 || values.some(value => value.length > 640) };
+    return { label, values: values.slice(0, 10).map(value => value.slice(0, 640)), responseCode: response.status,
+      limited: values.length > 10 || values.some(value => value.length > 640) ||
+        answers.some(answer => answer?.type === DNS_TYPES[type] && typeof answer.data !== "string") };
   } catch {
     return { label, values: null, limited: false };
   }

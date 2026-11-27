@@ -93,10 +93,16 @@ function inspectDmarc(initial: DnsRecordGroup | undefined): MailPolicyReview["dm
   return { domains: [...domains].sort(), unknownDestinations, status: "published" };
 }
 
-async function inspectDkim(domain: string, selector: string): Promise<NonNullable<MailPolicyReview["dkim"]>> {
-  const result = await readReconTxt(selector + "._domainkey." + domain);
+export async function inspectDkim(domain: string, selector: string, timeoutMs?: number): Promise<NonNullable<MailPolicyReview["dkim"]>> {
+  const name = selector + "._domainkey." + domain;
+  if (name.length > 253) return { selector, status: "Unknown" };
+  const result = await readReconTxt(name, timeoutMs);
   if (!result.values || result.limited) return { selector, status: "Unknown" };
-  const keys = result.values.map(tags).flatMap(row => row.has("p") ? [row.get("p")!] : []);
+  const keys = result.values.map(tags).flatMap(row => {
+    const key = row.get("p");
+    const version = row.get("v");
+    return key !== undefined && (version === undefined || version.toUpperCase() === "DKIM1") ? [key] : [];
+  });
   if (!keys.length) return { selector, status: "No key returned" };
   if (keys.length !== 1) return { selector, status: "Unknown" };
   const key = keys[0].replace(/\s/g, "");

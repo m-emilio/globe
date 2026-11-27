@@ -68,6 +68,7 @@ import { lookupPublicRecon, normalizeReconDomain, RECON_CERTIFICATE_PATH } from 
 import { lookupIpRecon } from "./reconIp";
 import { getCloudflareClientIp, readConnectionMetadata } from "./connectionMetadata";
 import { inspectMailPolicies, normalizeDkimSelector } from "./purpleTeamMail";
+import { inspectPurpleFindings } from "./purpleTeamFindings";
 import { reconCertificatePage, reconPage, type ReconPageData } from "./purpleTeamReconPage";
 import { globeHeaderFindings } from "./globeHeaderFindings";
 import type { ToolFinding, ToolResult } from "./purpleTeamTools";
@@ -639,6 +640,7 @@ export async function adminPurpleTeamRecon(
   if (unavailable) return render({
     domain, results, notice: "Public sources are unavailable. Retry to collect a snapshot.", status: 503,
   });
+  results.purpleFindings = await inspectPurpleFindings(domain, results.dns, results.mail?.dkim ?? null);
   try {
     if (fields.get("save") === "1") {
       const actor = accountHash(gate.user.fingerprint, readLogPepper(env)) || userSeal(gate.user.id);
