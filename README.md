@@ -120,6 +120,8 @@ npx wrangler secret put TRANSIT_PUBLICAPI_V4
 
 **CA and PKI analysis** summarizes CAA policy, logged certificate validity, issuing CA names, and issuer key fingerprints. For an IP address it checks up to two public reverse-DNS names against forward DNS and shows which logged certificates for those names list the exact address.
 
+**Purple Findings** pairs observed DKIM, DNSSEC, and CAA evidence with blue-team actions and related ATT&CK techniques. Recon checks four common DKIM selectors or the exact selector you supply. DNSSEC findings use the validating resolver's responses, and the CAA check searches the domain and its DNS parents up to the lookup limit.
+
 Enter a public IPv4 or IPv6 address to see RIPEstat routing information and public reverse DNS. **My connection** shows the IP address, network, and TLS negotiation Globe sees. **Certificate inspector** reads one public PEM or DER certificate in the browser and checks its dates, public key, signature algorithm, and match to an optional hostname or IP address.
 
 Choose **Save domain snapshot** to keep a result and compare it with the previous saved run for the same domain. Recon home lists recently saved domains. Saved reports can be downloaded as a print-ready HTML file. **Review mail policy details** follows published SPF policy links, summarizes DMARC report destinations, and can check an exact DKIM selector.
