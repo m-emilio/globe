@@ -60,8 +60,10 @@ import {
 } from "./pqcVerify";
 import { AUTH_BAN_SECONDS, AUTH_FAIL_LIMIT, AUTH_FAIL_WINDOW_SECONDS } from "./authBan";
 import { listLoginAttempts, readLoginChainTip } from "./loginLog";
-import { BodyLimitError, readBoundedText } from "./boundedBody";
+import { BodyLimitError, readBoundedRequestText, readBoundedText } from "./boundedBody";
 import { CANARY_PATH, purpleTeamDirectory, purpleTeamHost, type PurpleTeamBindings } from "./purpleTeamDirectory";
+import { lookupPublicRecon, normalizeReconDomain } from "./purpleTeamRecon";
+import { reconPage } from "./purpleTeamReconPage";
 import type { ToolFinding, ToolResult } from "./purpleTeamTools";
 import { operationsPage, type OperationsPageData } from "./securityOperationsPage";
 import { runFeedIsolationDrill, runSessionContainmentDrill } from "./securityOperationsDrills";
@@ -538,6 +540,44 @@ async function requirePurpleTeamSession(
   if (!gate.ok) return gate;
   const denied = await rejectUnlessAllowlistedFingerprint(request, env, gate.user, applySecurityHeaders);
   return denied ? { ok: false as const, response: denied } : gate;
+}
+
+export async function adminPurpleTeamRecon(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+
+  const url = new URL(request.url);
+  if (request.method !== "POST") {
+    const domain = normalizeReconDomain(url.searchParams.get("t") ?? "") ?? "";
+    return reconPage({ domain }, applySecurityHeaders);
+  }
+  if (request.headers.get("origin") !== url.origin) {
+    return json({ error: "same_origin_required" }, { status: 403 }, applySecurityHeaders);
+  }
+  if (!/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(request.headers.get("content-type") ?? "")) {
+    return json({ error: "form_required" }, { status: 415 }, applySecurityHeaders);
+  }
+  let domain: string | null;
+  try {
+    const fields = new URLSearchParams(await readBoundedRequestText(request, 1024));
+    domain = normalizeReconDomain(fields.get("domain") ?? "");
+  } catch (error) {
+    return error instanceof BodyLimitError ? bodyTooLargeResponse(applySecurityHeaders)
+      : json({ error: "invalid_form" }, { status: 400 }, applySecurityHeaders);
+  }
+  if (!domain) {
+    return reconPage({ domain: "", notice: "Enter a public domain such as example.com.", status: 400 }, applySecurityHeaders);
+  }
+  const limited = await rateLimitDurable(env, "purple:recon:" + gate.user.id, 6, 60_000, applySecurityHeaders);
+  if (limited) return limited;
+
+  const results = await lookupPublicRecon(domain);
+  const unavailable = !results.certificates && results.dns.every(record => record.values === null);
+  return reconPage({ domain, results, status: unavailable ? 503 : 200 }, applySecurityHeaders);
 }
 
 async function confirmDrillAudit(

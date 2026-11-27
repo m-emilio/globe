@@ -116,6 +116,10 @@ npx wrangler secret put TRANSIT_PUBLICAPI_V4
 
 ### Purple Team tools
 
+**Menu → Purple Team** opens Recon. Enter a public domain and choose **Run recon** to view DNS records, SPF and DMARC policies, and names, issuers, and validity dates from public Certificate Transparency records.
+
+Open **Globe operations** for the built-in controls.
+
 - **Run Globe checks** verifies four Globe routes and checks for both a canary receipt and its audit entry. The page also shows a snapshot of the default Live Feed room.
 - **Run local drills** exercises session revocation and Live Feed invitation isolation with disposable fixtures. Each run has an entry in the admin audit log.
 - **Evaluate recent events** samples recent sign-in and audit records for the alert inbox. Admins can acknowledge, resolve, and reopen alerts.

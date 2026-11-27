@@ -882,13 +882,13 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
               </button>
             ) : null}
             {authUser && isAdmin ? (
-              // UI hint only: /admin/purple-team is gated server-side.
+              // Purple Team requires admin authorization on the server.
               <a
-                href="/admin/purple-team"
+                href="/admin/purple-team/recon"
                 className="menu-item admin-menu-item purple-team-menu-item"
                 target="_blank"
                 rel="noopener noreferrer"
-                title="Globe health checks, drills, and alerts"
+                title="Public DNS and certificate recon"
               >
                 Purple Team
               </a>

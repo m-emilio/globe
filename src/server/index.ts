@@ -2,6 +2,7 @@ import { routePartykitRequest, Server } from "partyserver";
 import { CONNECTION_CHECK_PATH, type ConnectionDetails } from "../connectionSignals";
 import { FeedConnectionSignals } from "./feedConnectionSignals";
 import { closeSessionSockets, validSessionReference } from "./sessionContainment";
+import { RECON_PATH } from "./purpleTeamRecon";
 import { OPERATIONS_PATH } from "./securityOperationsModel";
 import {
   adoptSessionToken,
@@ -39,6 +40,7 @@ import {
   adminListAdmins,
   adminAddAdmin,
   adminRemoveAdmin,
+  adminPurpleTeamRecon,
   adminSecurityOperations,
   adminSessionContainment,
   adminRevokeTransit,
@@ -4966,8 +4968,14 @@ const worker = {
       return adminSessionContainment(request, env, applySecurityHeaders);
     }
 
-    if (url.pathname === OPERATIONS_PATH || url.pathname === OPERATIONS_PATH + "/" ||
-      url.pathname === OPERATIONS_PATH + "/operations") {
+    const purpleTeamHome = url.pathname === OPERATIONS_PATH || url.pathname === OPERATIONS_PATH + "/";
+    if (url.pathname === RECON_PATH || url.pathname === RECON_PATH + "/" ||
+      (purpleTeamHome && isReadApiMethod(request) && url.searchParams.has("t") && !url.searchParams.has("host"))) {
+      if (!isReadApiMethod(request) && request.method !== "POST") return methodNotAllowedResponse("GET, HEAD, POST");
+      return withoutResponseBodyForHead(request, await adminPurpleTeamRecon(request, env, applySecurityHeaders));
+    }
+
+    if (purpleTeamHome || url.pathname === OPERATIONS_PATH + "/operations") {
       if (!isReadApiMethod(request) && request.method !== "POST") return methodNotAllowedResponse("GET, HEAD, POST");
       return withoutResponseBodyForHead(
         request,
@@ -4977,7 +4985,7 @@ const worker = {
 
     if (url.pathname.startsWith(OPERATIONS_PATH + "/")) {
       const tool = url.pathname.slice(OPERATIONS_PATH.length + 1).replace(/\/$/, "");
-      if (["recon", "osv", "vulnerabilities", "assessment", "dependency-audit", "ct"].includes(tool)) {
+      if (["osv", "vulnerabilities", "assessment", "dependency-audit", "ct"].includes(tool)) {
         return withoutResponseBodyForHead(request,
           await retiredPurpleTeamRoute(request, env, applySecurityHeaders, tool !== "ct"));
       }
