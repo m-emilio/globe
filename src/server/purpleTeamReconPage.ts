@@ -4,7 +4,7 @@ import type { IpRecon } from "./reconIp";
 import type { MailPolicyReview } from "./purpleTeamMail";
 import type { ReconSnapshot, ReconSnapshotInfo } from "./purpleTeamHost";
 import { purpleTeamPage } from "./purpleTeamPage";
-import { RECON_CERTIFICATE_PATH, RECON_PATH, type CertificateResults, type DnsRecordGroup, type ReconResults } from "./purpleTeamRecon";
+import { RECON_CERTIFICATE_PATH, RECON_PATH, type CertificateResults, type DnsRecordGroup, type LoggedCertificate, type ReconResults } from "./purpleTeamRecon";
 import { escapeHtml } from "./purpleTeamTools";
 import { OPERATIONS_PATH } from "./securityOperationsModel";
 
@@ -66,15 +66,18 @@ function renderIpResults(result: IpRecon): string {
       ${names === null ? "<p>Lookup unavailable.</p>" : names.length === 0 ? "<p>No public PTR name returned.</p>"
         : `<ul class="names">${names.map(name =>
           `<li><a href="${RECON_PATH}?t=${encodeURIComponent(name)}"><code>${escapeHtml(name)}</code></a></li>`).join("")}</ul>
-          <p class="small">Open a PTR name to look up DNS and logged certificates for that hostname.</p>`}`
+          <p class="small">Open a PTR name for the full DNS lookup.</p>`}`
       : "<p>This address is outside public unicast space.</p>"}
     <p><a href="${inspector}">Inspect a certificate for this IP</a></p>
   </section>`;
 }
 
+function daysFromObservation(date: string | null, observedAt: string): number {
+  return (Date.parse(date ?? "") - Date.parse(observedAt.slice(0, 10))) / 86_400_000;
+}
+
 function logExpiry(expires: string | null, observedAt: string): string {
-  if (!expires) return "";
-  const remainingDays = (Date.parse(expires) - Date.parse(observedAt.slice(0, 10))) / 86_400_000;
+  const remainingDays = daysFromObservation(expires, observedAt);
   if (!Number.isFinite(remainingDays)) return "";
   const label = remainingDays < 0 ? "Expired" : remainingDays === 0 ? "Expires today (UTC)"
     : remainingDays <= 30 ? "Expires within 30 days" : "";
@@ -109,14 +112,111 @@ function renderCertificateLog(result: CertificateResults | null, observedAt: str
       ${result.nameCount > result.names.length ? `<p class="small">Showing ${result.names.length} names.</p>` : ""}
     </details>
     <p class="small">Showing ${result.records.length} of ${result.recordCount} returned certificates. Dates in UTC.</p>
-    <ul class="rows">${result.records.map(record => `<li>
-      <strong><code>${escapeHtml(record.names[0])}</code></strong>
-      ${record.names.length > 1 ? ` <span class="small">+${record.names.length - 1} more</span>` : ""}
-      <p>${escapeHtml(record.issuer ?? "Issuer unknown")}</p>
-      <p class="small">Issued ${record.issued ?? "Unknown"} · Expires ${record.expires ?? "Unknown"}</p>
-      ${logExpiry(record.expires, observedAt)}
-      ${record.revoked ? '<span class="status review">Revoked in source</span>' : ""}
-    </li>`).join("")}</ul>`}
+    ${renderCertificateRows(result.records, observedAt)}`}
+  </section>`;
+}
+
+function renderCertificateRows(records: LoggedCertificate[], observedAt: string): string {
+  return `<ul class="rows">${records.map(record => `<li>
+    <strong><code>${escapeHtml(record.names[0])}</code></strong>
+    ${record.names.length > 1 ? ` <span class="small">+${record.names.length - 1} more</span>` : ""}
+    <p>${escapeHtml(record.issuer ?? "Issuer unknown")}</p>
+    <p class="small">Issued ${record.issued ?? "Unknown"} · Expires ${record.expires ?? "Unknown"}</p>
+    ${logExpiry(record.expires, observedAt)}
+    ${record.revoked ? '<span class="status review">Revoked in source</span>' : ""}
+    ${record.matchesAddress === true ? '<span class="status pass">Exact IP listed</span>'
+      : record.matchesAddress === false ? '<span class="status">No matching IP identity</span>' : ""}
+  </li>`).join("")}</ul>`;
+}
+
+function describeCaa(records: DnsRecordGroup | null): string {
+  if (!records?.values) return "<p>CAA lookup unavailable.</p>";
+  if (!records.values.length) return "<p>No CAA records returned for this query.</p>";
+  const properties = records.values.flatMap(record => {
+    const match = record.trim().match(/^(\d{1,3})\s+([a-z0-9]+)\s+(?:"([^"]*)"|(\S+))$/i);
+    if (!match || Number(match[1]) > 255) return [];
+    return [{ flags: Number(match[1]), tag: match[2].toLowerCase(), value: match[3] ?? match[4] }];
+  });
+  const issuerPolicy = (tag: "issue" | "issuewild", empty: string) => {
+    const values = properties.filter(property => property.tag === tag).map(property => property.value.trim());
+    if (!values.length) return empty;
+    return [...new Set(values)].map(value => value.split(";")[0].trim() ? value : "No issuer authorized by this record").join(" · ");
+  };
+  const critical = properties.filter(property => (property.flags & 128) !== 0)
+    .map(property => property.tag);
+  const reports = properties.filter(property => property.tag === "iodef").map(property => property.value);
+  return `${labelRows([
+    ["CAA issue", issuerPolicy("issue", "No issue property returned")],
+    ["CAA issuewild", issuerPolicy("issuewild", "Uses issue policy when present")],
+    ["CAA reports", reports.join(" · ") || "No reporting property returned"],
+    ...(critical.length ? [["Issuer-critical tags", [...new Set(critical)].join(", ")] as [string, string]] : []),
+  ])}
+  ${records.limited || properties.length < records.values.length
+    ? '<p class="small">CAA findings cover the complete records that could be read.</p>' : ""}`;
+}
+
+function renderPkiFacts(caa: DnsRecordGroup | null, certificates: CertificateResults | null, observedAt: string): string {
+  const records = certificates?.records ?? [];
+  const issuers = new Map<string, { name: string; key?: string; count: number }>();
+  for (const record of records) {
+    const name = record.issuer ?? "Issuer unknown";
+    const id = record.issuerKeySha256 ? "key:" + record.issuerKeySha256 : "name:" + name;
+    const entry = issuers.get(id);
+    if (entry) entry.count++;
+    else issuers.set(id, { name, key: record.issuerKeySha256, count: 1 });
+  }
+  return `<div class="recon-results">
+    <div>
+      <h3>CAA issuance policy</h3>
+      <p class="small">Cloudflare Public DNS · Policy returned for this name</p>
+      ${describeCaa(caa)}
+    </div>
+    <div>
+      <h3>Logged CA issuers</h3>
+      <p class="small">Certificate Transparency · SSLMate Cert Spotter</p>
+      ${!certificates ? "<p>Certificate log unavailable.</p>"
+        : !records.length ? "<p>No logged certificates returned for this name.</p>"
+        : `<p class="small">Summary of ${records.length} displayed certificate records.</p>
+          ${labelRows([
+            ["Expired", String(records.filter(record => daysFromObservation(record.expires, observedAt) < 0).length)],
+            ["Due within 30 days", String(records.filter(record => {
+              const days = daysFromObservation(record.expires, observedAt);
+              return days >= 0 && days <= 30;
+            }).length)],
+            ["Not yet valid", String(records.filter(record => daysFromObservation(record.issued, observedAt) > 0).length)],
+            ["Revoked in source", String(records.filter(record => record.revoked).length)],
+            ["Validity unavailable", String(records.filter(record => !record.issued || !record.expires).length)],
+          ])}
+          <ul class="rows">${[...issuers.values()].map(({ name, key, count }) => `<li>
+            <strong>${escapeHtml(name)}</strong> · ${count} ${count === 1 ? "certificate" : "certificates"}
+            ${key ? `<p class="small">Issuer key SHA-256 <code>${escapeHtml(key)}</code></p>` : ""}
+          </li>`).join("")}</ul>`}
+    </div>
+  </div>`;
+}
+
+function renderIpPki(result: IpRecon, observedAt: string): string {
+  return `<section class="panel" aria-labelledby="ip-pki-title">
+    <h2 id="ip-pki-title">CA and PKI analysis</h2>
+    <p>Certificate log records for DNS names that reverse DNS lists and forward DNS confirms for this address.</p>
+    ${result.pki.length ? result.pki.map(({ hostname, forward, caa, certificates }) => {
+      if (forward !== "confirmed") return `<p><strong>${escapeHtml(hostname)}</strong> · ${forward === "unknown"
+        ? "Forward DNS confirmation unavailable" : "Forward DNS returned another address"}</p>`;
+      const reviewed = certificates?.records.filter(record => typeof record.matchesAddress === "boolean") ?? [];
+      const matched = reviewed.filter(record => record.matchesAddress).length;
+      return `<div class="pki-host">
+        <h3><code>${escapeHtml(hostname)}</code></h3>
+        <p>Forward DNS confirms this address.</p>
+        ${reviewed.length ? `<p><strong>${matched} of ${reviewed.length} checked records list this exact IP.</strong></p>`
+          : certificates?.records.length ? "<p>IP identities are unavailable in the returned log records.</p>" : ""}
+        ${renderPkiFacts(caa, certificates, observedAt)}
+        ${certificates?.records.length ? `<details>
+          <summary>Logged certificate details</summary>${renderCertificateRows(certificates.records, observedAt)}
+        </details>` : ""}
+      </div>`;
+    }).join("") : `<p>${!result.address.isPublic ? "Public DNS linkage applies to public unicast addresses."
+      : result.names === null ? "Reverse DNS lookup unavailable." : "No public PTR hostname returned."}</p>`}
+    ${result.names && result.names.length > result.pki.length ? '<p class="small">Checked the first two public PTR names.</p>' : ""}
   </section>`;
 }
 
@@ -210,12 +310,17 @@ export function reconCertificatePage(expected: string, applySecurityHeaders: (he
 }
 
 export function reconPage(page: ReconPageData, applySecurityHeaders: (headers: Headers) => void): Response {
+  const observedAt = page.snapshot?.at ?? new Date().toISOString();
   const results = page.results
     ? `${page.snapshot ? `<section class="panel"><h2>${escapeHtml(page.domain)}</h2>
       <p class="small">Saved ${snapshotTime(page.snapshot.at)}</p>
       ${!page.download ? `<a href="${snapshotLink(page.domain, page.snapshot.id)}&amp;download=1">Download report</a>` : ""}
     </section>` : ""}
-    <div class="recon-results">${renderDns(page.results.dns)}${renderCertificateLog(page.results.certificates, page.snapshot?.at ?? new Date().toISOString())}</div>
+    <section class="panel" aria-labelledby="pki-title">
+      <h2 id="pki-title">CA and PKI analysis</h2>
+      ${renderPkiFacts(page.results.dns.find(record => record.label === "CAA") ?? null, page.results.certificates, observedAt)}
+    </section>
+    <div class="recon-results">${renderDns(page.results.dns)}${renderCertificateLog(page.results.certificates, observedAt)}</div>
     ${page.results.mail ? renderMail(page.results.mail) : ""}
     ${page.previous ? renderComparison(page.results, page.previous) : ""}`
     : "";
@@ -258,7 +363,7 @@ export function reconPage(page: ReconPageData, applySecurityHeaders: (headers: H
       <a href="${RECON_CERTIFICATE_PATH}">Certificate inspector</a><a href="${OPERATIONS_PATH}">Globe operations</a>`,
     content: page.download ? results : notice +
       `<div class="recon-toolbar">${form}${page.ownConnection ? renderOwnConnection(page.ownConnection) : ""}</div>` +
-      (page.ipResults ? renderIpResults(page.ipResults) : "") + results + history + savedDomains,
+      (page.ipResults ? renderIpPki(page.ipResults, observedAt) + renderIpResults(page.ipResults) : "") + results + history + savedDomains,
     status: page.status,
   }, applySecurityHeaders);
   if (page.download) response.headers.set("Content-Disposition", `attachment; filename="globe-recon-${page.domain}.html"`);

@@ -1,4 +1,5 @@
 import { readBoundedText } from "./boundedBody";
+import { parseReconAddress, type ReconAddress } from "../reconAddress";
 import type { MailPolicyReview } from "./purpleTeamMail";
 
 export const RECON_PATH = "/admin/purple-team/recon";
@@ -15,12 +16,14 @@ export type DnsRecordGroup = {
   limited: boolean;
 };
 
-type LoggedCertificate = {
+export type LoggedCertificate = {
   names: string[];
   issuer: string | null;
+  issuerKeySha256?: string;
   issued: string | null;
   expires: string | null;
   revoked: boolean;
+  matchesAddress?: boolean | null;
 };
 
 export type CertificateResults = {
@@ -34,6 +37,13 @@ export type ReconResults = {
   dns: DnsRecordGroup[];
   certificates: CertificateResults | null;
   mail?: MailPolicyReview;
+};
+
+export type AddressPki = {
+  hostname: string;
+  forward: "confirmed" | "different" | "unknown";
+  caa: DnsRecordGroup | null;
+  certificates: CertificateResults | null;
 };
 
 export function normalizeReconDomain(input: string): string | null {
@@ -105,13 +115,21 @@ function certificateDate(value: unknown): string | null {
   return Number.isFinite(time) ? new Date(time).toISOString().slice(0, 10) : null;
 }
 
-async function readCertificates(domain: string): Promise<CertificateResults | null> {
+function matchIpIdentity(identities: unknown, address: ReconAddress): boolean | null {
+  if (!Array.isArray(identities)) return null;
+  const parsed = identities.map(value => typeof value === "string" ? parseReconAddress(value) : null);
+  if (parsed.some(value => value?.value === address.value)) return true;
+  return parsed.includes(null) ? null : false;
+}
+
+async function readCertificates(domain: string, address?: ReconAddress): Promise<CertificateResults | null> {
   const url = new URL("https://api.certspotter.com/v1/issuances");
   url.search = new URLSearchParams([
-    ["domain", domain], ["include_subdomains", "true"], ["expand", "dns_names"], ["expand", "issuer"],
+    ["domain", domain], ["include_subdomains", address ? "false" : "true"], ["expand", "dns_names"], ["expand", "issuer"],
   ]).toString();
+  if (address) url.searchParams.append("expand", "ip_addresses");
   try {
-    const body = await readPublicJson(url, "application/json", 1_500_000);
+    const body = await readPublicJson(url, "application/json", 1_500_000, address ? 4000 : 5500);
     if (!Array.isArray(body)) return null;
     const matches: LoggedCertificate[] = [];
     for (const row of body) {
@@ -122,12 +140,16 @@ async function readCertificates(domain: string): Promise<CertificateResults | nu
       }))];
       if (!names.length) continue;
       const issuer = row.issuer?.friendly_name ?? row.issuer?.name;
+      const issuerKey = row.issuer?.pubkey_sha256;
       matches.push({
         names,
         issuer: typeof issuer === "string" ? issuer.slice(0, 180) : null,
+        issuerKeySha256: typeof issuerKey === "string" && /^[a-f0-9]{64}$/i.test(issuerKey)
+          ? issuerKey.toLowerCase() : undefined,
         issued: certificateDate(row.not_before),
         expires: certificateDate(row.not_after),
         revoked: row.revoked === true,
+        matchesAddress: address ? matchIpIdentity(row.ip_addresses, address) : undefined,
       });
     }
     if (body.length && !matches.length) return null;
@@ -137,6 +159,23 @@ async function readCertificates(domain: string): Promise<CertificateResults | nu
   } catch {
     return null;
   }
+}
+
+export async function lookupAddressPki(hostname: string, address: ReconAddress): Promise<AddressPki> {
+  const family = address.family === 4 ? "A" : "AAAA";
+  const forward = await readDns(hostname, family, family, undefined, 3000);
+  if (!forward.values?.some(value => parseReconAddress(value)?.value === address.value)) {
+    return {
+      hostname,
+      forward: forward.values === null || forward.limited ? "unknown" : "different",
+      caa: null,
+      certificates: null,
+    };
+  }
+  const [caa, certificates] = await Promise.all([
+    readDns(hostname, "CAA", "CAA", undefined, 3000), readCertificates(hostname, address),
+  ]);
+  return { hostname, forward: "confirmed", caa, certificates };
 }
 
 async function readDomainDns(domain: string): Promise<DnsRecordGroup[]> {
