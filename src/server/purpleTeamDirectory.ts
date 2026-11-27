@@ -8,6 +8,7 @@ export class PurpleTeamDirectory extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hosts (hostname TEXT PRIMARY KEY)");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS recon_hosts (hostname TEXT PRIMARY KEY, saved_at INTEGER NOT NULL)");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS canaries (id TEXT PRIMARY KEY, armed INTEGER, hit INTEGER)");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS revoked_sessions (reference TEXT PRIMARY KEY, expires INTEGER NOT NULL)");
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS revoked_session_expiry ON revoked_sessions(expires)");
@@ -23,6 +24,19 @@ export class PurpleTeamDirectory extends DurableObject {
 
   hasHost(hostname: string): boolean {
     return this.ctx.storage.sql.exec("SELECT 1 FROM hosts WHERE hostname = ?", hostname).toArray().length > 0;
+  }
+
+  noteReconSnapshot(hostname: string, savedAt: number): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO recon_hosts (hostname, saved_at) VALUES (?, ?) ON CONFLICT(hostname) DO UPDATE SET saved_at = MAX(saved_at, excluded.saved_at)",
+      hostname, savedAt,
+    );
+  }
+
+  recentReconHosts(): string[] {
+    return this.ctx.storage.sql.exec<{ hostname: string }>(
+      "SELECT hostname FROM recon_hosts ORDER BY saved_at DESC, hostname LIMIT 20",
+    ).toArray().map(row => row.hostname);
   }
 
   armCanary(id: string): void {

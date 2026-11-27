@@ -1,4 +1,5 @@
 import { readBoundedText } from "./boundedBody";
+import type { MailPolicyReview } from "./purpleTeamMail";
 
 export const RECON_PATH = "/admin/purple-team/recon";
 
@@ -31,6 +32,7 @@ export type CertificateResults = {
 export type ReconResults = {
   dns: DnsRecordGroup[];
   certificates: CertificateResults | null;
+  mail?: MailPolicyReview;
 };
 
 export function normalizeReconDomain(input: string): string | null {
@@ -38,9 +40,9 @@ export function normalizeReconDomain(input: string): string | null {
   return PUBLIC_DOMAIN.test(domain) && !PRIVATE_SUFFIX.test(domain) ? domain : null;
 }
 
-async function readPublicJson(url: URL, accept: string, maxBytes: number): Promise<unknown> {
+async function readPublicJson(url: URL, accept: string, maxBytes: number, timeoutMs = 5500): Promise<unknown> {
   const ctl = new AbortController();
-  const timeout = setTimeout(() => ctl.abort(), 5500);
+  const timeout = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const response = await fetch(url, { headers: { accept }, redirect: "manual", signal: ctl.signal });
     if (!response.ok) {
@@ -54,12 +56,12 @@ async function readPublicJson(url: URL, accept: string, maxBytes: number): Promi
 }
 
 async function readDns(
-  name: string, type: DnsType, label: string = type, policy?: RegExp,
+  name: string, type: DnsType, label: string = type, policy?: RegExp, timeoutMs?: number,
 ): Promise<DnsRecordGroup> {
   const url = new URL("https://cloudflare-dns.com/dns-query");
   url.search = new URLSearchParams({ name, type }).toString();
   try {
-    const body = await readPublicJson(url, "application/dns-json", 65_536) as {
+    const body = await readPublicJson(url, "application/dns-json", 65_536, timeoutMs) as {
       Status?: number;
       TC?: boolean;
       Answer?: { type?: number; data?: unknown }[];
@@ -78,6 +80,10 @@ async function readDns(
   } catch {
     return { label, values: null, limited: false };
   }
+}
+
+export function readReconTxt(name: string, timeoutMs?: number) {
+  return readDns(name, "TXT", "TXT", undefined, timeoutMs);
 }
 
 function certificateName(value: unknown, domain: string): string | null {

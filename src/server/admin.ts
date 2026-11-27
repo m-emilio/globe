@@ -19,6 +19,7 @@ import * as openpgp from "openpgp";
 import {
   assertNoPrivateKeyMaterial,
   authSessionStorageKey,
+  sessionCookie,
   sessionRecordsForAccount,
   clientIp,
   getSessionUser,
@@ -63,7 +64,9 @@ import { listLoginAttempts, readLoginChainTip } from "./loginLog";
 import { BodyLimitError, readBoundedRequestText, readBoundedText } from "./boundedBody";
 import { CANARY_PATH, purpleTeamDirectory, purpleTeamHost, type PurpleTeamBindings } from "./purpleTeamDirectory";
 import { lookupPublicRecon, normalizeReconDomain } from "./purpleTeamRecon";
+import { inspectMailPolicies, normalizeDkimSelector } from "./purpleTeamMail";
 import { reconPage } from "./purpleTeamReconPage";
+import { globeHeaderFindings } from "./globeHeaderFindings";
 import type { ToolFinding, ToolResult } from "./purpleTeamTools";
 import { operationsPage, type OperationsPageData } from "./securityOperationsPage";
 import { runFeedIsolationDrill, runSessionContainmentDrill } from "./securityOperationsDrills";
@@ -544,16 +547,41 @@ async function requirePurpleTeamSession(
 
 export async function adminPurpleTeamRecon(
   request: Request,
-  env: AdminEnv,
+  env: AdminEnv & PurpleTeamBindings,
   applySecurityHeaders: SecurityHeadersFn,
 ): Promise<Response> {
   const gate = await requirePurpleTeamSession(request, env, applySecurityHeaders);
   if (!gate.ok) return gate.response;
 
   const url = new URL(request.url);
+  const store = (domain: string) => purpleTeamHost(env, "recon:" + domain);
   if (request.method !== "POST") {
     const domain = normalizeReconDomain(url.searchParams.get("t") ?? "") ?? "";
-    return reconPage({ domain }, applySecurityHeaders);
+    if (!domain) {
+      try {
+        const savedDomains = await purpleTeamDirectory(env).recentReconHosts();
+        return reconPage({ domain, savedDomains }, applySecurityHeaders);
+      } catch {
+        return reconPage({ domain, notice: "The saved domain list is unavailable." }, applySecurityHeaders);
+      }
+    }
+    const id = url.searchParams.get("snapshot") ?? undefined;
+    const download = url.searchParams.get("download") === "1";
+    if (id && !/^\d{13}-[0-9a-f-]{36}$/.test(id)) {
+      return reconPage({ domain, notice: "Saved snapshot unavailable.", status: 404 }, applySecurityHeaders);
+    }
+    try {
+      const history = await store(domain).reconHistory(id);
+      if ((id || download) && !history.selected) {
+        return reconPage({ domain, notice: "Saved snapshot unavailable.", status: 404 }, applySecurityHeaders);
+      }
+      return reconPage({
+        domain, snapshot: history.selected ?? undefined, results: history.selected?.results,
+        previous: history.previous, entries: history.entries, download,
+      }, applySecurityHeaders);
+    } catch {
+      return reconPage({ domain, notice: "Snapshot history is unavailable.", status: 503 }, applySecurityHeaders);
+    }
   }
   if (request.headers.get("origin") !== url.origin) {
     return json({ error: "same_origin_required" }, { status: 403 }, applySecurityHeaders);
@@ -561,23 +589,55 @@ export async function adminPurpleTeamRecon(
   if (!/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(request.headers.get("content-type") ?? "")) {
     return json({ error: "form_required" }, { status: 415 }, applySecurityHeaders);
   }
-  let domain: string | null;
+  let fields: URLSearchParams;
   try {
-    const fields = new URLSearchParams(await readBoundedRequestText(request, 1024));
-    domain = normalizeReconDomain(fields.get("domain") ?? "");
+    fields = new URLSearchParams(await readBoundedRequestText(request, 1024));
   } catch (error) {
     return error instanceof BodyLimitError ? bodyTooLargeResponse(applySecurityHeaders)
       : json({ error: "invalid_form" }, { status: 400 }, applySecurityHeaders);
   }
+  const domain = normalizeReconDomain(fields.get("domain") ?? "");
   if (!domain) {
     return reconPage({ domain: "", notice: "Enter a public domain such as example.com.", status: 400 }, applySecurityHeaders);
+  }
+  const selectorInput = fields.get("selector")?.trim() ?? "";
+  const selector = selectorInput ? normalizeDkimSelector(selectorInput) : undefined;
+  if (selectorInput && (!selector || (selector + "._domainkey." + domain).length > 253)) {
+    return reconPage({ domain, notice: "Enter one DKIM selector label, such as selector1.", status: 400 }, applySecurityHeaders);
   }
   const limited = await rateLimitDurable(env, "purple:recon:" + gate.user.id, 6, 60_000, applySecurityHeaders);
   if (limited) return limited;
 
   const results = await lookupPublicRecon(domain);
+  if (fields.get("mail") === "1" || selector) {
+    results.mail = await inspectMailPolicies(domain, results.dns, selector ?? undefined);
+  }
   const unavailable = !results.certificates && results.dns.every(record => record.values === null);
-  return reconPage({ domain, results, status: unavailable ? 503 : 200 }, applySecurityHeaders);
+  if (unavailable) return reconPage({
+    domain, results, notice: "Public sources are unavailable. Retry to collect a snapshot.", status: 503,
+  }, applySecurityHeaders);
+  try {
+    if (fields.get("save") === "1") {
+      const actor = accountHash(gate.user.fingerprint, readLogPepper(env)) || userSeal(gate.user.id);
+      const history = await store(domain).saveRecon(results, actor);
+      if (!history) return reconPage({ domain, results, notice: "The snapshot is too large to save." }, applySecurityHeaders);
+      let notice: string | undefined;
+      if (history.selected) {
+        try {
+          await purpleTeamDirectory(env).noteReconSnapshot(domain, Date.parse(history.selected.at));
+        } catch {
+          notice = "Snapshot saved. The saved domain list could not be updated.";
+        }
+      }
+      return reconPage({
+        domain, results, notice, snapshot: history.selected ?? undefined, previous: history.previous, entries: history.entries,
+      }, applySecurityHeaders);
+    }
+    const history = await store(domain).reconHistory();
+    return reconPage({ domain, results, previous: history.selected, entries: history.entries }, applySecurityHeaders);
+  } catch {
+    return reconPage({ domain, results, notice: "Snapshot history is unavailable." }, applySecurityHeaders);
+  }
 }
 
 async function confirmDrillAudit(
@@ -747,6 +807,9 @@ export async function adminSecurityOperations(
             evidence: "Expected HTTP " + spec.expected + " · Observed HTTP " + response.status +
               " · " + (Date.now() - started) + " ms inside the Worker.",
           });
+          if (spec.path === "/" && response.ok) {
+            findings.push(...globeHeaderFindings(response.headers, sessionCookie("fixture", request)));
+          }
         } catch {
           findings.push({ check: spec.check, status: "unknown", evidence: "The Worker did not return a response." });
         }

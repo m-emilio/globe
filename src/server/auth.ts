@@ -604,7 +604,7 @@ export async function rateLimitDurable(
   return null;
 }
 
-function sessionCookie(
+export function sessionCookie(
   sessionId: string,
   request: Request,
   maxAge = SESSION_TTL_SECONDS,
