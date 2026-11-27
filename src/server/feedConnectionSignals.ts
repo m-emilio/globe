@@ -64,7 +64,7 @@ export class FeedConnectionSignals {
     if (message.type === "connection-ping" && fields === 2 && isSignalId(message.id)) {
       if (now - (this.lastPing.get(socket) ?? 0) < 1_000) return;
       this.lastPing.set(socket, now);
-      this.send(socket, { type: "connection-pong", id: message.id });
+      this.send(socket, { type: "connection-pong", id: message.id, canRequest: this.sessions.has(socket) });
       return;
     }
     if (!this.sessions.has(socket)) return;

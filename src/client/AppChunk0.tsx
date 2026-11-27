@@ -1186,7 +1186,7 @@ export function AppChunk0({ b, standaloneFeed }: { b: GlobeApi; standaloneFeed: 
       </nav>}
       {createPortal(<div className="live-feed-app-host">
         <ActivityFeed
-          open={standaloneFeed || showActivityMenu}
+          open={(standaloneFeed || showActivityMenu) && !showAuthPanel}
           standalone={standaloneFeed}
           showLauncher={false}
           onToggle={() => setShowActivityMenu((open) => !open)}
@@ -1224,14 +1224,10 @@ export function AppChunk0({ b, standaloneFeed }: { b: GlobeApi; standaloneFeed: 
             }
           }}
           onSignIn={() => {
-            setShowActivityMenu(false);
+            setAuthMessage("");
+            setAuthError("");
             setShowAuthPanel(true);
             setAuthMode("login");
-            setAuthMessage(
-              paymentRequired
-                ? "Sign in, then buy Stripe access to unlock Live Feed and web support chat."
-                : "Sign in with your PGP key to unlock Live Feed and web support chat.",
-            );
           }}
           onBuyAccess={() => {
             void startTransitCheckout();

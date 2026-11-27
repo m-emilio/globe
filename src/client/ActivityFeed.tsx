@@ -198,8 +198,8 @@ type UnTvChannel =
     };
 
 const FEED_TABS = [
-  { id: "tv", label: "UN TV", free: true },
   { id: "connection", label: "Connection", free: true },
+  { id: "tv", label: "UN TV", free: true },
   { id: "activity", label: "Visitors", free: false },
   { id: "support", label: "Support", free: false },
 ] as const;
@@ -400,10 +400,10 @@ export function ActivityFeed({
   /** Free UN Web TV / UNTV — never gated by Stripe */
   const [unTvChannelId, setUnTvChannelId] = useState<string | null>(null);
   const [unTvPlaying, setUnTvPlaying] = useState(false);
-  /** Default to free TV tab so paid lock UI is not the first thing users see */
+  /** Keep the current connection visible when Live Feed first opens. */
   const [feedTab, setFeedTab] = useState<FeedTab>(() => {
     const requested = standalone ? new URLSearchParams(window.location.search).get("tab") : null;
-    return FEED_TABS.find(tab => tab.id === requested)?.id ?? "tv";
+    return FEED_TABS.find(tab => tab.id === requested)?.id ?? "connection";
   });
   const [expanded, setExpanded] = useState(false);
   const [windowSize, setWindowSize] = useState<FeedWindowSize | null>(null);

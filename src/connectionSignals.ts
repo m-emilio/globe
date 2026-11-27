@@ -3,6 +3,7 @@ export const CONNECTION_CHECKS = {
   cookie: "Globe session cookie",
   webrtc: "WebRTC data-channel support",
   websocket: "Globe WebSocket",
+  tls: "TLS 1.2+ to Globe",
 } as const;
 
 export type ConnectionCheck = keyof typeof CONNECTION_CHECKS;
@@ -36,7 +37,7 @@ export type SignalClientMessage =
 
 export type SignalServerMessage =
   | { type: "signal-capabilities"; canRequest: boolean }
-  | { type: "connection-pong"; id: string }
+  | { type: "connection-pong"; id: string; canRequest?: boolean }
   | { type: "signal-roster"; self: string | null; peers: string[] }
   | { type: "signal-peer"; id: string; online: boolean }
   | { type: "signal-invite"; invitation: SignalInvitation }
