@@ -1,10 +1,11 @@
 import type { ReconAddress } from "../reconAddress";
-import { normalizeReconDomain, readPublicJson, readReconPtr } from "./purpleTeamRecon";
+import { lookupAddressPki, normalizeReconDomain, readPublicJson, readReconPtr, type AddressPki } from "./purpleTeamRecon";
 
 export type IpRecon = {
   address: ReconAddress;
   names: string[] | null;
   routing: { prefix: string | null; asns: number[] } | null;
+  pki: AddressPki[];
 };
 
 async function readRouting(address: string): Promise<IpRecon["routing"]> {
@@ -31,17 +32,20 @@ async function readRouting(address: string): Promise<IpRecon["routing"]> {
   }
 }
 
-export async function lookupIpRecon(address: ReconAddress): Promise<IpRecon> {
-  if (!address.isPublic) return { address, names: null, routing: null };
-  const [reverse, routing] = await Promise.all([
-    readReconPtr(address.reverseName), readRouting(address.value),
-  ]);
+async function readReverseIdentity(address: ReconAddress): Promise<Pick<IpRecon, "names" | "pki">> {
+  const reverse = await readReconPtr(address.reverseName);
+  const names = reverse.values && [...new Set(reverse.values.flatMap(value => {
+    const name = normalizeReconDomain(value);
+    return name ? [name] : [];
+  }))];
   return {
-    address,
-    names: reverse.values && [...new Set(reverse.values.flatMap(value => {
-      const name = normalizeReconDomain(value);
-      return name ? [name] : [];
-    }))],
-    routing,
+    names,
+    pki: names ? await Promise.all(names.slice(0, 2).map(name => lookupAddressPki(name, address))) : [],
   };
+}
+
+export async function lookupIpRecon(address: ReconAddress): Promise<IpRecon> {
+  if (!address.isPublic) return { address, names: null, routing: null, pki: [] };
+  const [reverse, routing] = await Promise.all([readReverseIdentity(address), readRouting(address.value)]);
+  return { address, ...reverse, routing };
 }

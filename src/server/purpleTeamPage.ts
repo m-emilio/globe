@@ -51,6 +51,7 @@ export function purpleTeamPage(
       .query input{min-width:0;padding:.5rem .65rem;border:1px solid #684f85;border-radius:.45rem;color:var(--text);background:var(--bg);font:inherit}
       .recon-toolbar{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:0 .85rem}
       .recon-toolbar>.panel,.certificate-form{min-width:0;overflow-wrap:anywhere}
+      .pki-host{border-top:1px solid var(--line);margin-top:.85rem;padding-top:.55rem;overflow-wrap:anywhere}
       .connection-rows{display:grid;grid-template-columns:minmax(0,7.5rem) minmax(0,1fr);gap:.28rem .6rem;margin:.65rem 0}
       .connection-rows dt{color:var(--muted)}.connection-rows dd{margin:0;overflow-wrap:anywhere}
       .certificate-form>label{display:block;font-weight:650;margin-top:.75rem}
