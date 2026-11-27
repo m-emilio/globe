@@ -5,17 +5,20 @@ type PurpleTeamPage = {
   navigation: string;
   content: string;
   status?: number;
+  certificateInspector?: boolean;
 };
 
 export function purpleTeamPage(
-  { title, navigation, content, status = 200 }: PurpleTeamPage,
+  { title, navigation, content, status = 200, certificateInspector = false }: PurpleTeamPage,
   applySecurityHeaders: (headers: Headers) => void,
 ): Response {
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",
     "cache-control": "private, no-store",
     vary: "Cookie",
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "content-security-policy": certificateInspector
+      ? "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+      : "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     "x-robots-tag": "noindex, nofollow, noarchive",
     "referrer-policy": "same-origin",
   });
@@ -46,6 +49,14 @@ export function purpleTeamPage(
       .domain-form label{display:block;font-weight:700;margin-bottom:.35rem}
       .query{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.55rem;max-width:42rem}
       .query input{min-width:0;padding:.5rem .65rem;border:1px solid #684f85;border-radius:.45rem;color:var(--text);background:var(--bg);font:inherit}
+      .recon-toolbar{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:0 .85rem}
+      .recon-toolbar>.panel,.certificate-form{min-width:0;overflow-wrap:anywhere}
+      .connection-rows{display:grid;grid-template-columns:minmax(0,7.5rem) minmax(0,1fr);gap:.28rem .6rem;margin:.65rem 0}
+      .connection-rows dt{color:var(--muted)}.connection-rows dd{margin:0;overflow-wrap:anywhere}
+      .certificate-form>label{display:block;font-weight:650;margin-top:.75rem}
+      .certificate-form textarea{padding:.55rem;width:100%;resize:vertical;background:var(--bg);color:var(--text);border:1px solid #684f85;border-radius:.4rem;font:inherit}
+      .certificate-form input[type=file]{max-width:100%}
+      .certificate-status{min-height:1.5rem;margin-bottom:.2rem}
       .domain-form .save-option{font-size:.9rem;font-weight:500;margin:.75rem 0 .25rem}
       .save-option input{accent-color:#cba8ff}
       .domain-form .mail-options{margin:.45rem 0 0}
@@ -58,7 +69,7 @@ export function purpleTeamPage(
       .dns-results code{display:block}
       .names{list-style:none;display:flex;flex-wrap:wrap;gap:.3rem .55rem;padding:0;max-height:13rem;overflow:auto}
       .names li{padding:.12rem .38rem;border-radius:.35rem;background:#2e2442}
-      @media(max-width:45rem){.recon-results{grid-template-columns:minmax(0,1fr)}}
+      @media(max-width:45rem){.recon-results,.recon-toolbar{grid-template-columns:minmax(0,1fr)}}
       @media(max-width:27rem){.query{grid-template-columns:minmax(0,1fr)}}
       button{min-height:2.5rem;padding:.45rem .75rem;border:1px solid #cba8ff;border-radius:.45rem;font:inherit;font-size:.9rem;font-weight:700;cursor:pointer;background:#cba8ff;color:#200d34}
       button:hover{background:#e0c6ff}
@@ -86,5 +97,5 @@ export function purpleTeamPage(
         <nav aria-label="Purple Team navigation">${navigation}</nav>
       </header>
       ${content}
-    </main></body></html>`, { status, headers });
+    </main>${certificateInspector ? '<script type="module" src="/dist/reconCertificate.js?v=1"></script>' : ""}</body></html>`, { status, headers });
 }

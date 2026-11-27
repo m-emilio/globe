@@ -118,7 +118,9 @@ npx wrangler secret put TRANSIT_PUBLICAPI_V4
 
 **Menu → Purple Team** opens Recon. Enter a public domain and choose **Run recon** to view DNS records, SPF and DMARC policies, and names, issuers, and validity dates from public Certificate Transparency records.
 
-Choose **Save snapshot** to keep a result and compare it with the previous saved run for the same domain. Recon home lists recently saved domains. Saved reports can be downloaded as a print-ready HTML file. **Review mail policy details** follows published SPF policy links, summarizes DMARC report destinations, and can check an exact DKIM selector.
+Enter a public IPv4 or IPv6 address to see RIPEstat routing information and public reverse DNS. **My connection** shows the IP address, network, and TLS negotiation Globe sees. **Certificate inspector** reads one public PEM or DER certificate in the browser and checks its dates, public key, signature algorithm, and match to an optional hostname or IP address.
+
+Choose **Save domain snapshot** to keep a result and compare it with the previous saved run for the same domain. Recon home lists recently saved domains. Saved reports can be downloaded as a print-ready HTML file. **Review mail policy details** follows published SPF policy links, summarizes DMARC report destinations, and can check an exact DKIM selector.
 
 Open **Globe operations** for the built-in controls.
 

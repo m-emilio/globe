@@ -16,13 +16,16 @@
     "publish": true
   },
   "dependencies": {
-    "cobe": "^2.0.1",
     "@noble/post-quantum": "0.7.1",
+    "@peculiar/x509": "3.1.0",
+    "cobe": "^2.0.1",
+    "ipaddr.js": "2.5.0",
     "openpgp": "^6.3.1",
     "partyserver": "0.0.66",
     "partysocket": "^1.1.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "reflect-metadata": "0.2.2",
     "stripe": "^22.3.2",
     "topojson-client": "^3.1.0"
   },
@@ -36,7 +39,7 @@
     "wrangler": "4.107.0"
   },
   "scripts": {
-    "build:client": "esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/index.tsx --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/pqcBoot.ts --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/ecdheExport.ts --bundle --format=esm --outfile=public/dist/ecdheExport.js --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/loginAsc.ts --bundle --format=esm --outfile=public/dist/loginAsc.js --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/pqcLoginBoot.ts --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger",
+    "build:client": "esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/index.tsx --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/pqcBoot.ts --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/ecdheExport.ts --bundle --format=esm --outfile=public/dist/ecdheExport.js --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/loginAsc.ts --bundle --format=esm --outfile=public/dist/loginAsc.js --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/pqcLoginBoot.ts --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --minify --legal-comments=none --tree-shaking=true --target=es2022 --drop:console --drop:debugger && esbuild ./src/client/reconCertificate.ts --bundle --format=esm --outfile=public/dist/reconCertificate.js --minify --legal-comments=none --target=es2022",
     "build:client:sri": "npm run build:client && node scripts/apply-sri.mjs",
     "build:client:dev": "esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/index.tsx --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --sourcemap --minify --legal-comments=none --tree-shaking=true --target=es2022 && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/pqcBoot.ts --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --sourcemap --minify --legal-comments=none --tree-shaking=true --target=es2022 && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/ecdheExport.ts --bundle --format=esm --outfile=public/dist/ecdheExport.js --sourcemap --minify --legal-comments=none --tree-shaking=true --target=es2022 && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/loginAsc.ts --bundle --format=esm --outfile=public/dist/loginAsc.js --sourcemap --minify --legal-comments=none --tree-shaking=true --target=es2022 && esbuild --define:process.env.NODE_ENV='\"production\"' ./src/client/pqcLoginBoot.ts --bundle --splitting --format=esm --outdir=public/dist --entry-names=[name] --chunk-names=chunks/[name]-[hash] --sourcemap --minify --legal-comments=none --tree-shaking=true --target=es2022",
     "audit:deps": "npm audit --audit-level=moderate",
