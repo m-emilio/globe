@@ -46,6 +46,10 @@ export function purpleTeamPage(
       .domain-form label{display:block;font-weight:700;margin-bottom:.35rem}
       .query{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.55rem;max-width:42rem}
       .query input{min-width:0;padding:.5rem .65rem;border:1px solid #684f85;border-radius:.45rem;color:var(--text);background:var(--bg);font:inherit}
+      .domain-form .save-option{font-size:.9rem;font-weight:500;margin:.75rem 0 .25rem}
+      .save-option input{accent-color:#cba8ff}
+      .domain-form .mail-options{margin:.45rem 0 0}
+      .mail-options .query{grid-template-columns:minmax(0,1fr);max-width:20rem}
       .recon-results{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:0 .85rem;overflow-wrap:anywhere}
       .dns-results{margin:0}
       .dns-results>div{display:grid;grid-template-columns:4.2rem minmax(0,1fr);gap:.35rem;border-top:1px solid var(--line);padding:.55rem 0}
@@ -70,6 +74,12 @@ export function purpleTeamPage(
       summary{color:var(--link);cursor:pointer;font-size:.9rem;font-weight:650}
       #results,#inbox{scroll-margin-top:.75rem;overflow-wrap:anywhere}
       code{color:var(--link)}
+      @media print{
+        :root{color-scheme:light;--bg:#fff;--panel:#fff;--line:#d0d5df;--text:#141125;--muted:#373446;--link:#463078;--warn:#7c460a}
+        body{background:#fff}main{padding:0}.recon-results{display:block}
+        .names{max-height:none;overflow:visible}.names li{background:#fff}
+        nav,form{display:none}
+      }
     </style></head><body><main>
       <header class="heading">
         <h1>${escapeHtml(title)}</h1>
