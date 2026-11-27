@@ -2,7 +2,8 @@ import { routePartykitRequest, Server } from "partyserver";
 import { CONNECTION_CHECK_PATH, type ConnectionDetails } from "../connectionSignals";
 import { FeedConnectionSignals } from "./feedConnectionSignals";
 import { closeSessionSockets, validSessionReference } from "./sessionContainment";
-import { RECON_PATH } from "./purpleTeamRecon";
+import { RECON_CERTIFICATE_PATH, RECON_PATH } from "./purpleTeamRecon";
+import { getCloudflareClientIp as getClientIp, limitApiText, readConnectionMetadata } from "./connectionMetadata";
 import { OPERATIONS_PATH } from "./securityOperationsModel";
 import {
   adoptSessionToken,
@@ -1051,15 +1052,6 @@ function limitText(value: string | undefined, maxLength: number) {
   return value ? value.trim().slice(0, maxLength) : undefined;
 }
 
-function getClientIp(request: Request) {
-  // Cloudflare-only — never X-Forwarded-For (spoofable by clients)
-  return limitText(
-    request.headers.get("cf-connecting-ip") ??
-      (request.cf?.clientIp as string | undefined),
-    45,
-  );
-}
-
 /** Alias for rate-limit keys on public preview routes */
 function clientIpFromRequest(request: Request): string {
   return getClientIp(request) || "unknown";
@@ -1074,18 +1066,6 @@ function isSuspiciousApiPath(pathname: string): boolean {
   // Double-slash /api//foo can confuse caches
   if (pathname.includes("//")) return true;
   return false;
-}
-
-function limitApiText(value: unknown, maxLength: number) {
-  if (typeof value === "string") {
-    return value.trim().replace(/\s+/g, " ").slice(0, maxLength);
-  }
-
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value).slice(0, maxLength);
-  }
-
-  return "";
 }
 
 function getApiNumber(value: unknown) {
@@ -4485,19 +4465,7 @@ const worker = {
       } catch {
         // A transient session storage failure doesn't affect the HTTPS check.
       }
-      const tcpMs = request.cf?.clientTcpRtt;
-      const asn = request.cf?.asn;
-      const details: ConnectionDetails = {
-        httpProtocol: limitApiText(request.cf?.httpProtocol, 24) || null,
-        tlsVersion: limitApiText(request.cf?.tlsVersion, 24) || null,
-        tlsCipher: limitApiText(request.cf?.tlsCipher, 64) || null,
-        edge: limitApiText(request.cf?.colo, 8) || null,
-        country: limitApiText(request.cf?.country, 4) || null,
-        edgeTcpMs: typeof tcpMs === "number" && Number.isFinite(tcpMs) && tcpMs >= 0 ? Math.round(tcpMs) : null,
-        networkAsn: typeof asn === "number" && Number.isSafeInteger(asn) && asn > 0 ? asn : null,
-        networkOrganization: limitApiText(request.cf?.asOrganization, 96) || null,
-        sessionCookie,
-      };
+      const details: ConnectionDetails = { ...readConnectionMetadata(request), sessionCookie };
       return withoutResponseBodyForHead(request, jsonResponse(details, {
         headers: { "cache-control": "private, no-store" },
       }));
@@ -4966,6 +4934,11 @@ const worker = {
     if (url.pathname === "/api/admin/containment") {
       if (request.method !== "POST") return methodNotAllowedResponse("POST");
       return adminSessionContainment(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === RECON_CERTIFICATE_PATH || url.pathname === RECON_CERTIFICATE_PATH + "/") {
+      if (!isReadApiMethod(request)) return methodNotAllowedResponse();
+      return withoutResponseBodyForHead(request, await adminPurpleTeamRecon(request, env, applySecurityHeaders));
     }
 
     const purpleTeamHome = url.pathname === OPERATIONS_PATH || url.pathname === OPERATIONS_PATH + "/";

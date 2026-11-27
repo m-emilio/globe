@@ -2,10 +2,11 @@ import { readBoundedText } from "./boundedBody";
 import type { MailPolicyReview } from "./purpleTeamMail";
 
 export const RECON_PATH = "/admin/purple-team/recon";
+export const RECON_CERTIFICATE_PATH = RECON_PATH + "/certificate";
 
 const PUBLIC_DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
 const PRIVATE_SUFFIX = /\.(?:arpa|example|internal|invalid|local|localhost|onion|test)$/;
-const DNS_TYPES = { A: 1, AAAA: 28, CNAME: 5, MX: 15, NS: 2, CAA: 257, TXT: 16 };
+const DNS_TYPES = { A: 1, AAAA: 28, CNAME: 5, MX: 15, NS: 2, PTR: 12, CAA: 257, TXT: 16 };
 type DnsType = keyof typeof DNS_TYPES;
 
 export type DnsRecordGroup = {
@@ -40,7 +41,7 @@ export function normalizeReconDomain(input: string): string | null {
   return PUBLIC_DOMAIN.test(domain) && !PRIVATE_SUFFIX.test(domain) ? domain : null;
 }
 
-async function readPublicJson(url: URL, accept: string, maxBytes: number, timeoutMs = 5500): Promise<unknown> {
+export async function readPublicJson(url: URL, accept: string, maxBytes: number, timeoutMs = 5500): Promise<unknown> {
   const ctl = new AbortController();
   const timeout = setTimeout(() => ctl.abort(), timeoutMs);
   try {
@@ -84,6 +85,10 @@ async function readDns(
 
 export function readReconTxt(name: string, timeoutMs?: number) {
   return readDns(name, "TXT", "TXT", undefined, timeoutMs);
+}
+
+export function readReconPtr(name: string) {
+  return readDns(name, "PTR");
 }
 
 function certificateName(value: unknown, domain: string): string | null {
