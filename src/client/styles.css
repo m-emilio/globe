@@ -1454,7 +1454,7 @@ a.nav-title:focus-visible {
   position: fixed;
   left: var(--live-feed-left);
   bottom: var(--live-feed-bottom);
-  z-index: 1140;
+  z-index: 1240;
   pointer-events: none;
   width: min(460px, calc(100vw - var(--live-feed-left) - var(--live-feed-right)));
 }
@@ -6862,6 +6862,7 @@ button[aria-busy="true"],
 .feed-connection-form {
   display: grid;
   gap: 8px;
+  margin-top: 10px;
 }
 
 .feed-connection-field {

@@ -37,6 +37,7 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
     connectedAt: null, disconnectedAt: null, connections: 0,
   });
   const ping = useRef<Ping | null>(null);
+  const recentPing = useRef<{ ms: number; at: number } | null>(null);
 
   const send = useCallback((message: SignalClientMessage) => {
     if (socket.readyState !== WebSocket.OPEN) return false;
@@ -70,6 +71,7 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
         : { ...prev, connectedAt: null, disconnectedAt: at });
       setAllowed(false);
       clearRoster();
+      recentPing.current = null;
       ping.current?.finish(null);
     };
     const onMessage = (event: MessageEvent) => {
@@ -88,7 +90,13 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
           break;
         case "connection-pong": {
           const waiting = ping.current;
-          if (waiting?.id === message.id) waiting.finish(performance.now());
+          if (waiting?.id === message.id) {
+            if (typeof message.canRequest === "boolean") {
+              setAllowed(message.canRequest);
+              if (!message.canRequest) clearRoster();
+            }
+            waiting.finish(performance.now());
+          }
           break;
         }
         case "signal-roster":
@@ -131,6 +139,7 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
       socket.removeEventListener("open", onOpen);
       socket.removeEventListener("message", onMessage);
       socket.removeEventListener("close", onClose);
+      recentPing.current = null;
       ping.current?.finish(null);
     };
   }, [socket, clearRoster]);
@@ -186,6 +195,10 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
     if (socket.readyState !== WebSocket.OPEN || typeof crypto.randomUUID !== "function") {
       return Promise.resolve(null);
     }
+    const previous = recentPing.current;
+    if (previous && performance.now() - previous.at < 1_000) {
+      return Promise.resolve(previous.ms);
+    }
     const started = performance.now();
     const id = crypto.randomUUID();
     let resolve!: (ms: number | null) => void;
@@ -194,7 +207,9 @@ export function useConnectionSignals(socket: PartySocket, hasFeedAccess: boolean
     function finish(time: number | null) {
       window.clearTimeout(timer);
       if (ping.current?.id === id) ping.current = null;
-      resolve(time === null ? null : Math.max(0, Math.round(time - started)));
+      const ms = time === null ? null : Math.max(0, Math.round(time - started));
+      if (time !== null && ms !== null) recentPing.current = { ms, at: time };
+      resolve(ms);
     }
     ping.current = { id, promise, finish };
     if (!send({ type: "connection-ping", id })) finish(null);

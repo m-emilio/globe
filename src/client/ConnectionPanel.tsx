@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   CONNECTION_CHECK_PATH,
   CONNECTION_CHECKS,
@@ -21,14 +21,40 @@ type LocalChecks = {
   checkedAt: number;
 };
 
-async function checkGlobeHttp(): Promise<HttpCheck | null> {
+type BrowserNetwork = EventTarget & {
+  effectiveType?: string;
+  rtt?: number;
+  downlink?: number;
+  saveData?: boolean;
+};
+
+function browserNetwork(): BrowserNetwork | undefined {
+  return (navigator as Navigator & { connection?: BrowserNetwork }).connection;
+}
+
+function browserEstimate(network: BrowserNetwork | undefined): string {
+  if (!network) return "";
+  return [
+    network.effectiveType?.toUpperCase(),
+    typeof network.rtt === "number" && Number.isFinite(network.rtt) ? network.rtt + " ms RTT" : "",
+    typeof network.downlink === "number" && Number.isFinite(network.downlink) ? network.downlink + " Mb/s" : "",
+    network.saveData ? "Data Saver on" : "",
+  ].filter(Boolean).join(" · ");
+}
+
+async function checkGlobeHttp(cancel?: AbortSignal): Promise<HttpCheck | null> {
   const started = performance.now();
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const timeout = window.setTimeout(abort, 5_000);
+  if (cancel?.aborted) abort();
+  else cancel?.addEventListener("abort", abort, { once: true });
   try {
     const response = await fetch(CONNECTION_CHECK_PATH, {
       credentials: "same-origin",
       cache: "no-store",
       redirect: "error",
-      signal: AbortSignal.timeout(5_000),
+      signal: controller.signal,
     });
     if (!response.ok) return null;
     const details = await response.json() as ConnectionDetails;
@@ -36,6 +62,9 @@ async function checkGlobeHttp(): Promise<HttpCheck | null> {
     return { ms: Math.max(0, Math.round(performance.now() - started)), details };
   } catch {
     return null;
+  } finally {
+    window.clearTimeout(timeout);
+    cancel?.removeEventListener("abort", abort);
   }
 }
 
@@ -60,6 +89,11 @@ async function runSharedCheck(check: ConnectionCheck, pingSocket: ConnectionSign
   const http = await checkGlobeHttp();
   if (!http) return "unknown";
   if (check === "http") return "passed";
+  if (check === "tls") {
+    const version = http.details.tlsVersion;
+    if (!version) return "unknown";
+    return version === "TLSv1.2" || version === "TLSv1.3" ? "passed" : "unavailable";
+  }
   if (http.details.sessionCookie === "unknown") return "unknown";
   return http.details.sessionCookie === "verified" ? "passed" : "unavailable";
 }
@@ -81,27 +115,37 @@ export function ConnectionPanel({ signals, socketStatus, access, onSignIn }: {
 }) {
   const { canRequest, self, peers, incoming, outgoing, notice, setAvailability, requestCheck, reply, pingSocket, socketHistory } = signals;
   const [online, setOnline] = useState(() => navigator.onLine);
+  const [estimate, setEstimate] = useState(() => browserEstimate(browserNetwork()));
   const [results, setResults] = useState<LocalChecks | null>(null);
-  const [checking, setChecking] = useState(false);
+  const [checking, setChecking] = useState(true);
+  const [checkRun, setCheckRun] = useState(0);
   const [replying, setReplying] = useState(false);
   const [selectedPeer, setSelectedPeer] = useState("");
   const [check, setCheck] = useState<ConnectionCheck>("http");
+  const requestSection = useRef<HTMLElement>(null);
   const to = peers.includes(selectedPeer) ? selectedPeer : "";
 
   useEffect(() => {
-    const update = () => setOnline(navigator.onLine);
+    const network = browserNetwork();
+    const update = () => {
+      setOnline(navigator.onLine);
+      setEstimate(browserEstimate(network));
+    };
     window.addEventListener("online", update);
     window.addEventListener("offline", update);
+    network?.addEventListener("change", update);
     return () => {
       window.removeEventListener("online", update);
       window.removeEventListener("offline", update);
+      network?.removeEventListener("change", update);
     };
   }, []);
 
-  async function refresh() {
+  useEffect(() => {
+    const run = new AbortController();
     setChecking(true);
-    try {
-      const [http, websocketMs] = await Promise.all([checkGlobeHttp(), pingSocket()]);
+    void Promise.all([checkGlobeHttp(run.signal), pingSocket()]).then(([http, websocketMs]) => {
+      if (run.signal.aborted) return;
       setResults({
         http,
         websocketMs,
@@ -109,10 +153,10 @@ export function ConnectionPanel({ signals, socketStatus, access, onSignIn }: {
         webRtc: checkWebRtc(),
         checkedAt: Date.now(),
       });
-    } finally {
       setChecking(false);
-    }
-  }
+    });
+    return () => run.abort();
+  }, [checkRun, pingSocket, socketHistory.connectedAt]);
 
   async function checkAndReply(invitation: SignalInvitation) {
     setReplying(true);
@@ -144,12 +188,18 @@ export function ConnectionPanel({ signals, socketStatus, access, onSignIn }: {
       <section className="feed-connection-card" aria-labelledby="feed-current-connection">
         <div className="feed-connection-heading">
           <h4 id="feed-current-connection">Current connection</h4>
-          <button type="button" onClick={() => void refresh()} disabled={checking}>
-            {checking ? "Checking…" : "Run checks"}
-          </button>
+          <div className="feed-connection-buttons">
+            <button type="button" onClick={() => requestSection.current?.focus()}>
+              Requests
+            </button>
+            <button type="button" onClick={() => setCheckRun(run => run + 1)} disabled={checking}>
+              {checking ? "Checking…" : "Run checks"}
+            </button>
+          </div>
         </div>
         <dl className="feed-connection-details">
           <div><dt>Browser network</dt><dd>{online ? "Online" : "Offline"}</dd></div>
+          {estimate && <div><dt>Browser estimate</dt><dd>{estimate}</dd></div>}
           <div><dt>Globe WebSocket</dt><dd>{socketLabel}{websocketMs != null ? " · " + websocketMs + " ms" : ""}</dd></div>
           {socketStatus === "connected" && socketHistory.connectedAt !== null && (
             <div><dt>Connected since</dt><dd>{new Date(socketHistory.connectedAt).toLocaleTimeString()}</dd></div>
@@ -172,17 +222,18 @@ export function ConnectionPanel({ signals, socketStatus, access, onSignIn }: {
             <div><dt>WebRTC data channels</dt><dd>{results.webRtc ? "Browser support available" : "Unavailable"}</dd></div>
           </dl>
           <p className="feed-connection-note" role="status">Checked at {new Date(results.checkedAt).toLocaleTimeString()}.</p>
-        </> : <p className="feed-connection-note">Run checks for transport latency, TLS, and browser support.</p>}
+        </> : <p className="feed-connection-note" role="status">Checking your connection to Globe…</p>}
       </section>
 
-      <section className="feed-connection-card" aria-labelledby="feed-peer-requests">
+      <section className="feed-connection-card" aria-labelledby="feed-peer-requests" ref={requestSection} tabIndex={-1}>
         <h4 id="feed-peer-requests">Connection requests</h4>
         <p className="feed-connection-note">Requests travel through Globe. Each peer chooses whether to run the check and share its status.</p>
         {!canRequest ? (
           <div className="feed-connection-heading">
             <p>{access === "login_required" ? "Sign in to send and receive requests."
               : access === "payment_required" ? "Live Feed access is required."
-                : "Waiting for the signed-in Globe connection."}</p>
+                : socketStatus === "connected" ? "Waiting for the signed-in Globe connection."
+                  : "Reconnect to Globe to use requests."}</p>
             {access === "login_required" && onSignIn && <button type="button" onClick={onSignIn}>Sign in</button>}
           </div>
         ) : (
@@ -191,27 +242,26 @@ export function ConnectionPanel({ signals, socketStatus, access, onSignIn }: {
               <input type="checkbox" checked={Boolean(self)} onChange={e => setAvailability(e.target.checked)} />
               Join the list of peers who accept requests
             </label>
-            {self && (
-              <>
-                <p className="feed-connection-note">Your label is <strong>{signalPeerLabel(self)}</strong> for this connection.</p>
-                <form className="feed-connection-form" onSubmit={e => { e.preventDefault(); requestCheck(to, check); }}>
-                  <div className="feed-connection-field">
-                    <label htmlFor="feed-connection-peer">Peer</label>
-                    <select id="feed-connection-peer" value={to} onChange={e => setSelectedPeer(e.target.value)} disabled={!peers.length}>
-                      <option value="">{peers.length ? "Choose a peer" : "No opted-in peers online"}</option>
-                      {peers.map(id => <option key={id} value={id}>{signalPeerLabel(id)}</option>)}
-                    </select>
-                  </div>
-                  <div className="feed-connection-field">
-                    <label htmlFor="feed-connection-check">Check</label>
-                    <select id="feed-connection-check" value={check} onChange={e => { if (isConnectionCheck(e.target.value)) setCheck(e.target.value); }}>
-                      {Object.entries(CONNECTION_CHECKS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-                    </select>
-                  </div>
-                  <button type="submit" disabled={!to || Boolean(outgoing && !outgoing.outcome)}>Send request</button>
-                </form>
-              </>
-            )}
+            {self && <p className="feed-connection-note">Your label is <strong>{signalPeerLabel(self)}</strong> for this connection.</p>}
+            <form className="feed-connection-form" onSubmit={e => {
+              e.preventDefault();
+              if (self && to && (!outgoing || outgoing.outcome)) requestCheck(to, check);
+            }}>
+              <div className="feed-connection-field">
+                <label htmlFor="feed-connection-check">Check</label>
+                <select id="feed-connection-check" value={check} onChange={e => { if (isConnectionCheck(e.target.value)) setCheck(e.target.value); }}>
+                  {Object.entries(CONNECTION_CHECKS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                </select>
+              </div>
+              <div className="feed-connection-field">
+                <label htmlFor="feed-connection-peer">Peer</label>
+                <select id="feed-connection-peer" value={to} onChange={e => setSelectedPeer(e.target.value)} disabled={!self || !peers.length}>
+                  <option value="">{!self ? "Join the request list first" : peers.length ? "Choose a peer" : "No opted-in peers online"}</option>
+                  {peers.map(id => <option key={id} value={id}>{signalPeerLabel(id)}</option>)}
+                </select>
+              </div>
+              <button type="submit" disabled={!self || !to || Boolean(outgoing && !outgoing.outcome)}>Send request</button>
+            </form>
           </>
         )}
         {incoming && self && (
