@@ -35,6 +35,13 @@
 /favicon.ico
   Cache-Control: public, max-age=604800, stale-while-revalidate=86400
 
+/market.js
+  Cache-Control: public, max-age=0, must-revalidate
+  X-Content-Type-Options: nosniff
+
+/market.html
+  Cache-Control: no-store
+
 /dist/*.map
   Cache-Control: private, max-age=0, must-revalidate
   X-Robots-Tag: noindex

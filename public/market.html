@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FederalKey Market</title>
+  <style>
+    body { margin: 0; font-family: ui-monospace, "Ubuntu Mono", monospace; background: #0e0e0e; color: #d0d0d0; }
+    header { background: #141414; padding: 1rem 2rem; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+    header .logo { font-size: 1.5rem; color: #42f57b; }
+    header .user-info { font-size: 0.9rem; color: #ccc; }
+    a { color: #dc143c; }
+    a:visited { color: #f54291; }
+    a:hover { color: #f5a142; }
+    .crypto-bar { background: #121212; padding: 0.5rem 1rem; display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.9rem; color: #f5a142; border-bottom: 1px solid #333; }
+    .container { display: flex; }
+    nav { width: 220px; background: #191919; padding: 1.5rem 1rem; border-right: 1px solid #333; }
+    nav h2 { font-size: 1.2rem; margin: 0 0 1rem; color: #42f5b3; }
+    nav ul { list-style: none; padding: 0; margin: 0; }
+    nav li { padding: 0.5rem 0; }
+    main { flex: 1; padding: 1rem 2rem; min-width: 0; }
+    .listings { display: flex; flex-wrap: wrap; gap: 1rem; }
+    .listing { background: #1e1e1e; border: 1px solid #444; padding: 1rem; width: calc(33% - 1rem); box-sizing: border-box; border-radius: 4px; }
+    .listing h3 { margin: 0 0 0.5rem; color: #fff; }
+    .listing p { font-size: 0.85rem; color: #bbb; }
+    button { margin-top: 0.5rem; background: #f54291; color: #fff; border: 0; padding: 0.5rem 1rem; cursor: pointer; border-radius: 4px; font: inherit; }
+    button:hover { background: #dc143c; }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    .cart { margin: 0 0 1.5rem; }
+    .status { min-height: 1.2em; }
+    .status.bad { color: #ffb4a8; }
+    .status.ok { color: #b6f0c2; }
+    @media (max-width: 768px) {
+      header { padding: 1rem; align-items: flex-start; flex-direction: column; }
+      .container { flex-direction: column; }
+      nav { width: auto; border-right: 0; border-bottom: 1px solid #333; }
+      main { padding: 1rem; }
+      .listing { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">Federalkey</div>
+    <div class="user-info" id="market-user">Checking session…</div>
+  </header>
+  <div class="crypto-bar">
+    <div>BTC: $91,800</div>
+    <div>ETH: $3,500</div>
+    <div>XMR: $380</div>
+  </div>
+  <div class="container">
+    <nav>
+      <h2>Sections</h2>
+      <ul>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#catalog">Public Key Infrastructure Market</a></li>
+        <li><a href="/">Globe</a></li>
+        <li><a href="https://federalkey.org">Contact</a></li>
+      </ul>
+    </nav>
+    <main>
+      <section class="cart" id="cart">
+        <h3>Shopping cart</h3>
+        <p id="cart-lines">Your cart is empty.</p>
+        <p class="status" id="market-status"></p>
+        <button type="button" id="checkout" disabled>Check out with Stripe</button>
+      </section>
+      <section id="overview">
+        <div class="listings">
+          <article class="listing">
+            <h3>Developer Market Website</h3>
+            <p>Unique Market inspired dark layout.</p>
+          </article>
+          <article class="listing">
+            <h3>API Gateway</h3>
+            <p>Built for microservice architecture.</p>
+          </article>
+          <article class="listing">
+            <h3>System Monitoring Tools</h3>
+            <p>Custom scripts for log parsing, maintenance, and alerts.</p>
+          </article>
+          <article class="listing" id="federalkey">
+            <h3>Cyber-Security Architect</h3>
+            <p>Cloud, on-premise and hybrid solutions.</p>
+          </article>
+        </div>
+      </section>
+      <section id="catalog">
+        <h3>Public Key Infrastructure Market</h3>
+        <div class="listings" id="catalog-list"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/market.js" defer></script>
+</body>
+</html>
