@@ -11,6 +11,17 @@
 import Stripe from "stripe";
 import { BodyLimitError, readBoundedRequestText } from "./boundedBody";
 import {
+  integrationIdentifier,
+  isMarketMetadata,
+  isMarketSku,
+  MARKET_ITEMS,
+  marketCatalog,
+  marketOrigin,
+  marketSkusFromMetadata,
+  parseMarketSkus,
+  type MarketSku,
+} from "./market";
+import {
   getSessionUser,
   getUserById,
   rateLimitOrNull,
@@ -444,6 +455,12 @@ export async function claimPaidCheckoutSessions(env: BillingEnv): Promise<Stripe
         typeof checkout.client_reference_id === "string"
           ? checkout.client_reference_id.trim()
           : "";
+      if (isMarketMetadata(checkout.metadata)) {
+        const recorded = await recordMarketOrder(env, checkout);
+        if (recorded) summary.skipped += 1;
+        else summary.unmatched += 1;
+        continue;
+      }
       if (!/^[a-f0-9]{16,64}$/i.test(ref)) {
         summary.unmatched += 1;
         continue;
@@ -566,6 +583,25 @@ export async function claimCheckoutSession(
       typeof checkout.client_reference_id === "string"
         ? checkout.client_reference_id.trim()
         : "";
+
+    if (isMarketMetadata(checkout.metadata)) {
+      if (!ref || ref !== auth.user.id) {
+        return json(
+          { error: "session_user_mismatch" },
+          { status: 403 },
+          applySecurityHeaders,
+        );
+      }
+      const recorded = await recordMarketOrder(env, checkout);
+      if (!recorded) {
+        return json(
+          { error: "payment_not_complete", market: true },
+          { status: 402 },
+          applySecurityHeaders,
+        );
+      }
+      return json(marketOrderBody(recorded), { status: 200 }, applySecurityHeaders);
+    }
 
     // Critical: paid session may only unlock the user named in client_reference_id
     if (!ref || ref !== auth.user.id) {
@@ -710,6 +746,10 @@ export async function handleStripeWebhook(
     event.type === "checkout.session.async_payment_succeeded"
   ) {
     const checkout = event.data.object as Stripe.Checkout.Session;
+    if (isMarketMetadata(checkout.metadata)) {
+      await recordMarketOrder(env, checkout);
+      return json({ received: true }, { status: 200 }, applySecurityHeaders);
+    }
     const userId =
       typeof checkout.client_reference_id === "string"
         ? checkout.client_reference_id.trim()
@@ -858,6 +898,264 @@ export async function getPaymentStatus(
     { status: 200 },
     applySecurityHeaders,
   );
+}
+
+const MARKET_ORDER_PREFIX = "market:order:";
+const CHECKOUT_SESSION_ID = /^cs_(test_|live_)?[a-zA-Z0-9]{8,200}$/;
+
+type MarketOrderRecord = {
+  userId: string;
+  sessionId: string;
+  skus: MarketSku[];
+  paymentStatus: "paid";
+  amountTotal: number | null;
+  currency: string | null;
+  recordedAt: string;
+};
+
+function marketOrderKey(sessionId: string) {
+  return `${MARKET_ORDER_PREFIX}${sessionId}`;
+}
+
+function marketOrderBody(record: Pick<MarketOrderRecord, "skus" | "amountTotal" | "currency" | "paymentStatus">) {
+  return {
+    paid: record.paymentStatus === "paid",
+    market: true,
+    skus: record.skus,
+    names: record.skus.map((sku) => MARKET_ITEMS[sku].name),
+    amountTotal: record.amountTotal,
+    currency: record.currency,
+  };
+}
+
+async function recordMarketOrder(
+  env: BillingEnv,
+  checkout: Stripe.Checkout.Session,
+): Promise<MarketOrderRecord | null> {
+  if (!env.BILLING_KV || !isMarketMetadata(checkout.metadata)) return null;
+  if (checkout.payment_status !== "paid") return null;
+  const userId =
+    typeof checkout.client_reference_id === "string"
+      ? checkout.client_reference_id.trim()
+      : "";
+  if (!/^[a-f0-9]{16,64}$/i.test(userId)) return null;
+  const record: MarketOrderRecord = {
+    userId,
+    sessionId: checkout.id,
+    skus: marketSkusFromMetadata(checkout.metadata?.skus),
+    paymentStatus: "paid",
+    amountTotal: typeof checkout.amount_total === "number" ? checkout.amount_total : null,
+    currency: typeof checkout.currency === "string" && /^[a-z]{3}$/.test(checkout.currency) ? checkout.currency : null,
+    recordedAt: new Date().toISOString(),
+  };
+  await env.BILLING_KV.put(marketOrderKey(checkout.id), JSON.stringify(record), {
+    expirationTtl: 60 * 60 * 24 * 365,
+  });
+  return record;
+}
+
+/**
+ * Market checkouts are service orders. They must not grant transit or unlimited keys.
+ * Returns not_market when this session is the $20 access product.
+ */
+export async function settleMarketCheckout(
+  env: BillingEnv,
+  checkout: Stripe.Checkout.Session,
+  userId: string,
+): Promise<
+  | { status: "not_market" }
+  | { status: "mismatch" }
+  | { status: "unpaid" }
+  | { status: "paid"; body: ReturnType<typeof marketOrderBody> }
+> {
+  if (!isMarketMetadata(checkout.metadata)) return { status: "not_market" };
+  const ref =
+    typeof checkout.client_reference_id === "string"
+      ? checkout.client_reference_id.trim()
+      : "";
+  if (!ref || ref !== userId) return { status: "mismatch" };
+  const recorded = await recordMarketOrder(env, checkout);
+  if (!recorded) return { status: "unpaid" };
+  return { status: "paid", body: marketOrderBody(recorded) };
+}
+
+export async function getMarketCatalog(
+  request: Request,
+  env: BillingEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const limited = await rateLimitDurable(
+    env,
+    `billing:market-catalog:${clientIp(request)}`,
+    60,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
+  return json({ items: marketCatalog() }, { status: 200 }, applySecurityHeaders);
+}
+
+export async function createMarketCheckout(
+  request: Request,
+  env: BillingEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const limited = await rateLimitDurable(
+    env,
+    `billing:market-checkout:${clientIp(request)}`,
+    10,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
+
+  const origin = marketOrigin(request);
+  if (!origin) {
+    return json(
+      { error: "origin_rejected", message: "Checkout is only available on Globe." },
+      { status: 403 },
+      applySecurityHeaders,
+    );
+  }
+
+  const session = await getSessionUser(request, env);
+  if (!session) {
+    return json(
+      { error: "login_required", message: "Log in before starting checkout." },
+      { status: 401 },
+      applySecurityHeaders,
+    );
+  }
+
+  const secret = env.STRIPE_SECRET_KEY?.trim();
+  if (!secret || !env.BILLING_KV) {
+    return json(
+      { error: "stripe_not_configured", message: "Stripe is not configured on this deployment." },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+
+  let skus: MarketSku[] | null = null;
+  try {
+    skus = parseMarketSkus(await readJsonBody(request, 4_096));
+  } catch (error) {
+    if (error instanceof BodyLimitError) return bodyTooLargeResponse(applySecurityHeaders);
+    skus = null;
+  }
+  if (!skus) {
+    return json({ error: "items_required" }, { status: 400 }, applySecurityHeaders);
+  }
+
+  try {
+    const stripe = createStripeClient(secret);
+    const checkout = await stripe.checkout.sessions.create({
+      mode: "payment",
+      client_reference_id: session.user.id,
+      success_url: `${origin}/market?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${origin}/market?checkout=cancel`,
+      metadata: {
+        globe_product: "market",
+        skus: skus.join(","),
+      },
+      line_items: skus.map((sku) => ({
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: MARKET_ITEMS[sku].amountCents,
+          product_data: { name: MARKET_ITEMS[sku].name },
+        },
+      })),
+      integration_identifier: integrationIdentifier(),
+    });
+    if (!checkout.url || !isAllowedStripePaymentUrl(checkout.url)) {
+      return json(
+        { error: "checkout_unavailable", message: "Stripe did not return a checkout URL." },
+        { status: 502 },
+        applySecurityHeaders,
+      );
+    }
+    return json({ url: checkout.url }, { status: 200 }, applySecurityHeaders);
+  } catch {
+    return json(
+      { error: "checkout_failed", message: "Stripe checkout did not open." },
+      { status: 502 },
+      applySecurityHeaders,
+    );
+  }
+}
+
+export async function getMarketOrder(
+  request: Request,
+  env: BillingEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const limited = await rateLimitDurable(
+    env,
+    `billing:market-order:${clientIp(request)}`,
+    20,
+    60_000,
+    applySecurityHeaders,
+  );
+  if (limited) return limited;
+
+  const auth = await getSessionUser(request, env);
+  if (!auth) {
+    return json(
+      { error: "login_required", message: "Log in before reading an order." },
+      { status: 401 },
+      applySecurityHeaders,
+    );
+  }
+  if (!env.BILLING_KV) {
+    return json({ error: "kv_missing" }, { status: 503 }, applySecurityHeaders);
+  }
+
+  const sessionId = new URL(request.url).searchParams.get("session_id")?.trim() || "";
+  if (!CHECKOUT_SESSION_ID.test(sessionId)) {
+    return json({ error: "session_id_required" }, { status: 400 }, applySecurityHeaders);
+  }
+
+  const stored = await env.BILLING_KV.get(marketOrderKey(sessionId));
+  if (stored) {
+    try {
+      const record = JSON.parse(stored) as MarketOrderRecord;
+      if (record.userId !== auth.user.id || record.sessionId !== sessionId) {
+        return json({ error: "session_user_mismatch" }, { status: 403 }, applySecurityHeaders);
+      }
+      return json(marketOrderBody(record), { status: 200 }, applySecurityHeaders);
+    } catch {
+      return json({ error: "order_unreadable" }, { status: 502 }, applySecurityHeaders);
+    }
+  }
+
+  const secret = env.STRIPE_SECRET_KEY?.trim();
+  if (!secret) {
+    return json(
+      { error: "stripe_not_configured" },
+      { status: 503 },
+      applySecurityHeaders,
+    );
+  }
+
+  try {
+    const stripe = createStripeClient(secret);
+    const checkout = await stripe.checkout.sessions.retrieve(sessionId);
+    const ref =
+      typeof checkout.client_reference_id === "string"
+        ? checkout.client_reference_id.trim()
+        : "";
+    if (!isMarketMetadata(checkout.metadata) || ref !== auth.user.id) {
+      return json({ error: "session_user_mismatch" }, { status: 403 }, applySecurityHeaders);
+    }
+    const recorded = await recordMarketOrder(env, checkout);
+    if (!recorded) {
+      return json({ error: "payment_not_complete", market: true, paid: false }, { status: 402 }, applySecurityHeaders);
+    }
+    return json(marketOrderBody(recorded), { status: 200 }, applySecurityHeaders);
+  } catch {
+    return json({ error: "order_unavailable" }, { status: 502 }, applySecurityHeaders);
+  }
 }
 
 // Re-export transit gate from auth (single source of truth)
