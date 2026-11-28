@@ -117,7 +117,7 @@ export function AdminContainment({ elevated }: { elevated: boolean }) {
     <section id="admin-containment" aria-label="Live containment">
       <div className="auth-section-title">Live containment</div>
       <p className="auth-modal-copy">
-        <a href="/admin/purple-team">Open Purple Team</a>
+        <a href="/admin/purple-team/operations">Open Purple Team</a>
       </p>
       {elevated ? <>
         <div className="auth-modal-actions auth-row">
