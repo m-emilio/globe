@@ -8656,6 +8656,13 @@ button[aria-busy="true"],
   color: #ffd08a !important;
 }
 
+.red-team-menu-item {
+  /* Red identity for the Red Team Recon link; same box model as other rows */
+  border-bottom-color: rgba(255, 59, 79, 0.45) !important;
+  color: #ff6b7a !important;
+  font-weight: 700;
+}
+
 .admin-modal .auth-section-title {
   color: #ffd08a;
 }

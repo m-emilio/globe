@@ -4957,7 +4957,8 @@ const worker = {
       return withoutResponseBodyForHead(request, await adminPurpleTeamPage(request, env, applySecurityHeaders));
     }
 
-    if (url.pathname === RECON_PATH || url.pathname === RECON_PATH + "/") {
+    // /admin/red-team is a short alias for the Red Team Recon page; the original URL keeps working.
+    if (url.pathname === RECON_PATH || url.pathname === RECON_PATH + "/" || url.pathname === "/admin/red-team" || url.pathname === "/admin/red-team/") {
       if (!isReadApiMethod(request) && request.method !== "POST") return methodNotAllowedResponse("GET, HEAD, POST");
       return withoutResponseBodyForHead(request, await adminPurpleTeamRecon(request, env, applySecurityHeaders));
     }

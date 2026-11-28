@@ -894,15 +894,15 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
               </a>
             ) : null}
             {authUser && isAdmin ? (
-              // Purple Team requires admin authorization on the server.
+              // Red Team Recon requires admin authorization on the server.
               <a
                 href="/admin/purple-team/recon"
-                className="menu-item admin-menu-item purple-team-menu-item"
+                className="menu-item admin-menu-item red-team-menu-item"
                 target="_blank"
                 rel="noopener noreferrer"
-                title="Public DNS and certificate recon"
+                title="Red team attack-surface recon (authorized targets only)"
               >
-                Purple Team
+                Red Team Recon
               </a>
             ) : null}
             <a

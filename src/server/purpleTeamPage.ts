@@ -6,10 +6,46 @@ type PurpleTeamPage = {
   content: string;
   status?: number;
   certificateInspector?: boolean;
+  theme?: "red";
 };
 
+// Opt-in red identity for the Red Team Recon page. Other pages never pass a theme, so their output is unchanged.
+const RED_THEME_CSS = `
+      :root{--bg:#120709;--panel:#1e0d11;--line:#5a2029;--text:#fff1f1;--muted:#e6bcc0;--link:#ff9ea6;--green:#8fe3b8;--warn:#ffc277;--red:#ff3b4f}
+      body{background:radial-gradient(ellipse at top left,#4f0f1a,transparent 38rem),var(--bg)}
+      header.heading{border-bottom:3px solid #e5142f;padding-bottom:.9rem}
+      h1{color:var(--red)}
+      h1::before{content:"";display:inline-block;width:.7rem;height:.7rem;margin-right:.55rem;border-radius:50%;background:#ff1f3d;box-shadow:0 0 .8rem #ff1f3d;vertical-align:middle}
+      .panel,.notice{border-color:var(--line);border-left:4px solid #c8102e}
+      .query input,.certificate-form textarea{border-color:#8c2a36}
+      .names li{background:#3a1219}
+      button{border-color:#e5142f;background:#e5142f;color:#fff}
+      button:hover{background:#ff3b4f;border-color:#ff3b4f}
+      .secondary{background:#3a1219;color:var(--text);border-color:#8c2a36}
+      .secondary:hover{background:#561b25}
+      .save-option input{accent-color:#ff3b4f}
+      :focus-visible{outline-color:#ffc2c8}
+      .authorized{border:1px solid #ff3b4f;border-left-width:6px;background:#2b0b11;color:var(--text)}
+      .authorized strong{color:#ff7a88}
+      .sev{display:inline-block;min-width:4.6rem;text-align:center;border-radius:.3rem;padding:.06rem .5rem;font-size:.72rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#fff}
+      .sev-critical{background:#b3001b}.sev-high{background:#d9341f}.sev-medium{background:#a85b00}.sev-low{background:#6b5a14}.sev-info{background:#3b3b46}
+      .sev-none{background:#1f6b4a}
+      .rt-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(8rem,1fr));gap:.6rem;margin:.8rem 0}
+      .rt-metrics div{border-left:3px solid #c8102e;padding:.15rem .65rem;background:#170a0d}
+      .rt-metrics dt{font-size:.8rem;color:var(--muted)}
+      .rt-metrics dd{margin:0;font-size:1.5rem;font-weight:800;font-variant-numeric:tabular-nums}
+      .rt-list{list-style:none;padding:0;margin:.6rem 0 0}
+      .rt-list>li{border-top:1px solid var(--line);padding:.75rem 0;overflow-wrap:anywhere}
+      .rt-list h3{display:inline;margin:0 0 0 .5rem;font-size:1rem}
+      .rt-tag{font-size:.75rem;color:var(--muted);margin-left:.4rem}
+      .export-row{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:.6rem}
+      @media print{
+        :root{color-scheme:light;--bg:#fff;--panel:#fff;--line:#d8c6c8;--text:#201014;--muted:#4a3a3d;--link:#8a1020;--warn:#7c460a;--red:#a00018}
+        body{background:#fff}.names li{background:#fff}.rt-metrics div{background:#fff}.authorized{background:#fff}
+      }`;
+
 export function purpleTeamPage(
-  { title, navigation, content, status = 200, certificateInspector = false }: PurpleTeamPage,
+  { title, navigation, content, status = 200, certificateInspector = false, theme }: PurpleTeamPage,
   applySecurityHeaders: (headers: Headers) => void,
 ): Response {
   const headers = new Headers({
@@ -92,10 +128,10 @@ export function purpleTeamPage(
         .names{max-height:none;overflow:visible}.names li{background:#fff}
         nav,form{display:none}
       }
-    </style></head><body><main>
+    ${theme === "red" ? RED_THEME_CSS : ""}</style></head><body><main>
       <header class="heading">
         <h1>${escapeHtml(title)}</h1>
-        <nav aria-label="Purple Team navigation">${navigation}</nav>
+        <nav aria-label="${theme === "red" ? "Red Team" : "Purple Team"} navigation">${navigation}</nav>
       </header>
       ${content}
     </main>${certificateInspector ? '<script type="module" src="/dist/reconCertificate.js?v=1"></script>' : ""}</body></html>`, { status, headers });
