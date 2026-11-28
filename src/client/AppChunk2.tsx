@@ -913,12 +913,7 @@ export function AppChunk2({ b }: { b: GlobeApi }) {
             >
               Webmail
             </a>
-            <a
-              href="https://federalkeymarketplace.page.gd"
-              className="menu-item"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
+            <a href="/market" className="menu-item">
               Market
             </a>
           </div>
