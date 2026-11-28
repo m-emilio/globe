@@ -70,6 +70,9 @@ import { getCloudflareClientIp, readConnectionMetadata } from "./connectionMetad
 import { inspectMailPolicies, normalizeDkimSelector } from "./purpleTeamMail";
 import { inspectPurpleFindings } from "./purpleTeamFindings";
 import { reconCertificatePage, reconPage, type ReconPageData } from "./purpleTeamReconPage";
+import {
+  assessRed, exposureTargets, inspectWebHeaders, lookupExposure, lookupTakeoverHints, redReportResponse, type RedExtras,
+} from "./redTeamRecon";
 import { globeHeaderFindings } from "./globeHeaderFindings";
 import type { ToolFinding, ToolResult } from "./purpleTeamTools";
 import { operationsPage, type OperationsPageData } from "./securityOperationsPage";
@@ -591,6 +594,11 @@ export async function adminPurpleTeamRecon(
       if ((id || download) && !history.selected) {
         return render({ domain, notice: "Saved snapshot unavailable.", status: 404 });
       }
+      const exportFormat = url.searchParams.get("format");
+      if (history.selected && (exportFormat === "md" || exportFormat === "json")) {
+        const saved = history.selected;
+        return redReportResponse(exportFormat, domain, assessRed(domain, saved.results, {}, saved.at), saved.results, {}, applySecurityHeaders);
+      }
       return render({
         domain, snapshot: history.selected ?? undefined, results: history.selected?.results,
         previous: history.previous, entries: history.entries, download,
@@ -613,13 +621,19 @@ export async function adminPurpleTeamRecon(
       : json({ error: "invalid_form" }, { status: 400 }, applySecurityHeaders);
   }
   const input = fields.get("domain") ?? "";
+  const formatField = fields.get("format");
+  const format = formatField === "md" || formatField === "json" ? formatField : null;
   const address = parseReconAddress(input);
   if (address) {
     const limited = await rateLimitDurable(env, "purple:recon:" + gate.user.id, 6, 60_000, applySecurityHeaders);
     if (limited) return limited;
     const ipResults = await lookupIpRecon(address);
     const unavailable = address.isPublic && !ipResults.routing && ipResults.names === null;
-    return render({ domain: address.value, ipResults, status: unavailable ? 503 : 200 });
+    const ipExtras: RedExtras = address.isPublic ? { exposure: await lookupExposure([address.value]) } : {};
+    if (!unavailable && (format === "md" || format === "json")) {
+      return redReportResponse(format, address.value, assessRed(address.value, undefined, ipExtras), undefined, ipExtras, applySecurityHeaders);
+    }
+    return render({ domain: address.value, ipResults, extras: ipExtras, status: unavailable ? 503 : 200 });
   }
   const domain = normalizeReconDomain(input);
   if (!domain) {
@@ -642,11 +656,20 @@ export async function adminPurpleTeamRecon(
     domain, results, notice: "Public sources are unavailable. Retry to collect a snapshot.", status: 503,
   });
   results.purpleFindings = await inspectPurpleFindings(domain, results.dns, results.mail?.dkim ?? null);
+  const targets = exposureTargets(results.dns);
+  const [exposure, takeover, headers] = await Promise.all([
+    targets.length ? lookupExposure(targets) : Promise.resolve([]),
+    results.certificates ? lookupTakeoverHints(domain, results.certificates.names).catch(() => null) : Promise.resolve(null),
+    fields.get("headers") === "1" ? inspectWebHeaders(domain) : Promise.resolve(undefined),
+  ]);
+  const extras: RedExtras = { exposure, takeover, ...(headers ? { headers } : {}) };
+  if (format) return redReportResponse(format, domain, assessRed(domain, results, extras), results, extras, applySecurityHeaders);
+  const renderRed = (page: ReconPageData) => render({ ...page, extras });
   try {
     if (fields.get("save") === "1") {
       const actor = accountHash(gate.user.fingerprint, readLogPepper(env)) || userSeal(gate.user.id);
       const history = await store(domain).saveRecon(results, actor);
-      if (!history) return render({ domain, results, notice: "The snapshot is too large to save." });
+      if (!history) return renderRed({ domain, results, notice: "The snapshot is too large to save." });
       let notice: string | undefined;
       if (history.selected) {
         try {
@@ -655,14 +678,14 @@ export async function adminPurpleTeamRecon(
           notice = "Snapshot saved. The saved domain list could not be updated.";
         }
       }
-      return render({
+      return renderRed({
         domain, results, notice, snapshot: history.selected ?? undefined, previous: history.previous, entries: history.entries,
       });
     }
     const history = await store(domain).reconHistory();
-    return render({ domain, results, previous: history.selected, entries: history.entries });
+    return renderRed({ domain, results, previous: history.selected, entries: history.entries });
   } catch {
-    return render({ domain, results, notice: "Snapshot history is unavailable." });
+    return renderRed({ domain, results, notice: "Snapshot history is unavailable." });
   }
 }
 
