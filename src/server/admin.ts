@@ -53,7 +53,13 @@ import {
   type AuthEnv,
   type UserRecord,
 } from "./auth";
-import { claimPaidCheckoutSessions, grantPaidToUser, readUserEntitlement, type BillingEnv } from "./billing";
+import {
+  claimPaidCheckoutSessions,
+  grantPaidToUser,
+  readUserEntitlement,
+  settleMarketCheckout,
+  type BillingEnv,
+} from "./billing";
 import {
   b64ToFixedBytes,
   decodeStoredPublicKey,
@@ -2013,6 +2019,35 @@ export async function adminClaimSession(
     }
 
     const target = named;
+    const settled = await settleMarketCheckout(env, checkout, target.id);
+    if (settled.status === "mismatch") {
+      return json({ error: "session_user_mismatch" }, { status: 403 }, applySecurityHeaders);
+    }
+    if (settled.status === "unpaid") {
+      return json(
+        { error: "payment_not_complete", market: true },
+        { status: 402 },
+        applySecurityHeaders,
+      );
+    }
+    if (settled.status === "paid") {
+      await writeAudit(env, {
+        at: new Date().toISOString(),
+        adminUserId: gate.user.id,
+        adminFingerprint: gate.user.fingerprint,
+        action: "admin_claim_session",
+        targetUserId: target.id,
+        targetFingerprint: target.fingerprint,
+        detail: `market session ${sessionId}`,
+        ip: clientIp(request),
+        ok: true,
+      });
+      return json(
+        { ok: true, sessionId, ...settled.body },
+        { status: 200 },
+        applySecurityHeaders,
+      );
+    }
     const record = await grantPaidToUser(env, {
       userId: target.id,
       sessionId: checkout.id,
