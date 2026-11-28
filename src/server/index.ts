@@ -4,7 +4,7 @@ import { FeedConnectionSignals } from "./feedConnectionSignals";
 import { closeSessionSockets, validSessionReference } from "./sessionContainment";
 import { RECON_CERTIFICATE_PATH, RECON_PATH } from "./purpleTeamRecon";
 import { getCloudflareClientIp as getClientIp, limitApiText, readConnectionMetadata } from "./connectionMetadata";
-import { OPERATIONS_PATH } from "./securityOperationsModel";
+import { OPERATIONS_PATH, PURPLE_TEAM_ROOT } from "./securityOperationsModel";
 import {
   adoptSessionToken,
   createAuthChallenge,
@@ -48,6 +48,8 @@ import {
   adminRevokeUnlimitedKeys,
   adminStatus,
   retiredPurpleTeamRoute,
+  adminPurpleTeamPage,
+  adminPurpleTeamCt,
 } from "./admin";
 import { CANARY_PATH, purpleTeamDirectory } from "./purpleTeamDirectory";
 import {
@@ -4941,14 +4943,26 @@ const worker = {
       return withoutResponseBodyForHead(request, await adminPurpleTeamRecon(request, env, applySecurityHeaders));
     }
 
-    const purpleTeamHome = url.pathname === OPERATIONS_PATH || url.pathname === OPERATIONS_PATH + "/";
-    if (url.pathname === RECON_PATH || url.pathname === RECON_PATH + "/" ||
-      (purpleTeamHome && isReadApiMethod(request) && url.searchParams.has("t") && !url.searchParams.has("host"))) {
+    // Admin-only CT subdomain lookup used by the Purple Team Recon console
+    // (Cert Spotter, then crt.sh; cached in BILLING_KV).
+    if (url.pathname === PURPLE_TEAM_ROOT + "/ct") {
+      if (!isReadApiMethod(request)) return methodNotAllowedResponse();
+      return withoutResponseBodyForHead(request, await adminPurpleTeamCt(request, env, applySecurityHeaders));
+    }
+
+    const purpleTeamRoot = url.pathname === PURPLE_TEAM_ROOT || url.pathname === PURPLE_TEAM_ROOT + "/";
+    // GET/HEAD /admin/purple-team: Purple Team Recon console. Old Security
+    // Operations links (?host=… / ?report=…) keep working.
+    if (purpleTeamRoot && isReadApiMethod(request) && !url.searchParams.has("host") && !url.searchParams.has("report")) {
+      return withoutResponseBodyForHead(request, await adminPurpleTeamPage(request, env, applySecurityHeaders));
+    }
+
+    if (url.pathname === RECON_PATH || url.pathname === RECON_PATH + "/") {
       if (!isReadApiMethod(request) && request.method !== "POST") return methodNotAllowedResponse("GET, HEAD, POST");
       return withoutResponseBodyForHead(request, await adminPurpleTeamRecon(request, env, applySecurityHeaders));
     }
 
-    if (purpleTeamHome || url.pathname === OPERATIONS_PATH + "/operations") {
+    if (purpleTeamRoot || url.pathname === OPERATIONS_PATH || url.pathname === OPERATIONS_PATH + "/") {
       if (!isReadApiMethod(request) && request.method !== "POST") return methodNotAllowedResponse("GET, HEAD, POST");
       return withoutResponseBodyForHead(
         request,
@@ -4956,11 +4970,11 @@ const worker = {
       );
     }
 
-    if (url.pathname.startsWith(OPERATIONS_PATH + "/")) {
-      const tool = url.pathname.slice(OPERATIONS_PATH.length + 1).replace(/\/$/, "");
-      if (["osv", "vulnerabilities", "assessment", "dependency-audit", "ct"].includes(tool)) {
+    if (url.pathname.startsWith(PURPLE_TEAM_ROOT + "/")) {
+      const tool = url.pathname.slice(PURPLE_TEAM_ROOT.length + 1).replace(/\/$/, "");
+      if (["osv", "vulnerabilities", "assessment", "dependency-audit"].includes(tool)) {
         return withoutResponseBodyForHead(request,
-          await retiredPurpleTeamRoute(request, env, applySecurityHeaders, tool !== "ct"));
+          await retiredPurpleTeamRoute(request, env, applySecurityHeaders, true));
       }
     }
 

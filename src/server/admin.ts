@@ -75,6 +75,7 @@ import type { ToolFinding, ToolResult } from "./purpleTeamTools";
 import { operationsPage, type OperationsPageData } from "./securityOperationsPage";
 import { runFeedIsolationDrill, runSessionContainmentDrill } from "./securityOperationsDrills";
 import { detectOperationsAlerts, OPERATIONS_PATH, RECENT_AUDIT_LIMIT, RECENT_LOGIN_LIMIT } from "./securityOperationsModel";
+import { PURPLE_TEAM_CSP, PURPLE_TEAM_HTML } from "./purpleTeamHtml";
 import { validSessionReference } from "./sessionContainment";
 import {
   PQC_LOG_ALG,
@@ -854,6 +855,207 @@ export async function adminSecurityOperations(
   }
   return json({ error: "invalid_tool" }, { status: 400 }, applySecurityHeaders);
 }
+
+/**
+ * GET /admin/purple-team — admin-only Purple Team Recon console (restored).
+ * Requires an allowlisted admin session AND an exact fingerprint allowlist
+ * match. Non-admins get the same 401/403 JSON as the admin API.
+ * The page sets its own CSP (it calls public recon APIs client-side) and is
+ * never cached or indexed.
+ */
+export async function adminPurpleTeamPage(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  const fpDenied = await rejectUnlessAllowlistedFingerprint(
+    request,
+    env,
+    gate.user,
+    applySecurityHeaders,
+  );
+  if (fpDenied) return fpDenied;
+
+  const headers = new Headers({
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "private, no-store",
+    vary: "Cookie",
+    "x-robots-tag": "noindex, nofollow, noarchive",
+    "content-security-policy": PURPLE_TEAM_CSP,
+    "referrer-policy": "no-referrer",
+  });
+  // Fills the remaining site security headers without overriding the CSP above.
+  applySecurityHeaders?.(headers);
+  return new Response(PURPLE_TEAM_HTML, { status: 200, headers });
+}
+
+const PURPLE_CT_DOMAIN_RE =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
+const PURPLE_CT_CACHE_TTL_SEC = 3600;
+const PURPLE_CT_MAX_NAMES = 5000;
+const PURPLE_CT_MAX_PAGES = 3;
+
+type PurpleCtResult = { source: string; names: string[]; partial: boolean };
+
+async function purpleCtFetchJson(url: string, timeoutMs: number): Promise<unknown> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: ctl.signal,
+      headers: { accept: "application/json", "user-agent": "globe-purple-team-ct/1.0" },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function purpleCtNames(list: unknown[], domain: string): string[] {
+  const out = new Set<string>();
+  for (const raw of list) {
+    const n = String(raw ?? "").toLowerCase().trim().replace(/^\*\./, "");
+    if ((n === domain || n.endsWith("." + domain)) && n.length <= 253) out.add(n);
+    if (out.size >= PURPLE_CT_MAX_NAMES) break;
+  }
+  return [...out].sort();
+}
+
+/** Cert Spotter issuances API (paged via ?after=<last id>, a few pages max). */
+async function purpleCtFromCertSpotter(domain: string): Promise<PurpleCtResult> {
+  const names: unknown[] = [];
+  let after = "";
+  let partial = false;
+  for (let page = 0; page < PURPLE_CT_MAX_PAGES; page++) {
+    const url =
+      "https://api.certspotter.com/v1/issuances?domain=" +
+      encodeURIComponent(domain) +
+      "&include_subdomains=true&expand=dns_names" +
+      (after ? "&after=" + encodeURIComponent(after) : "");
+    let rows: unknown;
+    try {
+      rows = await purpleCtFetchJson(url, 12_000);
+    } catch (err) {
+      // 429 / timeout after the first page: keep what we have.
+      if (page > 0) {
+        partial = true;
+        break;
+      }
+      throw err;
+    }
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    for (const row of rows as Array<{ id?: string; dns_names?: unknown[] }>) {
+      for (const n of row?.dns_names ?? []) names.push(n);
+    }
+    const last = (rows[rows.length - 1] as { id?: string } | undefined)?.id;
+    if (!last || String(last) === after) break;
+    after = String(last);
+    if (page === PURPLE_CT_MAX_PAGES - 1) partial = true;
+  }
+  return { source: "Cert Spotter", names: purpleCtNames(names, domain), partial };
+}
+
+/** crt.sh JSON (slow; fallback only). */
+async function purpleCtFromCrtSh(domain: string): Promise<PurpleCtResult> {
+  const rows = await purpleCtFetchJson(
+    "https://crt.sh/?q=" + encodeURIComponent("%." + domain) + "&output=json",
+    20_000,
+  );
+  if (!Array.isArray(rows)) throw new Error("bad crt.sh response");
+  const names: unknown[] = [];
+  for (const row of rows as Array<{ name_value?: string }>) {
+    for (const n of String(row?.name_value ?? "").split("\n")) names.push(n);
+  }
+  return { source: "crt.sh", names: purpleCtNames(names, domain), partial: false };
+}
+
+/**
+ * GET /admin/purple-team/ct?domain=<apex> — admin-gated CT subdomain lookup
+ * used by the recon page when the browser can't reach Cert Spotter directly.
+ * Fixed upstreams only (Cert Spotter, then crt.sh), strict domain validation,
+ * results cached in BILLING_KV for an hour. Not an open proxy.
+ */
+export async function adminPurpleTeamCt(
+  request: Request,
+  env: AdminEnv,
+  applySecurityHeaders?: SecurityHeadersFn,
+): Promise<Response> {
+  const gate = await requireAdminSession(request, env, applySecurityHeaders);
+  if (!gate.ok) return gate.response;
+  const fpDenied = await rejectUnlessAllowlistedFingerprint(
+    request,
+    env,
+    gate.user,
+    applySecurityHeaders,
+  );
+  if (fpDenied) return fpDenied;
+
+  const domain = (new URL(request.url).searchParams.get("domain") || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, "");
+  if (!PURPLE_CT_DOMAIN_RE.test(domain)) {
+    return json(
+      {
+        error: "invalid_domain",
+        message: "Pass ?domain=<registrable domain>, letters/digits/hyphens only.",
+      },
+      { status: 400 },
+      applySecurityHeaders,
+    );
+  }
+
+  const cacheKey = `purple:ct:v1:${domain}`;
+  if (env.BILLING_KV) {
+    try {
+      const hit = await env.BILLING_KV.get(cacheKey);
+      if (hit) {
+        return json({ ...JSON.parse(hit), cached: true }, { status: 200 }, applySecurityHeaders);
+      }
+    } catch {
+      // cache miss on error
+    }
+  }
+
+  const errors: string[] = [];
+  let result: PurpleCtResult | null = null;
+  const sources: Array<[string, (d: string) => Promise<PurpleCtResult>]> = [
+    ["certspotter", purpleCtFromCertSpotter],
+    ["crt.sh", purpleCtFromCrtSh],
+  ];
+  for (const [label, source] of sources) {
+    try {
+      result = await source(domain);
+      break;
+    } catch (err) {
+      const e = err as { name?: string; message?: string };
+      errors.push(`${label}: ${e?.name === "AbortError" ? "timeout" : String(e?.message ?? err).slice(0, 80)}`);
+    }
+  }
+  if (!result) {
+    return json(
+      { error: "upstream_unavailable", message: "No CT source answered.", errors },
+      { status: 502 },
+      applySecurityHeaders,
+    );
+  }
+
+  const payload = { domain, ...result, fetchedAt: new Date().toISOString(), errors };
+  if (env.BILLING_KV) {
+    try {
+      await env.BILLING_KV.put(cacheKey, JSON.stringify(payload), {
+        expirationTtl: PURPLE_CT_CACHE_TTL_SEC,
+      });
+    } catch {
+      // caching is best-effort
+    }
+  }
+  return json({ ...payload, cached: false }, { status: 200 }, applySecurityHeaders);
+}
+
 
 export async function retiredPurpleTeamRoute(
   request: Request,

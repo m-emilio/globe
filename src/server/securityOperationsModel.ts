@@ -1,7 +1,10 @@
 import type { PublicAudit } from "./admin";
 import type { PublicLoginAttempt } from "./loginLog";
 
-export const OPERATIONS_PATH = "/admin/purple-team";
+/** Root of the admin Purple Team area. GET here serves the Purple Team Recon console. */
+export const PURPLE_TEAM_ROOT = "/admin/purple-team";
+/** Security Operations dashboard (moved under the root so the console keeps /admin/purple-team). */
+export const OPERATIONS_PATH = PURPLE_TEAM_ROOT + "/operations";
 export const RECENT_LOGIN_LIMIT = 18;
 export const RECENT_AUDIT_LIMIT = 12;
 export type AlertState = "open" | "acknowledged" | "resolved";
