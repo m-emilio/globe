@@ -54,8 +54,11 @@ import {
 import { CANARY_PATH, purpleTeamDirectory } from "./purpleTeamDirectory";
 import {
   claimCheckoutSession,
+  createMarketCheckout,
   ensureBillingCatalog,
   getAccessStatus,
+  getMarketCatalog,
+  getMarketOrder,
   getPaymentLink,
   getPaymentStatus,
   handleStripeWebhook,
@@ -4985,6 +4988,45 @@ const worker = {
         return methodNotAllowedResponse();
       }
       return ensureBillingCatalog(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/market" || url.pathname === "/market/") {
+      if (!isReadApiMethod(request)) return methodNotAllowedResponse();
+      if (!env.ASSETS) {
+        return withSecurityHeaders(new Response("Not Found", { status: 404 }), request);
+      }
+      const assetUrl = new URL(request.url);
+      assetUrl.pathname = "/market.html";
+      assetUrl.search = "";
+      const asset = await env.ASSETS.fetch(new Request(assetUrl.toString(), { method: "GET" }));
+      const headers = new Headers(asset.headers);
+      headers.set("content-type", "text/html; charset=utf-8");
+      headers.set("cache-control", "no-store");
+      return withoutResponseBodyForHead(
+        request,
+        withSecurityHeaders(new Response(asset.body, { status: asset.status, headers }), request),
+      );
+    }
+
+    if (url.pathname === "/api/billing/market-catalog") {
+      if (!isReadApiMethod(request)) return methodNotAllowedResponse();
+      return withoutResponseBodyForHead(
+        request,
+        await getMarketCatalog(request, env, applySecurityHeaders),
+      );
+    }
+
+    if (url.pathname === "/api/billing/market-checkout") {
+      if (request.method !== "POST") return methodNotAllowedResponse("POST");
+      return createMarketCheckout(request, env, applySecurityHeaders);
+    }
+
+    if (url.pathname === "/api/billing/market-order") {
+      if (!isReadApiMethod(request)) return methodNotAllowedResponse();
+      return withoutResponseBodyForHead(
+        request,
+        await getMarketOrder(request, env, applySecurityHeaders),
+      );
     }
 
     if (url.pathname === "/api/billing/payment-link") {
